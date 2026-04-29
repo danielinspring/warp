@@ -22,6 +22,9 @@ pub struct ApiKeys {
     pub anthropic: Option<String>,
     pub openai: Option<String>,
     pub open_router: Option<String>,
+    pub ollama_base_url: Option<String>,
+    pub ollama_model: Option<String>,
+    pub ollama_api_key: Option<String>,
 }
 
 impl ApiKeys {
@@ -30,6 +33,11 @@ impl ApiKeys {
             || self.anthropic.is_some()
             || self.google.is_some()
             || self.open_router.is_some()
+            || self.has_ollama_configured()
+    }
+
+    pub fn has_ollama_configured(&self) -> bool {
+        self.ollama_base_url.is_some() && self.ollama_model.is_some()
     }
 }
 
@@ -89,6 +97,24 @@ impl ApiKeyManager {
 
     pub fn set_open_router_key(&mut self, key: Option<String>, ctx: &mut ModelContext<Self>) {
         self.keys.open_router = key;
+        ctx.emit(ApiKeyManagerEvent::KeysUpdated);
+        self.write_keys_to_secure_storage(ctx);
+    }
+
+    pub fn set_ollama_base_url(&mut self, url: Option<String>, ctx: &mut ModelContext<Self>) {
+        self.keys.ollama_base_url = url;
+        ctx.emit(ApiKeyManagerEvent::KeysUpdated);
+        self.write_keys_to_secure_storage(ctx);
+    }
+
+    pub fn set_ollama_model(&mut self, model: Option<String>, ctx: &mut ModelContext<Self>) {
+        self.keys.ollama_model = model;
+        ctx.emit(ApiKeyManagerEvent::KeysUpdated);
+        self.write_keys_to_secure_storage(ctx);
+    }
+
+    pub fn set_ollama_api_key(&mut self, key: Option<String>, ctx: &mut ModelContext<Self>) {
+        self.keys.ollama_api_key = key;
         ctx.emit(ApiKeyManagerEvent::KeysUpdated);
         self.write_keys_to_secure_storage(ctx);
     }

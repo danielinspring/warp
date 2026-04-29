@@ -16,7 +16,7 @@ use super::{CloudProvider, CloudProviderSetupError, Result};
 /// Default duration for OIDC identity tokens issued for cloud provider auth.
 /// The AWS CLI doesn't offer a mechanism for refreshing web identity tokens, so we
 /// set this to the current maximum task duration.
-const IDENTITY_TOKEN_DURATION: Duration = Duration::from_hours(3);
+const IDENTITY_TOKEN_DURATION: Duration = Duration::from_secs(3 * 60 * 60);
 
 /// AWS STS audience for Warp Oz OIDC federation.
 const AWS_AUDIENCE: &str = "sts.amazonaws.com";

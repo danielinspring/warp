@@ -1469,6 +1469,7 @@ impl AISettingsPageView {
                 widgets.push(Box::new(CLIAgentWidget::default()));
                 widgets.push(Box::new(ApiKeysWidget::new(ctx)));
                 widgets.push(Box::new(AwsBedrockWidget::new(ctx)));
+                widgets.push(Box::new(OllamaWidget::new(ctx)));
                 widgets.push(Box::new(AgentAttributionWidget::default()));
                 widgets.push(Box::new(OtherAIWidget::default()));
                 if FeatureFlag::AgentModeComputerUse.is_enabled() {
@@ -1509,6 +1510,7 @@ impl AISettingsPageView {
                 }
                 widgets.push(Box::new(ApiKeysWidget::new(ctx)));
                 widgets.push(Box::new(AwsBedrockWidget::new(ctx)));
+                widgets.push(Box::new(OllamaWidget::new(ctx)));
                 widgets.push(Box::new(AgentAttributionWidget::default()));
                 widgets.push(Box::new(OtherAIWidget::default()));
                 if FeatureFlag::AgentModeComputerUse.is_enabled() {
@@ -6733,6 +6735,226 @@ impl SettingsWidget for AwsBedrockWidget {
                 .finish(),
             )
             .with_child(self.render_aws_bedrock_section(appearance, app, is_bedrock_available));
+
+        Container::new(column.finish())
+            .with_margin_bottom(HEADER_PADDING)
+            .finish()
+    }
+}
+
+struct OllamaWidget {
+    base_url_editor: ViewHandle<EditorView>,
+    model_editor: ViewHandle<EditorView>,
+    api_key_editor: ViewHandle<EditorView>,
+}
+
+impl OllamaWidget {
+    fn new(ctx: &mut ViewContext<<Self as SettingsWidget>::View>) -> Self {
+        let keys = ApiKeyManager::as_ref(ctx).keys().clone();
+        let current_url = keys
+            .ollama_base_url
+            .clone()
+            .unwrap_or_else(|| "http://localhost:11434".to_string());
+        let current_model = keys.ollama_model.clone().unwrap_or_default();
+        let current_api_key = keys.ollama_api_key.clone().unwrap_or_default();
+
+        let base_url_editor = ctx.add_typed_action_view(move |ctx| {
+            let appearance = Appearance::as_ref(ctx);
+            let options = SingleLineEditorOptions {
+                is_password: false,
+                text: TextOptions {
+                    font_size_override: Some(appearance.ui_font_size()),
+                    font_family_override: Some(appearance.monospace_font_family()),
+                    text_colors_override: Some(TextColors {
+                        default_color: appearance.theme().active_ui_text_color(),
+                        disabled_color: appearance.theme().disabled_ui_text_color(),
+                        hint_color: appearance.theme().disabled_ui_text_color(),
+                    }),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut editor = EditorView::single_line(options, ctx);
+            editor.set_placeholder_text("http://localhost:11434", ctx);
+            editor.set_buffer_text(&current_url, ctx);
+            editor
+        });
+        ctx.subscribe_to_view(&base_url_editor, |_, editor, event, ctx| {
+            if matches!(event, EditorEvent::Blurred | EditorEvent::Enter) {
+                let text = editor.as_ref(ctx).buffer_text(ctx);
+                let url = (!text.trim().is_empty()).then_some(text);
+                ApiKeyManager::handle(ctx).update(ctx, |mgr, ctx| {
+                    mgr.set_ollama_base_url(url, ctx);
+                });
+            }
+        });
+
+        let model_editor = ctx.add_typed_action_view(move |ctx| {
+            let appearance = Appearance::as_ref(ctx);
+            let options = SingleLineEditorOptions {
+                is_password: false,
+                text: TextOptions {
+                    font_size_override: Some(appearance.ui_font_size()),
+                    font_family_override: Some(appearance.monospace_font_family()),
+                    text_colors_override: Some(TextColors {
+                        default_color: appearance.theme().active_ui_text_color(),
+                        disabled_color: appearance.theme().disabled_ui_text_color(),
+                        hint_color: appearance.theme().disabled_ui_text_color(),
+                    }),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut editor = EditorView::single_line(options, ctx);
+            editor.set_placeholder_text("llama3.2", ctx);
+            if !current_model.is_empty() {
+                editor.set_buffer_text(&current_model, ctx);
+            }
+            editor
+        });
+        ctx.subscribe_to_view(&model_editor, |_, editor, event, ctx| {
+            if matches!(event, EditorEvent::Blurred | EditorEvent::Enter) {
+                let text = editor.as_ref(ctx).buffer_text(ctx);
+                let model = (!text.trim().is_empty()).then_some(text);
+                ApiKeyManager::handle(ctx).update(ctx, |mgr, ctx| {
+                    mgr.set_ollama_model(model, ctx);
+                });
+            }
+        });
+
+        let api_key_editor = ctx.add_typed_action_view(move |ctx| {
+            let appearance = Appearance::as_ref(ctx);
+            let options = SingleLineEditorOptions {
+                is_password: true,
+                text: TextOptions {
+                    font_size_override: Some(appearance.ui_font_size()),
+                    font_family_override: Some(appearance.monospace_font_family()),
+                    text_colors_override: Some(TextColors {
+                        default_color: appearance.theme().active_ui_text_color(),
+                        disabled_color: appearance.theme().disabled_ui_text_color(),
+                        hint_color: appearance.theme().disabled_ui_text_color(),
+                    }),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut editor = EditorView::single_line(options, ctx);
+            editor.set_placeholder_text("(optional, for remote servers)", ctx);
+            if !current_api_key.is_empty() {
+                editor.set_buffer_text(&current_api_key, ctx);
+            }
+            editor
+        });
+        ctx.subscribe_to_view(&api_key_editor, |_, editor, event, ctx| {
+            if matches!(event, EditorEvent::Blurred | EditorEvent::Enter) {
+                let text = editor.as_ref(ctx).buffer_text(ctx);
+                let key = (!text.trim().is_empty()).then_some(text);
+                ApiKeyManager::handle(ctx).update(ctx, |mgr, ctx| {
+                    mgr.set_ollama_api_key(key, ctx);
+                });
+            }
+        });
+
+        Self {
+            base_url_editor,
+            model_editor,
+            api_key_editor,
+        }
+    }
+
+    fn render_ollama_section(&self, appearance: &Appearance, app: &AppContext) -> Box<dyn Element> {
+        fn render_input(
+            appearance: &Appearance,
+            label: &'static str,
+            editor: ViewHandle<EditorView>,
+            app: &AppContext,
+        ) -> Box<dyn Element> {
+            let padding = Some(Coords {
+                top: 10.,
+                bottom: 10.,
+                left: 16.,
+                right: 16.,
+            });
+            let editor_style = UiComponentStyles {
+                padding,
+                background: Some(appearance.theme().surface_2().into()),
+                ..Default::default()
+            };
+            let label =
+                Text::new_inline(label, appearance.ui_font_family(), CONTENT_FONT_SIZE)
+                    .with_color(
+                        styles::header_font_color(true, app).into(),
+                    )
+                    .finish();
+            let input = appearance
+                .ui_builder()
+                .text_input(editor)
+                .with_style(editor_style)
+                .build()
+                .finish();
+            Flex::column()
+                .with_spacing(8.)
+                .with_child(label)
+                .with_child(input)
+                .finish()
+        }
+
+        Flex::column()
+            .with_spacing(16.)
+            .with_child(render_ai_setting_description(
+                "Run AI dialogue against an Ollama server — local (http://localhost:11434) or a remote deployment. Requests go directly to Ollama, so no Warp credits are used. Provide an API key if your remote server requires bearer-token auth.",
+                true,
+                app,
+            ))
+            .with_child(render_input(
+                appearance,
+                "Ollama Base URL",
+                self.base_url_editor.clone(),
+                app,
+            ))
+            .with_child(render_input(
+                appearance,
+                "Model",
+                self.model_editor.clone(),
+                app,
+            ))
+            .with_child(render_input(
+                appearance,
+                "API Key (optional)",
+                self.api_key_editor.clone(),
+                app,
+            ))
+            .finish()
+    }
+}
+
+impl SettingsWidget for OllamaWidget {
+    type View = AISettingsPageView;
+
+    fn search_terms(&self) -> &str {
+        "ollama local model llm inference"
+    }
+
+    fn render(
+        &self,
+        _view: &Self::View,
+        appearance: &Appearance,
+        app: &AppContext,
+    ) -> Box<dyn Element> {
+        let is_any_ai_enabled = AISettings::as_ref(app).is_any_ai_enabled(app);
+
+        let column = Flex::column()
+            .with_child(render_separator(appearance))
+            .with_child(
+                build_sub_header(
+                    appearance,
+                    "Ollama (Local Models)",
+                    Some(styles::header_font_color(is_any_ai_enabled, app)),
+                )
+                .with_padding_bottom(HEADER_PADDING)
+                .finish(),
+            )
+            .with_child(self.render_ollama_section(appearance, app));
 
         Container::new(column.finish())
             .with_margin_bottom(HEADER_PADDING)

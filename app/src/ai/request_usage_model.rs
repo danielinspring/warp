@@ -379,6 +379,11 @@ impl AIRequestUsageModel {
     /// 6. user has BYOK enabled and has provided at least one API key
     /// Use this method as the starting point for AI availability checking.
     pub fn has_any_ai_remaining(&self, ctx: &AppContext) -> bool {
+        // Local Ollama models are always available — no credits needed.
+        if ApiKeyManager::as_ref(ctx).keys().has_ollama_configured() {
+            return true;
+        }
+
         let current_workspace = UserWorkspaces::as_ref(ctx).current_workspace();
 
         let has_base_plan_ai_requests = self.has_requests_remaining();

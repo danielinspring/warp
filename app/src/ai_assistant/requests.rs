@@ -9,7 +9,7 @@ use warp_core::user_preferences::GetUserPreferences as _;
 use warpui::{AppContext, Entity, ModelContext, SingletonEntity};
 
 use crate::{
-    ai::{RequestLimitInfo, RequestUsageInfo},
+    ai::{ollama::OllamaClient, RequestLimitInfo, RequestUsageInfo},
     ai_assistant::utils::{AssistantTranscriptPart, TranscriptPartSubType},
     auth::AuthStateProvider,
     send_telemetry_from_ctx,
@@ -19,6 +19,7 @@ use crate::{
     },
     workspaces::user_workspaces::UserWorkspaces,
 };
+use ::ai::api_keys::ApiKeyManager;
 
 use super::{
     execution_context::WarpAiExecutionContext,
@@ -181,6 +182,15 @@ impl Requests {
         let transcript_part_index = transcript.len();
         let ai_execution_context = self.ai_execution_context.clone();
 
+        // Capture Ollama config before entering the async block.
+        let ollama_config = {
+            let keys = ApiKeyManager::as_ref(ctx).keys();
+            keys.ollama_base_url
+                .clone()
+                .zip(keys.ollama_model.clone())
+                .map(|(url, model)| (url, model, keys.ollama_api_key.clone()))
+        };
+
         let request_in_markdown = markdown_segments_from_text(
             transcript_part_index,
             TranscriptPartSubType::Question,
@@ -190,9 +200,43 @@ impl Requests {
         let future_handle = ctx.spawn(
             async move {
                 let start_time = Utc::now();
-                (start_time, server_api
-                    .generate_dialogue_answer(transcript, request_for_api, ai_execution_context)
-                    .await)
+                let result = if let Some((ollama_url, ollama_model, ollama_api_key)) =
+                    ollama_config
+                {
+                    let client = OllamaClient::new(ollama_url, ollama_api_key);
+                    let mut messages = Vec::with_capacity(transcript.len() * 2 + 1);
+                    for part in &transcript {
+                        messages.push(crate::ai::ollama::ChatMessage {
+                            role: "user".to_string(),
+                            content: part.user.raw.clone(),
+                        });
+                        messages.push(crate::ai::ollama::ChatMessage {
+                            role: "assistant".to_string(),
+                            content: part.assistant.formatted_message.raw.clone(),
+                        });
+                    }
+                    messages.push(crate::ai::ollama::ChatMessage {
+                        role: "user".to_string(),
+                        content: request_for_api,
+                    });
+                    match client.chat(&ollama_model, messages).await {
+                        Ok(answer) => Ok(GenerateDialogueResult::Success {
+                            answer,
+                            truncated: false,
+                            request_limit_info: RequestLimitInfo {
+                                is_unlimited: true,
+                                ..Default::default()
+                            },
+                            transcript_summarized: false,
+                        }),
+                        Err(e) => Err(e),
+                    }
+                } else {
+                    server_api
+                        .generate_dialogue_answer(transcript, request_for_api, ai_execution_context)
+                        .await
+                };
+                (start_time, result)
             },
             move |model, (start_time, response), ctx| {
                 let succeeded = response.is_ok();
