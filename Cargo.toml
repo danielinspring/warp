@@ -30,6 +30,7 @@ publish = false
 [workspace.dependencies]
 # Local workspace crates. This lets us reference them in other crates without specifying a path.
 ai = { path = "crates/ai" }
+local_agent_runtime = { path = "crates/local_agent_runtime" }
 app-installation-detection = { path = "crates/app-installation-detection" }
 asset_cache = { path = "crates/asset_cache" }
 asset_macro = { path = "crates/asset_macro" }

@@ -48,6 +48,8 @@ pub(crate) mod generate_code_review_content;
 pub(crate) mod loading;
 pub mod mcp;
 pub(crate) mod ollama;
+pub(crate) mod local_runtime_bridge;
+pub(crate) mod local_runtime_integration;
 pub mod outline;
 
 pub(crate) use ai::paths;
