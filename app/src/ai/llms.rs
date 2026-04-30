@@ -19,9 +19,23 @@ use crate::{
     workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent},
 };
 
+use ai::api_keys::{ApiKeyManager, ApiKeyManagerEvent, ApiKeys, OllamaConnectionState};
+
 use super::execution_profiles::profiles::AIExecutionProfilesModel;
 
 pub use ai::LLMId;
+
+const OLLAMA_MODEL_ID_PREFIX: &str = "ollama:";
+
+pub fn ollama_model_id(model_name: &str) -> LLMId {
+    format!("{OLLAMA_MODEL_ID_PREFIX}{model_name}").into()
+}
+
+pub fn ollama_model_name_from_id(id: &LLMId) -> Option<&str> {
+    id.as_str()
+        .strip_prefix(OLLAMA_MODEL_ID_PREFIX)
+        .filter(|name| !name.is_empty())
+}
 
 /// Checks if a user's' API key is being used for the given provider.
 /// Returns `true` if BYO API key is enabled and a key exists for the provider.
@@ -89,6 +103,7 @@ pub enum LLMProvider {
     Anthropic,
     Google,
     Xai,
+    Ollama,
     Unknown,
 }
 
@@ -100,6 +115,7 @@ impl LLMProvider {
             LLMProvider::Anthropic => Some(Icon::ClaudeLogo),
             LLMProvider::Google => Some(Icon::GeminiLogo),
             LLMProvider::Xai => None,
+            LLMProvider::Ollama => Some(Icon::Terminal),
             LLMProvider::Unknown => None,
         }
     }
@@ -497,6 +513,7 @@ struct AvailableLLMsUpdate {
 /// use as well as the user's preferred LLM for Agent Mode.
 pub struct LLMPreferences {
     models_by_feature: ModelsByFeature,
+    ollama_agent_models: Option<AvailableLLMs>,
     last_update: Option<AvailableLLMsUpdate>,
     // Stores temporary model overrides for a given terminal view.
     // NOTE: We only store an override if the model selected by the user is different
@@ -508,6 +525,10 @@ pub struct LLMPreferences {
 impl LLMPreferences {
     pub fn new(ctx: &mut ModelContext<Self>) -> Self {
         let models_by_feature = get_cached_models(ctx).unwrap_or_default();
+        let ollama_agent_models = ollama_available_from_config(
+            ApiKeyManager::as_ref(ctx).keys(),
+            ApiKeyManager::as_ref(ctx).ollama_connection_state(),
+        );
 
         ctx.subscribe_to_model(&NetworkStatus::handle(ctx), |me, event, ctx| {
             if let NetworkStatusEvent::NetworkStatusChanged {
@@ -534,10 +555,20 @@ impl LLMPreferences {
             }
         });
 
+        ctx.subscribe_to_model(
+            &ApiKeyManager::handle(ctx),
+            |me, event: &ApiKeyManagerEvent, ctx| {
+                if matches!(event, ApiKeyManagerEvent::KeysUpdated) {
+                    me.refresh_ollama_agent_models(ctx);
+                }
+            },
+        );
+
         let base_llm_for_terminal_view = HashMap::new();
 
         let me = Self {
             models_by_feature,
+            ollama_agent_models,
             last_update: None,
             base_llm_for_terminal_view,
         };
@@ -567,6 +598,10 @@ impl LLMPreferences {
         app: &AppContext,
         terminal_view_id: Option<EntityId>,
     ) -> &LLMInfo {
+        if let Some(ollama_models) = &self.ollama_agent_models {
+            return ollama_models.default_llm_info();
+        }
+
         if let Some(terminal_view_id) = terminal_view_id {
             let raw_override = self.base_llm_for_terminal_view.get(&terminal_view_id);
             if let Some(llm_id) = raw_override {
@@ -612,12 +647,21 @@ impl LLMPreferences {
 
     /// Returns the set of LLMs available for Agent Mode use.
     pub fn get_base_llm_choices_for_agent_mode(&self) -> impl Iterator<Item = &LLMInfo> {
+        let ollama_choices = self
+            .ollama_agent_models
+            .as_ref()
+            .into_iter()
+            .flat_map(|models| models.choices.iter());
+
         // Don't show admin-disabled models in the dropdown
-        self.models_by_feature
+        let server_choices = self
+            .models_by_feature
             .agent_mode
             .choices
             .iter()
-            .filter(|llm| !matches!(llm.disable_reason, Some(DisableReason::AdminDisabled)))
+            .filter(|llm| !matches!(llm.disable_reason, Some(DisableReason::AdminDisabled)));
+
+        ollama_choices.chain(server_choices)
     }
 
     /// Returns the set of LLMs available for coding.
@@ -704,7 +748,10 @@ impl LLMPreferences {
 
     /// Returns metadata about an LLM, if the client knows about it.
     pub fn get_llm_info(&self, id: &LLMId) -> Option<&LLMInfo> {
-        self.models_by_feature.info_for_id(id)
+        self.ollama_agent_models
+            .as_ref()
+            .and_then(|models| models.info_for_id(id))
+            .or_else(|| self.models_by_feature.info_for_id(id))
     }
 
     /// Returns the default base model as a fallback.
@@ -738,6 +785,20 @@ impl LLMPreferences {
         terminal_view_id: EntityId,
         ctx: &mut ModelContext<Self>,
     ) {
+        if let Some(ollama_model) = ollama_model_name_from_id(preferred_llm_id) {
+            ApiKeyManager::handle(ctx).update(ctx, |manager, ctx| {
+                manager.set_ollama_model(Some(ollama_model.to_string()), ctx);
+            });
+            self.refresh_ollama_agent_models(ctx);
+            ctx.emit(LLMPreferencesEvent::UpdatedActiveAgentModeLLM);
+            return;
+        } else if self.ollama_agent_models.is_some() {
+            ApiKeyManager::handle(ctx).update(ctx, |manager, ctx| {
+                manager.set_ollama_model(None, ctx);
+            });
+            self.refresh_ollama_agent_models(ctx);
+        }
+
         let profile =
             AIExecutionProfilesModel::as_ref(ctx).active_profile(Some(terminal_view_id), ctx);
 
@@ -905,6 +966,16 @@ impl LLMPreferences {
         }
     }
 
+    fn refresh_ollama_agent_models(&mut self, ctx: &mut ModelContext<Self>) {
+        let manager = ApiKeyManager::as_ref(ctx);
+        let updated =
+            ollama_available_from_config(manager.keys(), manager.ollama_connection_state());
+        if self.ollama_agent_models != updated {
+            self.ollama_agent_models = updated;
+            ctx.emit(LLMPreferencesEvent::UpdatedAvailableLLMs);
+        }
+    }
+
     fn on_server_update(&mut self, update: ModelsByFeature, ctx: &mut ModelContext<Self>) {
         let has_existing_persisted_config = get_cached_models(ctx).is_some();
 
@@ -1047,6 +1118,59 @@ fn get_new_agent_mode_choices(
         .filter(|info| !old_ids.contains(&info.id))
         .cloned()
         .collect()
+}
+
+fn ollama_available_from_config(
+    keys: &ApiKeys,
+    connection_state: &OllamaConnectionState,
+) -> Option<AvailableLLMs> {
+    let selected_model = keys
+        .ollama_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())?;
+    keys.ollama_base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())?;
+
+    let mut model_names = match connection_state {
+        OllamaConnectionState::Connected { models } => models.clone(),
+        OllamaConnectionState::Untested
+        | OllamaConnectionState::Testing
+        | OllamaConnectionState::Failed { .. } => Vec::new(),
+    };
+
+    if !model_names.iter().any(|model| model == selected_model) {
+        model_names.insert(0, selected_model.to_string());
+    }
+
+    let choices = model_names.into_iter().map(ollama_llm_info).collect();
+    Some(AvailableLLMs {
+        default_id: ollama_model_id(selected_model),
+        choices,
+        preferred_codex_model_id: None,
+    })
+}
+
+fn ollama_llm_info(model_name: String) -> LLMInfo {
+    LLMInfo {
+        display_name: format!("{model_name} (Ollama)"),
+        base_model_name: model_name.clone(),
+        id: ollama_model_id(&model_name),
+        reasoning_level: None,
+        usage_metadata: LLMUsageMetadata {
+            request_multiplier: 1,
+            credit_multiplier: Some(0.),
+        },
+        description: None,
+        disable_reason: None,
+        vision_supported: false,
+        spec: None,
+        provider: LLMProvider::Ollama,
+        host_configs: HashMap::new(),
+        discount_percentage: None,
+    }
 }
 
 /// Gets the last cached LLM metadata.

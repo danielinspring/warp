@@ -11,6 +11,7 @@ use crate::ai::execution_profiles::profiles::{
 use crate::ai::execution_profiles::{ActionPermission, WriteToPtyPermission};
 use crate::ai::llms::{LLMId, LLMPreferences, LLMPreferencesEvent};
 use crate::ai::mcp::TemplatableMCPServerManager;
+use crate::ai::ollama::OllamaClient;
 use crate::ai::paths::host_native_absolute_path;
 use crate::auth::auth_manager::{AuthManager, LoginGatedFeature};
 use crate::auth::auth_view_modal::AuthViewVariant;
@@ -42,7 +43,7 @@ use crate::view_components::{
     FilterableDropdown, SubmittableTextInput, SubmittableTextInputEvent,
 };
 use crate::workspaces::user_workspaces::UserWorkspacesEvent;
-use ::ai::api_keys::{ApiKeyManager, ApiKeys};
+use ::ai::api_keys::{ApiKeyManager, ApiKeyManagerEvent, ApiKeys, OllamaConnectionState};
 use enum_iterator::all;
 use itertools::Itertools;
 use regex::Regex;
@@ -2112,6 +2113,7 @@ pub enum AISettingsPageAction {
     ToggleAwsBedrockAutoLogin,
     ToggleAwsBedrockCredentialsEnabled,
     RefreshAwsBedrockCredentials,
+    TestOllamaConnection,
     ToggleCloudAgentComputerUse,
     ToggleFileBasedMcp,
     ToggleIncludeAgentCommandsInHistory,
@@ -2774,6 +2776,61 @@ impl TypedActionView for AISettingsPageView {
                 ApiKeyManager::handle(ctx).update(ctx, |manager, ctx| {
                     drop(refresh_aws_credentials(manager, ctx));
                 });
+                ctx.notify();
+            }
+            AISettingsPageAction::TestOllamaConnection => {
+                let keys = ApiKeyManager::as_ref(ctx).keys().clone();
+                let base_url = keys
+                    .ollama_base_url
+                    .filter(|url| !url.trim().is_empty())
+                    .unwrap_or_else(|| "http://localhost:11434".to_string());
+                let selected_model = keys
+                    .ollama_model
+                    .map(|model| model.trim().to_string())
+                    .filter(|model| !model.is_empty());
+                let api_key = keys
+                    .ollama_api_key
+                    .map(|key| key.trim().to_string())
+                    .filter(|key| !key.is_empty());
+
+                ApiKeyManager::handle(ctx).update(ctx, |manager, ctx| {
+                    manager.set_ollama_base_url(Some(base_url.clone()), ctx);
+                    manager.set_ollama_model(selected_model.clone(), ctx);
+                    manager.set_ollama_api_key(api_key.clone(), ctx);
+                    manager.set_ollama_connection_state(OllamaConnectionState::Testing, ctx);
+                });
+
+                ctx.spawn(
+                    async move {
+                        let client = OllamaClient::new(base_url, api_key);
+                        client.list_models().await
+                    },
+                    move |_, result, ctx| {
+                        ApiKeyManager::handle(ctx).update(ctx, |manager, ctx| match result {
+                            Ok(mut models) => {
+                                models.sort();
+                                if manager.keys().ollama_model.is_none() {
+                                    if let Some(first_model) = models.first() {
+                                        manager.set_ollama_model(Some(first_model.clone()), ctx);
+                                    }
+                                }
+                                manager.set_ollama_connection_state(
+                                    OllamaConnectionState::Connected { models },
+                                    ctx,
+                                );
+                            }
+                            Err(err) => {
+                                manager.set_ollama_connection_state(
+                                    OllamaConnectionState::Failed {
+                                        message: err.to_string(),
+                                    },
+                                    ctx,
+                                );
+                            }
+                        });
+                        ctx.notify();
+                    },
+                );
                 ctx.notify();
             }
             AISettingsPageAction::ToggleCloudAgentComputerUse => {
@@ -6746,6 +6803,7 @@ struct OllamaWidget {
     base_url_editor: ViewHandle<EditorView>,
     model_editor: ViewHandle<EditorView>,
     api_key_editor: ViewHandle<EditorView>,
+    test_button: ViewHandle<ActionButton>,
 }
 
 impl OllamaWidget {
@@ -6855,11 +6913,53 @@ impl OllamaWidget {
             }
         });
 
+        let test_button = ctx.add_typed_action_view(|ctx| {
+            let mut button = ActionButton::new("Test", SecondaryTheme)
+                .with_icon(Icon::RefreshCw04)
+                .with_size(ButtonSize::Small)
+                .on_click(|ctx| {
+                    ctx.dispatch_typed_action(AISettingsPageAction::TestOllamaConnection);
+                });
+            Self::update_test_button(&mut button, ctx);
+            button
+        });
+
+        let model_editor_clone = model_editor.clone();
+        let test_button_clone = test_button.clone();
+        ctx.subscribe_to_model(
+            &ApiKeyManager::handle(ctx),
+            move |_, manager, event, ctx| {
+                if matches!(event, ApiKeyManagerEvent::KeysUpdated) {
+                    if let Some(model) = manager.as_ref(ctx).keys().ollama_model.clone() {
+                        model_editor_clone.update(ctx, |editor, ctx| {
+                            if editor.buffer_text(ctx).trim().is_empty() {
+                                editor.set_buffer_text(&model, ctx);
+                            }
+                        });
+                    }
+                    test_button_clone.update(ctx, |button, ctx| {
+                        Self::update_test_button(button, ctx);
+                    });
+                    ctx.notify();
+                }
+            },
+        );
+
         Self {
             base_url_editor,
             model_editor,
             api_key_editor,
+            test_button,
         }
+    }
+
+    fn update_test_button(button: &mut ActionButton, ctx: &mut ViewContext<ActionButton>) {
+        let is_testing = matches!(
+            ApiKeyManager::as_ref(ctx).ollama_connection_state(),
+            OllamaConnectionState::Testing
+        );
+        button.set_label(if is_testing { "Testing..." } else { "Test" }, ctx);
+        button.set_disabled(is_testing, ctx);
     }
 
     fn render_ollama_section(&self, appearance: &Appearance, app: &AppContext) -> Box<dyn Element> {
@@ -6899,6 +6999,109 @@ impl OllamaWidget {
                 .finish()
         }
 
+        fn render_connection_status_card(
+            test_button: &ViewHandle<ActionButton>,
+            appearance: &Appearance,
+            app: &AppContext,
+        ) -> Box<dyn Element> {
+            let theme = appearance.theme();
+            let state = ApiKeyManager::as_ref(app).ollama_connection_state();
+            let (title, detail, icon, title_color) = match state {
+                OllamaConnectionState::Untested => (
+                    "Connection not tested".to_string(),
+                    "Test the server to fetch available Ollama models.".to_string(),
+                    Icon::Info,
+                    styles::header_font_color(true, app),
+                ),
+                OllamaConnectionState::Testing => (
+                    "Testing Ollama connection".to_string(),
+                    "Fetching models from the configured server.".to_string(),
+                    Icon::Loading,
+                    styles::header_font_color(true, app),
+                ),
+                OllamaConnectionState::Connected { models } => {
+                    let detail = if models.is_empty() {
+                        "Connected, but no Ollama models were returned.".to_string()
+                    } else {
+                        let preview = models.iter().take(4).join(", ");
+                        let remaining = models.len().saturating_sub(4);
+                        if remaining == 0 {
+                            format!("Found {} models: {preview}.", models.len())
+                        } else {
+                            format!(
+                                "Found {} models: {preview}, and {remaining} more.",
+                                models.len()
+                            )
+                        }
+                    };
+                    (
+                        "Connected to Ollama".to_string(),
+                        detail,
+                        Icon::CheckCircleBroken,
+                        theme.ansi_fg_green().into(),
+                    )
+                }
+                OllamaConnectionState::Failed { message } => (
+                    "Could not connect to Ollama".to_string(),
+                    message.clone(),
+                    Icon::AlertTriangle,
+                    theme.ansi_fg_red().into(),
+                ),
+            };
+
+            let detail_color = styles::description_font_color(true, app);
+            let icon = Container::new(
+                ConstrainedBox::new(icon.to_warpui_icon(title_color).finish())
+                    .with_width(16.)
+                    .with_height(16.)
+                    .finish(),
+            )
+            .with_horizontal_padding(4.)
+            .finish();
+
+            let text_column = Flex::column()
+                .with_cross_axis_alignment(CrossAxisAlignment::Start)
+                .with_spacing(4.)
+                .with_child(
+                    Text::new_inline(title, appearance.ui_font_family(), CONTENT_FONT_SIZE)
+                        .with_style(Properties::default().weight(Weight::Semibold))
+                        .with_color(title_color.into())
+                        .finish(),
+                )
+                .with_child(
+                    Text::new(detail, appearance.ui_font_family(), CONTENT_FONT_SIZE)
+                        .with_color(detail_color.into())
+                        .soft_wrap(true)
+                        .finish(),
+                );
+
+            Container::new(
+                Flex::row()
+                    .with_main_axis_size(MainAxisSize::Max)
+                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                    .with_spacing(12.)
+                    .with_child(
+                        Expanded::new(
+                            1.,
+                            Flex::row()
+                                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                                .with_spacing(12.)
+                                .with_child(icon)
+                                .with_child(Expanded::new(1., text_column.finish()).finish())
+                                .finish(),
+                        )
+                        .finish(),
+                    )
+                    .with_child(ChildView::new(test_button).finish())
+                    .finish(),
+            )
+            .with_uniform_padding(12.)
+            .with_background(theme.surface_2())
+            .with_border(Border::all(1.).with_border_fill(theme.outline()))
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
+            .finish()
+        }
+
         Flex::column()
             .with_spacing(16.)
             .with_child(render_ai_setting_description(
@@ -6922,6 +7125,11 @@ impl OllamaWidget {
                 appearance,
                 "API Key (optional)",
                 self.api_key_editor.clone(),
+                app,
+            ))
+            .with_child(render_connection_status_card(
+                &self.test_button,
+                appearance,
                 app,
             ))
             .finish()

@@ -14,6 +14,19 @@ pub async fn generate_multi_agent_output(
     mut params: RequestParams,
     cancellation_rx: futures::channel::oneshot::Receiver<()>,
 ) -> Result<ResponseStream, ConvertToAPITypeError> {
+    // If the user has configured a local Ollama server, route the entire
+    // turn through there instead of Warp's backend. The downstream
+    // controller/transcript code is unchanged — we synthesize the same
+    // `ResponseEvent` shape the server would have emitted.
+    if let Some(ollama_cfg) = params.ollama_config.clone() {
+        if params.should_redact_secrets {
+            redaction::redact_inputs(&mut params.input);
+        }
+        let stream = crate::ai::ollama::agent_loop::run_request(ollama_cfg, params);
+        let output_stream = stream.take_until(cancellation_rx);
+        return Ok(Box::pin(output_stream));
+    }
+
     let supported_tools = params
         .supported_tools_override
         .take()

@@ -1,5 +1,8 @@
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+pub mod agent_loop;
 
 pub struct OllamaClient {
     base_url: String,
@@ -12,12 +15,76 @@ struct ChatRequest {
     model: String,
     messages: Vec<ChatMessage>,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<Value>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCallSerialized>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolCallSerialized {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub function: ToolCallFunctionSerialized,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ToolCallFunctionSerialized {
+    pub name: String,
+    pub arguments: String,
+}
+
+impl ChatMessage {
+    pub fn user(content: impl Into<String>) -> Self {
+        Self {
+            role: "user".to_string(),
+            content: content.into(),
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }
+    }
+
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self {
+            role: "assistant".to_string(),
+            content: content.into(),
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }
+    }
+
+    pub fn system(content: impl Into<String>) -> Self {
+        Self {
+            role: "system".to_string(),
+            content: content.into(),
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }
+    }
+
+    pub fn tool(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: "tool".to_string(),
+            content: content.into(),
+            name: None,
+            tool_call_id: Some(tool_call_id.into()),
+            tool_calls: None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -28,11 +95,40 @@ struct ChatResponse {
 #[derive(Debug, Deserialize)]
 struct ChatChoice {
     message: ChatMessageOwned,
+    #[serde(default)]
+    #[allow(dead_code)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ChatMessageOwned {
-    content: String,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<ToolCallParsed>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ToolCallParsed {
+    #[serde(default)]
+    pub id: String,
+    #[serde(rename = "type", default)]
+    pub kind: String,
+    pub function: ToolCallFunctionParsed,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ToolCallFunctionParsed {
+    pub name: String,
+    /// JSON-encoded string per OpenAI spec.
+    pub arguments: String,
+}
+
+/// Result of a single Ollama chat completion.
+#[derive(Debug, Clone)]
+pub struct ChatCompletion {
+    pub text: String,
+    pub tool_calls: Vec<ToolCallParsed>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -78,19 +174,34 @@ impl OllamaClient {
     }
 
     /// Send a chat completion request and return the full response text.
+    /// Kept for the legacy ai_assistant dialogue path (no tools, simple text).
     pub async fn chat(&self, model: &str, messages: Vec<ChatMessage>) -> Result<String> {
+        let completion = self.chat_with_tools(model, messages, None).await?;
+        Ok(completion.text)
+    }
+
+    /// Send a chat completion request, optionally advertising a set of
+    /// OpenAI-style function tools. Returns either text content or a
+    /// list of tool calls (or both, when the model interleaves them).
+    pub async fn chat_with_tools(
+        &self,
+        model: &str,
+        messages: Vec<ChatMessage>,
+        tools: Option<Vec<Value>>,
+    ) -> Result<ChatCompletion> {
         let url = format!("{}/v1/chat/completions", self.base_url);
         let body = ChatRequest {
             model: model.to_string(),
             messages,
             stream: false,
+            tools,
         };
 
         let mut req = self
             .client
             .post(&url)
             .json(&body)
-            .timeout(std::time::Duration::from_secs(120));
+            .timeout(std::time::Duration::from_secs(300));
         if let Some(key) = &self.api_key {
             req = req.bearer_auth(key);
         }
@@ -106,11 +217,13 @@ impl OllamaClient {
         }
 
         let chat_resp: ChatResponse = resp.json().await?;
-        chat_resp
+        let choice = chat_resp
             .choices
             .into_iter()
             .next()
-            .map(|c| c.message.content)
-            .ok_or_else(|| anyhow!("Ollama returned no choices"))
+            .ok_or_else(|| anyhow!("Ollama returned no choices"))?;
+        let text = choice.message.content.unwrap_or_default();
+        let tool_calls = choice.message.tool_calls.unwrap_or_default();
+        Ok(ChatCompletion { text, tool_calls })
     }
 }

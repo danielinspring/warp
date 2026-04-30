@@ -92,6 +92,19 @@ impl TryFrom<ServerConversationToken>
     }
 }
 
+/// Connection details for routing an agent run through a local Ollama
+/// server instead of Warp's backend.
+///
+/// Captured once at request construction time (when we still have an
+/// `AppContext`), so `generate_multi_agent_output` can detect the override
+/// from inside an `async move` block without re-querying `ApiKeyManager`.
+#[derive(Debug, Clone)]
+pub struct OllamaConfig {
+    pub base_url: String,
+    pub model: String,
+    pub api_key: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct RequestParams {
     pub input: Vec<AIAgentInput>,
@@ -128,6 +141,9 @@ pub struct RequestParams {
     pub parent_agent_id: Option<String>,
     /// The display name for this agent (e.g. "Agent 1"), assigned by the orchestrator.
     pub agent_name: Option<String>,
+    /// When set, route this request to a local Ollama server instead of
+    /// Warp's backend. Populated from `ApiKeyManager.has_ollama_configured()`.
+    pub ollama_config: Option<OllamaConfig>,
 }
 
 pub type Event = Result<warp_multi_agent_api::ResponseEvent, Arc<AIApiError>>;
@@ -233,10 +249,21 @@ impl RequestParams {
         let should_redact_secrets = get_secret_obfuscation_mode(app).should_redact_secret();
 
         let user_workspaces = UserWorkspaces::as_ref(app);
-        let api_keys = ApiKeyManager::as_ref(app).api_keys_for_request(
+        let api_key_manager = ApiKeyManager::as_ref(app);
+        let api_keys = api_key_manager.api_keys_for_request(
             user_workspaces.is_byo_api_key_enabled(),
             user_workspaces.is_aws_bedrock_credentials_enabled(app),
         );
+        let ollama_config = {
+            let keys = api_key_manager.keys();
+            keys.has_ollama_configured()
+                .then(|| OllamaConfig {
+                    base_url: keys.ollama_base_url.clone().unwrap_or_default(),
+                    model: keys.ollama_model.clone().unwrap_or_default(),
+                    api_key: keys.ollama_api_key.clone(),
+                })
+                .filter(|cfg| !cfg.base_url.is_empty() && !cfg.model.is_empty())
+        };
         let allow_use_of_warp_credits_with_byok =
             *AISettings::as_ref(app).can_use_warp_credits_with_byok;
 
@@ -309,6 +336,7 @@ impl RequestParams {
             supported_tools_override: request_input.supported_tools_override.clone(),
             parent_agent_id: None,
             agent_name: None,
+            ollama_config,
         }
     }
 }

@@ -12,6 +12,15 @@ pub enum ApiKeyManagerEvent {
     KeysUpdated,
 }
 
+/// Runtime-only state for the configured Ollama server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OllamaConnectionState {
+    Untested,
+    Testing,
+    Connected { models: Vec<String> },
+    Failed { message: String },
+}
+
 /// User-provided API keys for AI providers.
 ///
 /// These are used for "Bring Your Own API Key" functionality, allowing
@@ -59,6 +68,7 @@ pub enum AwsCredentialsRefreshStrategy {
 /// A structure that manages API keys for AI providers.
 pub struct ApiKeyManager {
     keys: ApiKeys,
+    ollama_connection_state: OllamaConnectionState,
     pub(crate) aws_credentials_state: AwsCredentialsState,
     aws_credentials_refresh_strategy: AwsCredentialsRefreshStrategy,
 }
@@ -68,6 +78,7 @@ impl ApiKeyManager {
         let keys = Self::load_keys_from_secure_storage(ctx);
         Self {
             keys,
+            ollama_connection_state: OllamaConnectionState::Untested,
             aws_credentials_state: AwsCredentialsState::Missing,
             aws_credentials_refresh_strategy: AwsCredentialsRefreshStrategy::default(),
         }
@@ -103,6 +114,7 @@ impl ApiKeyManager {
 
     pub fn set_ollama_base_url(&mut self, url: Option<String>, ctx: &mut ModelContext<Self>) {
         self.keys.ollama_base_url = url;
+        self.ollama_connection_state = OllamaConnectionState::Untested;
         ctx.emit(ApiKeyManagerEvent::KeysUpdated);
         self.write_keys_to_secure_storage(ctx);
     }
@@ -115,8 +127,22 @@ impl ApiKeyManager {
 
     pub fn set_ollama_api_key(&mut self, key: Option<String>, ctx: &mut ModelContext<Self>) {
         self.keys.ollama_api_key = key;
+        self.ollama_connection_state = OllamaConnectionState::Untested;
         ctx.emit(ApiKeyManagerEvent::KeysUpdated);
         self.write_keys_to_secure_storage(ctx);
+    }
+
+    pub fn set_ollama_connection_state(
+        &mut self,
+        state: OllamaConnectionState,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        self.ollama_connection_state = state;
+        ctx.emit(ApiKeyManagerEvent::KeysUpdated);
+    }
+
+    pub fn ollama_connection_state(&self) -> &OllamaConnectionState {
+        &self.ollama_connection_state
     }
 
     pub fn set_aws_credentials_state(
