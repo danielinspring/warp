@@ -49,7 +49,11 @@ impl ToolSchemaBuilder {
     }
 
     /// Add a required string parameter.
-    pub fn required_string(mut self, name: impl Into<String>, description: impl Into<String>) -> Self {
+    pub fn required_string(
+        mut self,
+        name: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
         let name = name.into();
         self.properties.insert(
             name.clone(),
@@ -63,7 +67,11 @@ impl ToolSchemaBuilder {
     }
 
     /// Add an optional string parameter.
-    pub fn optional_string(mut self, name: impl Into<String>, description: impl Into<String>) -> Self {
+    pub fn optional_string(
+        mut self,
+        name: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
         self.properties.insert(
             name.into(),
             serde_json::json!({
@@ -74,8 +82,64 @@ impl ToolSchemaBuilder {
         self
     }
 
+    /// Add a required string-array parameter.
+    pub fn required_string_array(
+        mut self,
+        name: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
+        let name = name.into();
+        self.properties.insert(
+            name.clone(),
+            serde_json::json!({
+                "type": "array",
+                "description": description.into(),
+                "items": { "type": "string" }
+            }),
+        );
+        self.required.push(name);
+        self
+    }
+
+    /// Add an optional string-array parameter.
+    pub fn optional_string_array(
+        mut self,
+        name: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
+        self.properties.insert(
+            name.into(),
+            serde_json::json!({
+                "type": "array",
+                "description": description.into(),
+                "items": { "type": "string" }
+            }),
+        );
+        self
+    }
+
+    /// Add an optional boolean parameter.
+    pub fn optional_bool(
+        mut self,
+        name: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
+        self.properties.insert(
+            name.into(),
+            serde_json::json!({
+                "type": "boolean",
+                "description": description.into()
+            }),
+        );
+        self
+    }
+
     /// Add a required boolean parameter.
-    pub fn required_bool(mut self, name: impl Into<String>, description: impl Into<String>) -> Self {
+    pub fn required_bool(
+        mut self,
+        name: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
         let name = name.into();
         self.properties.insert(
             name.clone(),

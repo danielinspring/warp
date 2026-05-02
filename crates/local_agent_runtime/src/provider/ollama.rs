@@ -138,8 +138,7 @@ impl OllamaProvider {
     fn parse_tool_calls(raw: &[RawToolCall]) -> Vec<ToolCall> {
         raw.iter()
             .map(|tc| {
-                let arguments = serde_json::from_str(&tc.function.arguments)
-                    .unwrap_or(Value::String(tc.function.arguments.clone()));
+                let arguments = tc.function.arguments.as_value();
                 ToolCall {
                     id: if tc.id.is_empty() {
                         uuid::Uuid::new_v4().to_string()
@@ -317,7 +316,32 @@ struct RawToolCall {
 #[derive(Debug, Deserialize)]
 struct RawFunction {
     name: String,
-    arguments: String,
+    #[serde(default)]
+    arguments: RawArguments,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum RawArguments {
+    String(String),
+    Value(Value),
+}
+
+impl Default for RawArguments {
+    fn default() -> Self {
+        RawArguments::Value(Value::Object(Default::default()))
+    }
+}
+
+impl RawArguments {
+    fn as_value(&self) -> Value {
+        match self {
+            RawArguments::String(arguments) => {
+                serde_json::from_str(arguments).unwrap_or(Value::String(arguments.clone()))
+            }
+            RawArguments::Value(arguments) => arguments.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -328,4 +352,42 @@ struct TagsResponse {
 #[derive(Debug, Deserialize)]
 struct OllamaModelInfo {
     name: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_tool_call_arguments_from_json_string() {
+        let calls = OllamaProvider::parse_tool_calls(&[RawToolCall {
+            id: "call_1".to_string(),
+            function: RawFunction {
+                name: "run_shell_command".to_string(),
+                arguments: RawArguments::String(r#"{"command":"pwd"}"#.to_string()),
+            },
+        }]);
+
+        assert_eq!(calls[0].id, "call_1");
+        assert_eq!(calls[0].name, "run_shell_command");
+        assert_eq!(calls[0].arguments, serde_json::json!({"command": "pwd"}));
+    }
+
+    #[test]
+    fn parses_tool_call_arguments_from_json_object() {
+        let calls = OllamaProvider::parse_tool_calls(&[RawToolCall {
+            id: "call_1".to_string(),
+            function: RawFunction {
+                name: "read_files".to_string(),
+                arguments: RawArguments::Value(serde_json::json!({"paths": ["src/lib.rs"]})),
+            },
+        }]);
+
+        assert_eq!(calls[0].id, "call_1");
+        assert_eq!(calls[0].name, "read_files");
+        assert_eq!(
+            calls[0].arguments,
+            serde_json::json!({"paths": ["src/lib.rs"]})
+        );
+    }
 }

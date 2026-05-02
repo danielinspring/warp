@@ -1086,6 +1086,27 @@ impl BlocklistAIActionModel {
             .collect_vec()
     }
 
+    /// Removes one finished result without moving the rest of the batch into past results.
+    ///
+    /// The local Ollama runtime uses this after it has consumed a Warp-executed tool result so the
+    /// controller does not later treat that same result as a backend-style follow-up input.
+    pub(super) fn take_finished_action_result(
+        &mut self,
+        conversation_id: AIConversationId,
+        action_id: &AIAgentActionId,
+    ) -> Option<AIAgentActionResult> {
+        let results = self.finished_action_results.get_mut(&conversation_id)?;
+        let index = results.iter().position(|result| result.id == *action_id)?;
+        let result = results.remove(index);
+        if results.is_empty() {
+            self.finished_action_results.remove(&conversation_id);
+            self.action_order.remove(&conversation_id);
+        }
+        self.past_action_results
+            .insert(result.id.clone(), result.clone());
+        Some((*result).clone())
+    }
+
     /// Clears finished action results for a conversation. Used when reverting.
     pub(super) fn clear_finished_action_results(&mut self, conversation_id: AIConversationId) {
         self.action_order.remove(&conversation_id);

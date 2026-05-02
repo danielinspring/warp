@@ -1707,8 +1707,8 @@ impl BlocklistAIController {
         {
             let Some(conversation) = history_model.conversation(&conversation_id) else {
                 return Err(anyhow!(
-                        "Tried to build passive suggestions request params for non-existent conversation with ID {conversation_id:?}"
-                    ));
+                    "Tried to build passive suggestions request params for non-existent conversation with ID {conversation_id:?}"
+                ));
             };
             let task_id = conversation.get_root_task_id().clone();
             let conversation_data = api::ConversationData {
@@ -1740,8 +1740,8 @@ impl BlocklistAIController {
             (conversation_id, task_id, conversation_data)
         } else {
             return Err(anyhow!(
-                    "Tried to use agent response completed trigger to generate passive suggestions without a conversation ID"
-                ));
+                "Tried to use agent response completed trigger to generate passive suggestions without a conversation ID"
+            ));
         };
 
         let inputs = vec![AIAgentInput::TriggerPassiveSuggestion {
@@ -2009,6 +2009,7 @@ impl BlocklistAIController {
                 request_params.clone(),
                 ai_identifiers,
                 can_attempt_resume_on_error,
+                self.action_model.clone(),
                 ctx,
             )
         });
@@ -2390,6 +2391,7 @@ impl BlocklistAIController {
                     return;
                 };
                 let new_exchange_ids = conversation.new_exchange_ids_for_response(&stream_id);
+                let local_runtime_owns_tool_loop = response_stream.as_ref(ctx).owns_tool_loop();
                 let mut was_passive_request = false;
                 let mut is_any_exchange_unfinished = false;
                 let mut actions_to_queue = vec![];
@@ -2407,7 +2409,9 @@ impl BlocklistAIController {
                         ..
                     } = &exchange.output_status
                     {
-                        actions_to_queue.extend(output.get().actions().cloned());
+                        if !local_runtime_owns_tool_loop {
+                            actions_to_queue.extend(output.get().actions().cloned());
+                        }
                     }
                 }
 

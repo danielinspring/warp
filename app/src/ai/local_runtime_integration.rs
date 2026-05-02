@@ -5,15 +5,9 @@
 //!
 //! ## Activation
 //!
-//! This path is not yet active. To activate it in the future, replace the call
-//! in `generate_multi_agent_output` (in `api/impl.rs`) with:
-//!
-//! ```rust,ignore
-//! let stream = crate::ai::local_runtime_integration::run_with_local_runtime(
-//!     ollama_cfg,
-//!     params,
-//! );
-//! ```
+//! `ResponseStream` selects this path for Ollama requests when
+//! `FeatureFlag::LocalOllamaRuntimeToolUse` is enabled. The legacy
+//! `ollama::agent_loop` remains the fallback while the flag is disabled.
 //!
 //! ## What this provides over the current `agent_loop.rs`
 //!
@@ -26,27 +20,34 @@
 use std::sync::Arc;
 
 use async_channel::Sender;
+use futures::channel::oneshot;
+use futures::StreamExt;
 use uuid::Uuid;
 use warp_multi_agent_api as api;
 
 use crate::ai::agent::api::{Event, OllamaConfig, RequestParams, ResponseStream};
 use crate::ai::agent::AIAgentInput;
 use crate::ai::local_runtime_bridge::event_mapper::EventMapper;
-use crate::ai::local_runtime_bridge::WarpToolExecutor;
+use crate::ai::local_runtime_bridge::{ToolExecutionRequest, WarpToolExecutor};
 use crate::server::server_api::AIApiError;
 
+use local_agent_runtime::messages::{AssistantMessage, ToolResultMessage, UserMessage};
 use local_agent_runtime::provider::ollama::{OllamaProvider, OllamaProviderConfig};
-use local_agent_runtime::messages::{UserMessage, AssistantMessage, SystemMessage, ToolResultMessage};
-use local_agent_runtime::{AgentRuntime, Message, RuntimeConfig, RuntimeEvent};
+use local_agent_runtime::{AgentRuntime, Message, RuntimeConfig, ToolCall};
 
 /// Build a `ResponseStream` using the new local agent runtime.
 ///
 /// This is a drop-in replacement for `ollama::agent_loop::run_request`.
-pub fn run_with_local_runtime(cfg: OllamaConfig, params: RequestParams) -> ResponseStream {
+pub fn run_with_local_runtime(
+    cfg: OllamaConfig,
+    params: RequestParams,
+    tool_request_tx: async_channel::Sender<ToolExecutionRequest>,
+    cancellation_rx: oneshot::Receiver<()>,
+) -> ResponseStream {
     let (tx, rx) = async_channel::unbounded::<Event>();
 
     tokio::spawn(async move {
-        let result = run_runtime(cfg, params, &tx).await;
+        let result = run_runtime(cfg, params, tool_request_tx, cancellation_rx, &tx).await;
         if let Err(err) = result {
             let _ = tx.send(Err(Arc::new(err))).await;
         }
@@ -58,6 +59,8 @@ pub fn run_with_local_runtime(cfg: OllamaConfig, params: RequestParams) -> Respo
 async fn run_runtime(
     cfg: OllamaConfig,
     params: RequestParams,
+    tool_request_tx: async_channel::Sender<ToolExecutionRequest>,
+    cancellation_rx: oneshot::Receiver<()>,
     tx: &Sender<Event>,
 ) -> Result<(), AIApiError> {
     // Set up the runtime components
@@ -67,23 +70,7 @@ async fn run_runtime(
         timeout_secs: 300,
     });
 
-    let executor = WarpToolExecutor::new();
-
-    let runtime_config = RuntimeConfig {
-        system_prompt: Some(SYSTEM_PROMPT.to_string()),
-        max_turns: 10,
-        ..Default::default()
-    };
-
-    let runtime = AgentRuntime::new(provider, executor, runtime_config);
-
-    // Build initial messages from existing conversation history
-    let initial_messages = build_initial_messages(&params);
-
-    // Extract the user's latest input
-    let user_input = extract_user_input(&params).unwrap_or_default();
-
-    // Determine IDs for event mapping
+    // Determine IDs for event mapping and tool execution.
     let conversation_id = params
         .conversation_token
         .as_ref()
@@ -102,19 +89,50 @@ async fn run_runtime(
         .unwrap_or_else(|| Uuid::new_v4().to_string());
     let task_exists = !params.tasks.is_empty();
 
-    // Run the agent loop
-    let (events, _final_messages) = runtime
-        .run_to_completion(&cfg.model, initial_messages, &user_input)
-        .await
-        .map_err(|e| AIApiError::Other(e.into()))?;
+    let executor = WarpToolExecutor::new(
+        tool_request_tx,
+        crate::ai::agent::task::TaskId::new(task_id.clone()),
+    );
 
-    // Map runtime events to proto ResponseEvents
+    let runtime_config = RuntimeConfig {
+        system_prompt: Some(SYSTEM_PROMPT.to_string()),
+        max_turns: 10,
+        ..Default::default()
+    };
+
+    let runtime = AgentRuntime::new(provider, executor, runtime_config);
+
+    // Build initial messages from existing conversation history
+    let initial_messages = build_initial_messages(&params);
+
+    // Extract the user's latest input
+    let user_input = extract_user_input(&params).unwrap_or_default();
+
     let mut mapper = EventMapper::new(conversation_id, request_id, run_id, task_id, task_exists);
 
-    for event in &events {
-        let proto_events = mapper.map_event(event);
-        for proto_event in proto_events {
-            let _ = tx.send(Ok(proto_event)).await;
+    let (mut runtime_events, cancel_handle) =
+        runtime.run(cfg.model.clone(), initial_messages, user_input);
+    let mut cancellation_rx = Box::pin(cancellation_rx);
+    let mut cancellation_sent = false;
+
+    loop {
+        tokio::select! {
+            _ = &mut cancellation_rx, if !cancellation_sent => {
+                cancellation_sent = true;
+                cancel_handle.cancel();
+            }
+            event = runtime_events.next() => {
+                let Some(event) = event else {
+                    break;
+                };
+                let proto_events = mapper.map_event(&event);
+                for proto_event in proto_events {
+                    let _ = tx.send(Ok(proto_event)).await;
+                }
+                if matches!(event, local_agent_runtime::RuntimeEvent::Finished { .. }) {
+                    break;
+                }
+            }
         }
     }
 
@@ -146,11 +164,12 @@ fn translate_proto_to_runtime_message(msg: &api::Message) -> Option<Message> {
             content: out.text.clone(),
             tool_calls: vec![],
         })),
+        M::ToolCall(tool_call) => Some(Message::Assistant(AssistantMessage {
+            content: String::new(),
+            tool_calls: vec![translate_proto_tool_call(tool_call)?],
+        })),
         M::ToolCallResult(result) => {
-            // Extract text content from the tool call result.
-            // The proto uses a oneof for different result types — we extract
-            // a generic text representation for the runtime's flat format.
-            let content = format!("[tool result for call_id: {}]", result.tool_call_id);
+            let content = format!("{:?}", result.result);
             Some(Message::ToolResult(ToolResultMessage {
                 call_id: result.tool_call_id.clone(),
                 result: local_agent_runtime::ToolCallResult {
@@ -161,6 +180,56 @@ fn translate_proto_to_runtime_message(msg: &api::Message) -> Option<Message> {
         }
         _ => None,
     }
+}
+
+fn translate_proto_tool_call(tool_call: &api::message::ToolCall) -> Option<ToolCall> {
+    let tool = tool_call.tool.as_ref()?;
+    let (name, arguments) = match tool {
+        api::message::tool_call::Tool::RunShellCommand(tool) => (
+            "run_shell_command",
+            serde_json::json!({
+                "command": tool.command.clone(),
+                "is_read_only": tool.is_read_only,
+                "is_risky": tool.is_risky,
+                "uses_pager": tool.uses_pager,
+            }),
+        ),
+        api::message::tool_call::Tool::ReadFiles(tool) => (
+            "read_files",
+            serde_json::json!({
+                "paths": tool.files.iter().map(|file| file.name.clone()).collect::<Vec<_>>(),
+            }),
+        ),
+        api::message::tool_call::Tool::Grep(tool) => (
+            "grep",
+            serde_json::json!({
+                "queries": tool.queries.clone(),
+                "path": tool.path.clone(),
+            }),
+        ),
+        api::message::tool_call::Tool::FileGlobV2(tool) => (
+            "file_glob_v2",
+            serde_json::json!({
+                "patterns": tool.patterns.clone(),
+                "search_dir": tool.search_dir.clone(),
+            }),
+        ),
+        api::message::tool_call::Tool::SearchCodebase(tool) => (
+            "search_codebase",
+            serde_json::json!({
+                "query": tool.query.clone(),
+                "path_filters": tool.path_filters.clone(),
+                "codebase_path": tool.codebase_path.clone(),
+            }),
+        ),
+        _ => return None,
+    };
+
+    Some(ToolCall {
+        id: tool_call.tool_call_id.clone(),
+        name: name.to_string(),
+        arguments,
+    })
 }
 
 fn extract_user_input(params: &RequestParams) -> Option<String> {

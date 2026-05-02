@@ -1,21 +1,24 @@
 //! Integration tests for the local agent runtime.
 
+use futures::StreamExt;
+use local_agent_runtime::provider::{ChatRequest, ChatResponse, ChatStopReason};
 use local_agent_runtime::{
     AgentRuntime, FinishReason, LLMProvider, Message, PermissionDecision, ProviderCapabilities,
     ProviderError, RuntimeConfig, RuntimeEvent, ToolCall, ToolCallResult, ToolExecutionError,
     ToolExecutor, ToolSchema, ToolSchemaBuilder,
 };
-use local_agent_runtime::provider::{ChatRequest, ChatResponse, ChatStopReason};
 
 /// A mock LLM provider that returns scripted responses.
 struct MockProvider {
-    responses: std::sync::Mutex<Vec<ChatResponse>>,
+    responses: std::sync::Arc<std::sync::Mutex<Vec<ChatResponse>>>,
+    requests: std::sync::Arc<std::sync::Mutex<Vec<ChatRequest>>>,
 }
 
 impl MockProvider {
     fn new(responses: Vec<ChatResponse>) -> Self {
         Self {
-            responses: std::sync::Mutex::new(responses),
+            responses: std::sync::Arc::new(std::sync::Mutex::new(responses)),
+            requests: Default::default(),
         }
     }
 
@@ -51,7 +54,8 @@ impl MockProvider {
 
 #[async_trait::async_trait]
 impl LLMProvider for MockProvider {
-    async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, ProviderError> {
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ProviderError> {
+        self.requests.lock().unwrap().push(request);
         let mut responses = self.responses.lock().unwrap();
         if responses.is_empty() {
             return Err(ProviderError::EmptyResponse);
@@ -77,6 +81,7 @@ struct MockExecutor {
     tools: Vec<ToolSchema>,
     permission: PermissionDecision,
     result: ToolCallResult,
+    calls: std::sync::Arc<std::sync::Mutex<Vec<ToolCall>>>,
 }
 
 impl MockExecutor {
@@ -92,6 +97,7 @@ impl MockExecutor {
             ],
             permission: PermissionDecision::Allow,
             result: ToolCallResult::success("command output here"),
+            calls: Default::default(),
         }
     }
 
@@ -102,6 +108,7 @@ impl MockExecutor {
                 reason: reason.to_string(),
             },
             result: ToolCallResult::error("should not reach here"),
+            calls: Default::default(),
         }
     }
 }
@@ -116,15 +123,12 @@ impl ToolExecutor for MockExecutor {
         self.permission.clone()
     }
 
-    async fn execute(&self, _call: &ToolCall) -> Result<ToolCallResult, ToolExecutionError> {
+    async fn execute(&self, call: &ToolCall) -> Result<ToolCallResult, ToolExecutionError> {
+        self.calls.lock().unwrap().push(call.clone());
         Ok(self.result.clone())
     }
 
-    async fn on_permission_response(
-        &self,
-        _call: &ToolCall,
-        granted: bool,
-    ) -> PermissionDecision {
+    async fn on_permission_response(&self, _call: &ToolCall, granted: bool) -> PermissionDecision {
         if granted {
             PermissionDecision::Allow
         } else {
@@ -132,6 +136,28 @@ impl ToolExecutor for MockExecutor {
                 reason: "user denied".to_string(),
             }
         }
+    }
+}
+
+struct SlowProvider;
+
+#[async_trait::async_trait]
+impl LLMProvider for SlowProvider {
+    async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, ProviderError> {
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        Ok(ChatResponse {
+            text: "too late".to_string(),
+            tool_calls: vec![],
+            stop_reason: ChatStopReason::Stop,
+        })
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::default()
+    }
+
+    fn name(&self) -> &str {
+        "slow"
     }
 }
 
@@ -148,9 +174,16 @@ async fn test_simple_text_response() {
         .unwrap();
 
     // Should have: TurnStarted, TextCompleted, TurnCompleted, Finished
-    assert!(events.iter().any(|e| matches!(e, RuntimeEvent::TurnStarted { turn: 1 })));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, RuntimeEvent::TurnStarted { turn: 1 })));
     assert!(events.iter().any(|e| matches!(e, RuntimeEvent::TextCompleted { text } if text == "Hello! I can help you with that.")));
-    assert!(events.iter().any(|e| matches!(e, RuntimeEvent::Finished { reason: FinishReason::Done })));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        RuntimeEvent::Finished {
+            reason: FinishReason::Done
+        }
+    )));
 }
 
 #[tokio::test]
@@ -170,12 +203,139 @@ async fn test_tool_call_flow() {
         .unwrap();
 
     // Should have tool call events
-    assert!(events.iter().any(|e| matches!(e, RuntimeEvent::ToolCallsRequested { .. })));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, RuntimeEvent::ToolCallsRequested { .. })));
     assert!(events.iter().any(|e| matches!(e, RuntimeEvent::ToolExecutionStarted { tool_name, .. } if tool_name == "run_shell_command")));
-    assert!(events.iter().any(|e| matches!(e, RuntimeEvent::ToolResult { .. })));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, RuntimeEvent::ToolResult { .. })));
     // Should have final text
     assert!(events.iter().any(|e| matches!(e, RuntimeEvent::TextCompleted { text } if text == "Here are the files in /tmp.")));
-    assert!(events.iter().any(|e| matches!(e, RuntimeEvent::Finished { reason: FinishReason::Done })));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        RuntimeEvent::Finished {
+            reason: FinishReason::Done
+        }
+    )));
+}
+
+#[tokio::test]
+async fn test_run_streams_events() {
+    let provider = MockProvider::text_only("streamed hello");
+    let executor = MockExecutor::allow_all();
+    let config = RuntimeConfig::default();
+
+    let runtime = AgentRuntime::new(provider, executor, config);
+    let (mut events, _cancel) =
+        runtime.run("test-model".to_string(), vec![], "Hi there".to_string());
+
+    let mut collected = Vec::new();
+    while let Some(event) = tokio::time::timeout(std::time::Duration::from_secs(1), events.next())
+        .await
+        .unwrap()
+    {
+        let finished = matches!(event, RuntimeEvent::Finished { .. });
+        collected.push(event);
+        if finished {
+            break;
+        }
+    }
+
+    assert!(collected
+        .iter()
+        .any(|e| matches!(e, RuntimeEvent::TurnStarted { turn: 1 })));
+    assert!(collected
+        .iter()
+        .any(|e| matches!(e, RuntimeEvent::TextCompleted { text } if text == "streamed hello")));
+    assert!(collected.iter().any(|e| matches!(
+        e,
+        RuntimeEvent::Finished {
+            reason: FinishReason::Done
+        }
+    )));
+}
+
+#[tokio::test]
+async fn test_tool_schemas_are_sent_to_provider() {
+    let provider = MockProvider::text_only("done");
+    let requests = provider.requests.clone();
+    let executor = MockExecutor::allow_all();
+    let config = RuntimeConfig::default();
+
+    let runtime = AgentRuntime::new(provider, executor, config);
+    runtime
+        .run_to_completion("test-model", vec![], "Hi there")
+        .await
+        .unwrap();
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    let tool_names = requests[0]
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(tool_names, vec!["run_shell_command", "read_file"]);
+}
+
+#[tokio::test]
+async fn test_tool_result_is_fed_back_with_original_call_id() {
+    let provider = MockProvider::with_tool_call(
+        "run_shell_command",
+        serde_json::json!({"command": "pwd"}),
+        "The command ran.",
+    );
+    let requests = provider.requests.clone();
+    let executor = MockExecutor::allow_all();
+    let config = RuntimeConfig::default();
+
+    let runtime = AgentRuntime::new(provider, executor, config);
+    runtime
+        .run_to_completion("test-model", vec![], "Run pwd")
+        .await
+        .unwrap();
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].messages.iter().any(|message| {
+        matches!(
+            message,
+            Message::ToolResult(result)
+                if result.call_id == "call_1" && result.result.content == "command output here"
+        )
+    }));
+}
+
+#[tokio::test]
+async fn test_cancellation_stops_streaming_loop() {
+    let provider = SlowProvider;
+    let executor = MockExecutor::allow_all();
+    let config = RuntimeConfig::default();
+
+    let runtime = AgentRuntime::new(provider, executor, config);
+    let (mut events, cancel) =
+        runtime.run("test-model".to_string(), vec![], "Hi there".to_string());
+
+    cancel.cancel();
+
+    let mut saw_cancelled = false;
+    while let Some(event) = tokio::time::timeout(std::time::Duration::from_secs(1), events.next())
+        .await
+        .unwrap()
+    {
+        if matches!(
+            event,
+            RuntimeEvent::Finished {
+                reason: FinishReason::Cancelled
+            }
+        ) {
+            saw_cancelled = true;
+            break;
+        }
+    }
+
+    assert!(saw_cancelled);
 }
 
 #[tokio::test]
@@ -196,9 +356,16 @@ async fn test_permission_denied_stops_when_configured() {
         .unwrap();
 
     // Should finish without calling the final text turn
-    assert!(events.iter().any(|e| matches!(e, RuntimeEvent::Finished { reason: FinishReason::Done })));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        RuntimeEvent::Finished {
+            reason: FinishReason::Done
+        }
+    )));
     // Should NOT have the "Done!" text
-    assert!(!events.iter().any(|e| matches!(e, RuntimeEvent::TextCompleted { text } if text == "Done!")));
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, RuntimeEvent::TextCompleted { text } if text == "Done!")));
 }
 
 #[tokio::test]
@@ -227,7 +394,12 @@ async fn test_max_turns_exceeded() {
         .await
         .unwrap();
 
-    assert!(events.iter().any(|e| matches!(e, RuntimeEvent::Finished { reason: FinishReason::MaxTurns })));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        RuntimeEvent::Finished {
+            reason: FinishReason::MaxTurns
+        }
+    )));
 }
 
 #[tokio::test]
@@ -270,7 +442,12 @@ async fn test_conversation_history_preserved() {
         .unwrap();
 
     // Should succeed
-    assert!(events.iter().any(|e| matches!(e, RuntimeEvent::Finished { reason: FinishReason::Done })));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        RuntimeEvent::Finished {
+            reason: FinishReason::Done
+        }
+    )));
     // Messages should include system + initial + user + assistant reply
     assert!(messages.len() >= 5); // system + 2 initial + user + assistant
 }
