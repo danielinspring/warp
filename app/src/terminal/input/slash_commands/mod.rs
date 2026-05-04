@@ -610,6 +610,9 @@ impl Input {
                 }
                 ctx.dispatch_typed_action(&WorkspaceAction::OpenSettingsFile);
             }
+            agent_viz if command.name == commands::AGENT_VIZ.name => {
+                ctx.dispatch_typed_action(&WorkspaceAction::OpenAgentVizPane);
+            }
             open_project_rules if command.name == commands::OPEN_PROJECT_RULES.name => {
                 ctx.dispatch_typed_action(&TerminalAction::OpenProjectRulesPane);
             }

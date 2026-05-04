@@ -168,6 +168,8 @@ use crate::pane_group::{
 use crate::quit_warning::UnsavedStateSummary;
 use crate::search::command_palette::view::NavigationMode;
 use crate::search::slash_command_menu::static_commands::commands;
+use crate::ai::agent_viz::pane_manager::AgentVizPaneManager;
+use crate::pane_group::AgentVizPane;
 use crate::server::network_log_pane_manager::NetworkLogPaneManager;
 use crate::server::server_api::ai::AIClient;
 use crate::server::server_api::auth::AuthClient;
@@ -12857,6 +12859,25 @@ impl Workspace {
     /// group. If a pane already exists for the current window, refreshes its
     /// snapshot from the in-memory model and focuses it instead of opening
     /// another one.
+    pub(crate) fn open_agent_viz_pane(&mut self, ctx: &mut ViewContext<Self>) {
+        let manager = AgentVizPaneManager::handle(ctx);
+
+        if let Some(locator) = manager.as_ref(ctx).find_pane(ctx.window_id()) {
+            self.focus_pane(locator, ctx);
+            return;
+        }
+
+        let pane = AgentVizPane::new(ctx);
+        self.active_tab_pane_group().update(ctx, |pane_group, ctx| {
+            pane_group.add_pane_with_direction(
+                Direction::Right,
+                pane,
+                true, /* focus_new_pane */
+                ctx,
+            );
+        });
+    }
+
     pub(crate) fn open_network_log_pane(&mut self, ctx: &mut ViewContext<Self>) {
         let manager = NetworkLogPaneManager::handle(ctx);
 
@@ -19893,6 +19914,9 @@ impl TypedActionView for Workspace {
             }
             OpenNetworkLogPane => {
                 self.open_network_log_pane(ctx);
+            }
+            OpenAgentVizPane => {
+                self.open_agent_viz_pane(ctx);
             }
             FixSettingsWithOz { error_description } => {
                 use crate::ai::skills::SkillManager;

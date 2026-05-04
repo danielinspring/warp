@@ -662,6 +662,9 @@ pub enum WorkspaceAction {
     /// Opens (or focuses) the in-app network log pane as a right-split of the
     /// active pane group. Gated on `ContextFlag::NetworkLogConsole`.
     OpenNetworkLogPane,
+    /// Opens (or focuses) the agent office visualization pane as a right-split
+    /// of the active pane group.
+    OpenAgentVizPane,
 }
 
 impl From<&WorkspaceAction> for LoginGatedFeature {
@@ -933,7 +936,8 @@ impl WorkspaceAction {
             | TabConfigSidecarRemoveConfig { .. }
             | OpenSettingsFile
             | FixSettingsWithOz { .. }
-            | OpenNetworkLogPane => false,
+            | OpenNetworkLogPane
+            | OpenAgentVizPane => false,
             #[cfg(debug_assertions)]
             ShowHoaOnboardingFlow => false,
             #[cfg(target_family = "wasm")]

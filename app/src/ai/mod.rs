@@ -8,6 +8,7 @@ pub(crate) mod agent_conversations_model;
 pub(crate) mod agent_events;
 pub(crate) mod agent_management;
 pub(crate) mod agent_tips;
+pub(crate) mod agent_viz;
 pub(crate) mod ai_document_view;
 pub mod ambient_agents;
 pub(crate) mod artifact_download;
@@ -49,7 +50,9 @@ pub(crate) mod loading;
 pub mod mcp;
 pub(crate) mod ollama;
 pub(crate) mod local_runtime_bridge;
+pub(crate) mod local_runtime_event_bus;
 pub(crate) mod local_runtime_integration;
+pub(crate) mod local_runtime_spec;
 pub mod outline;
 
 pub(crate) use ai::paths;

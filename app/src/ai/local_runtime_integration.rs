@@ -29,6 +29,8 @@ use crate::ai::agent::api::{Event, OllamaConfig, RequestParams, ResponseStream};
 use crate::ai::agent::AIAgentInput;
 use crate::ai::local_runtime_bridge::event_mapper::EventMapper;
 use crate::ai::local_runtime_bridge::{ToolExecutionRequest, WarpToolExecutor};
+use crate::ai::local_runtime_event_bus;
+use crate::ai::local_runtime_spec;
 use crate::server::server_api::AIApiError;
 
 use local_agent_runtime::messages::{AssistantMessage, ToolResultMessage, UserMessage};
@@ -95,7 +97,7 @@ async fn run_runtime(
     );
 
     let runtime_config = RuntimeConfig {
-        system_prompt: Some(SYSTEM_PROMPT.to_string()),
+        system_prompt: Some(local_runtime_spec::system_prompt().to_string()),
         max_turns: 10,
         ..Default::default()
     };
@@ -108,7 +110,13 @@ async fn run_runtime(
     // Extract the user's latest input
     let user_input = extract_user_input(&params).unwrap_or_default();
 
-    let mut mapper = EventMapper::new(conversation_id, request_id, run_id, task_id, task_exists);
+    let mut mapper = EventMapper::new(
+        conversation_id,
+        request_id,
+        run_id.clone(),
+        task_id,
+        task_exists,
+    );
 
     let (mut runtime_events, cancel_handle) =
         runtime.run(cfg.model.clone(), initial_messages, user_input);
@@ -125,6 +133,7 @@ async fn run_runtime(
                 let Some(event) = event else {
                     break;
                 };
+                local_runtime_event_bus::publish(&run_id, event.clone());
                 let proto_events = mapper.map_event(&event);
                 for proto_event in proto_events {
                     let _ = tx.send(Ok(proto_event)).await;
@@ -242,4 +251,3 @@ fn extract_user_input(params: &RequestParams) -> Option<String> {
     None
 }
 
-const SYSTEM_PROMPT: &str = "You are a coding assistant running locally via Ollama, integrated into the Warp terminal. Reply concisely. When you need to take an action (run a command, read a file, etc.), prefer to call the matching tool; otherwise reply with plain text.";

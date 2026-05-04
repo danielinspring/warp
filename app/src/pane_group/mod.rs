@@ -186,6 +186,7 @@ pub use pane::env_var_collection_pane::EnvVarCollectionPane;
 pub use pane::environment_management_pane::EnvironmentManagementPane;
 pub use pane::execution_profile_editor_pane::ExecutionProfileEditorPane;
 pub use pane::file_pane::FilePane;
+pub use pane::agent_viz_pane::AgentVizPane;
 pub use pane::network_log_pane::NetworkLogPane;
 pub use pane::notebook_pane::NotebookPane;
 pub use pane::settings_pane::SettingsPane;
@@ -1864,6 +1865,13 @@ impl PaneGroup {
                 // We don't yet support restoring execution profile editor panes.
                 Err(anyhow::anyhow!(
                     "Can't restore execution profile editor panes"
+                ))
+            }
+            LeafContents::AgentViz => {
+                // Agent viz panes are derived from in-process runtime events
+                // and are not restored across launches.
+                Err(anyhow::anyhow!(
+                    "Agent viz pane should not have been persisted, as it cannot be restored"
                 ))
             }
             LeafContents::NetworkLog => {
