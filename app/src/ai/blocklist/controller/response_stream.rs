@@ -15,7 +15,8 @@ use crate::{
     },
     ai::blocklist::action_model::{BlocklistAIActionEvent, BlocklistAIActionModel},
     ai::local_runtime_bridge::{
-        action_result_to_tool_result, tool_call_to_ai_action, ToolExecutionRequest,
+        action_result_to_tool_call_result_client_actions, action_result_to_tool_result,
+        tool_call_to_ai_action, ToolExecutionRequest,
     },
     network::NetworkStatus,
     report_error, send_telemetry_from_ctx,
@@ -85,10 +86,12 @@ pub struct ResponseStream {
 
     local_runtime_tool_loop: bool,
     action_model: Option<ModelHandle<BlocklistAIActionModel>>,
-    pending_local_runtime_tool_results: HashMap<
-        AIAgentActionId,
-        futures::channel::oneshot::Sender<Result<ToolCallResult, ToolExecutionError>>,
-    >,
+    pending_local_runtime_tool_results: HashMap<AIAgentActionId, PendingLocalRuntimeToolResult>,
+}
+
+struct PendingLocalRuntimeToolResult {
+    response_tx: oneshot::Sender<Result<ToolCallResult, ToolExecutionError>>,
+    request_id: String,
 }
 
 impl ResponseStream {
@@ -238,10 +241,12 @@ impl ResponseStream {
                     action_model.cancel_all_pending_actions(conversation_id, Some(reason), ctx);
                 });
             }
-            for (_, response_tx) in self.pending_local_runtime_tool_results.drain() {
-                let _ = response_tx.send(Err(ToolExecutionError::ExecutionFailed(anyhow!(
-                    "Local runtime request was cancelled"
-                ))));
+            for (_, pending) in self.pending_local_runtime_tool_results.drain() {
+                let _ = pending
+                    .response_tx
+                    .send(Err(ToolExecutionError::ExecutionFailed(anyhow!(
+                        "Local runtime request was cancelled"
+                    ))));
             }
         }
         ctx.emit(ResponseStreamEvent::AfterStreamFinished {
@@ -286,14 +291,21 @@ impl ResponseStream {
         };
 
         let action_id = action.id.clone();
-        self.pending_local_runtime_tool_results
-            .insert(action_id, request.response_tx);
+        self.pending_local_runtime_tool_results.insert(
+            action_id,
+            PendingLocalRuntimeToolResult {
+                response_tx: request.response_tx,
+                request_id: request.request_id,
+            },
+        );
 
         let Some(action_model) = self.action_model.clone() else {
-            if let Some(response_tx) = self.pending_local_runtime_tool_results.remove(&action.id) {
-                let _ = response_tx.send(Err(ToolExecutionError::ExecutionFailed(anyhow!(
-                    "Missing action model for local runtime tool request"
-                ))));
+            if let Some(pending) = self.pending_local_runtime_tool_results.remove(&action.id) {
+                let _ = pending
+                    .response_tx
+                    .send(Err(ToolExecutionError::ExecutionFailed(anyhow!(
+                        "Missing action model for local runtime tool request"
+                    ))));
             }
             return;
         };
@@ -321,14 +333,16 @@ impl ResponseStream {
             return;
         };
 
-        let Some(response_tx) = self.pending_local_runtime_tool_results.remove(action_id) else {
+        let Some(pending) = self.pending_local_runtime_tool_results.remove(action_id) else {
             return;
         };
 
         let Some(action_model) = self.action_model.clone() else {
-            let _ = response_tx.send(Err(ToolExecutionError::ExecutionFailed(anyhow!(
-                "Missing action model for local runtime tool result"
-            ))));
+            let _ = pending
+                .response_tx
+                .send(Err(ToolExecutionError::ExecutionFailed(anyhow!(
+                    "Missing action model for local runtime tool result"
+                ))));
             return;
         };
 
@@ -338,12 +352,28 @@ impl ResponseStream {
 
         match result {
             Some(result) => {
-                let _ = response_tx.send(Ok(action_result_to_tool_result(&result)));
+                if let Some(actions) =
+                    action_result_to_tool_call_result_client_actions(&result, &pending.request_id)
+                {
+                    self.has_received_client_actions = true;
+                    ctx.emit(ResponseStreamEvent::ReceivedEvent(Consumable::new(Ok(
+                        warp_multi_agent_api::ResponseEvent {
+                            r#type: Some(response_event::Type::ClientActions(
+                                response_event::ClientActions { actions },
+                            )),
+                        },
+                    ))));
+                }
+                let _ = pending
+                    .response_tx
+                    .send(Ok(action_result_to_tool_result(&result)));
             }
             None => {
-                let _ = response_tx.send(Err(ToolExecutionError::ExecutionFailed(anyhow!(
-                    "Finished action result was unavailable for local runtime tool"
-                ))));
+                let _ = pending
+                    .response_tx
+                    .send(Err(ToolExecutionError::ExecutionFailed(anyhow!(
+                        "Finished action result was unavailable for local runtime tool"
+                    ))));
             }
         }
     }

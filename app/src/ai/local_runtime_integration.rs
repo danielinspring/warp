@@ -94,6 +94,7 @@ async fn run_runtime(
     let executor = WarpToolExecutor::new(
         tool_request_tx,
         crate::ai::agent::task::TaskId::new(task_id.clone()),
+        request_id.clone(),
     );
 
     let runtime_config = RuntimeConfig {
@@ -250,4 +251,3 @@ fn extract_user_input(params: &RequestParams) -> Option<String> {
     }
     None
 }
-

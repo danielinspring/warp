@@ -15,6 +15,7 @@ use local_agent_runtime::tools::schema::{ToolSchema, ToolSchemaBuilder};
 use local_agent_runtime::tools::{PermissionDecision, ToolCall, ToolCallResult};
 use local_agent_runtime::{ToolExecutionError, ToolExecutor};
 use serde_json::Value;
+use uuid::Uuid;
 use warp_multi_agent_api as api;
 
 use crate::ai::agent::task::TaskId;
@@ -28,6 +29,7 @@ use crate::ai::agent::{
 pub struct ToolExecutionRequest {
     pub call: ToolCall,
     pub task_id: TaskId,
+    pub request_id: String,
     pub response_tx: oneshot::Sender<Result<ToolCallResult, ToolExecutionError>>,
 }
 
@@ -36,14 +38,20 @@ pub struct WarpToolExecutor {
     tools: Vec<ToolSchema>,
     request_tx: async_channel::Sender<ToolExecutionRequest>,
     task_id: TaskId,
+    request_id: String,
 }
 
 impl WarpToolExecutor {
-    pub fn new(request_tx: async_channel::Sender<ToolExecutionRequest>, task_id: TaskId) -> Self {
+    pub fn new(
+        request_tx: async_channel::Sender<ToolExecutionRequest>,
+        task_id: TaskId,
+        request_id: String,
+    ) -> Self {
         Self {
             tools: build_tool_schemas(),
             request_tx,
             task_id,
+            request_id,
         }
     }
 }
@@ -73,6 +81,7 @@ impl ToolExecutor for WarpToolExecutor {
             .send(ToolExecutionRequest {
                 call: call.clone(),
                 task_id: self.task_id.clone(),
+                request_id: self.request_id.clone(),
                 response_tx,
             })
             .await
@@ -188,6 +197,93 @@ pub fn action_result_to_tool_result(result: &AIAgentActionResult) -> ToolCallRes
     ToolCallResult {
         content: action_result_to_content(&result.result),
         is_error: !result.result.is_successful(),
+    }
+}
+
+pub fn action_result_to_tool_call_result_client_actions(
+    result: &AIAgentActionResult,
+    request_id: &str,
+) -> Option<Vec<api::ClientAction>> {
+    let proto_result =
+        action_result_to_proto_tool_call_result_type(&result.result).or_else(|| {
+            result
+                .result
+                .is_cancelled()
+                .then_some(proto_tool_call_cancel_result())
+        })?;
+
+    let message = api::Message {
+        id: Uuid::new_v4().to_string(),
+        task_id: result.task_id.to_string(),
+        request_id: request_id.to_string(),
+        timestamp: None,
+        server_message_data: String::new(),
+        citations: vec![],
+        message: Some(api::message::Message::ToolCallResult(
+            api::message::ToolCallResult {
+                tool_call_id: result.id.to_string(),
+                context: None,
+                result: Some(proto_result),
+            },
+        )),
+    };
+
+    Some(vec![
+        begin_transaction(),
+        api::ClientAction {
+            action: Some(api::client_action::Action::AddMessagesToTask(
+                api::client_action::AddMessagesToTask {
+                    task_id: result.task_id.to_string(),
+                    messages: vec![message],
+                },
+            )),
+        },
+        commit_transaction(),
+    ])
+}
+
+fn action_result_to_proto_tool_call_result_type(
+    result: &AIAgentActionResultType,
+) -> Option<api::message::tool_call_result::Result> {
+    use api::message::tool_call_result::Result as MessageResult;
+    use api::request::input::tool_call_result::Result as RequestResult;
+
+    let request_result: RequestResult = match result.clone() {
+        AIAgentActionResultType::RequestCommandOutput(result) => result.try_into().ok()?,
+        AIAgentActionResultType::ReadFiles(result) => result.try_into().ok()?,
+        AIAgentActionResultType::SearchCodebase(result) => result.try_into().ok()?,
+        AIAgentActionResultType::Grep(result) => result.try_into().ok()?,
+        AIAgentActionResultType::FileGlobV2(result) => result.try_into().ok()?,
+        _ => return None,
+    };
+
+    match request_result {
+        RequestResult::RunShellCommand(result) => Some(MessageResult::RunShellCommand(result)),
+        RequestResult::ReadFiles(result) => Some(MessageResult::ReadFiles(result)),
+        RequestResult::SearchCodebase(result) => Some(MessageResult::SearchCodebase(result)),
+        RequestResult::Grep(result) => Some(MessageResult::Grep(result)),
+        RequestResult::FileGlobV2(result) => Some(MessageResult::FileGlobV2(result)),
+        _ => None,
+    }
+}
+
+fn proto_tool_call_cancel_result() -> api::message::tool_call_result::Result {
+    api::message::tool_call_result::Result::Cancel(())
+}
+
+fn begin_transaction() -> api::ClientAction {
+    api::ClientAction {
+        action: Some(api::client_action::Action::BeginTransaction(
+            api::client_action::BeginTransaction {},
+        )),
+    }
+}
+
+fn commit_transaction() -> api::ClientAction {
+    api::ClientAction {
+        action: Some(api::client_action::Action::CommitTransaction(
+            api::client_action::CommitTransaction {},
+        )),
     }
 }
 
@@ -492,6 +588,78 @@ mod tests {
         assert!(!tool_result.is_error);
         assert!(tool_result.content.contains("src/lib.rs"));
         assert!(tool_result.content.contains("fn main() {}"));
+    }
+
+    #[test]
+    fn action_result_client_actions_persist_tool_call_result_message() {
+        let result = AIAgentActionResult {
+            id: AIAgentActionId::from("call_1".to_string()),
+            task_id: TaskId::new("task_1".to_string()),
+            result: AIAgentActionResultType::ReadFiles(ReadFilesResult::Success {
+                files: vec![FileContext::new(
+                    "src/lib.rs".to_string(),
+                    AnyFileContent::StringContent("fn main() {}".to_string()),
+                    None,
+                    None,
+                )],
+            }),
+        };
+
+        let actions =
+            action_result_to_tool_call_result_client_actions(&result, "request_1").unwrap();
+
+        assert_eq!(actions.len(), 3);
+        let Some(api::client_action::Action::BeginTransaction(_)) = &actions[0].action else {
+            panic!("expected begin transaction");
+        };
+        let Some(api::client_action::Action::AddMessagesToTask(add_messages)) = &actions[1].action
+        else {
+            panic!("expected AddMessagesToTask action");
+        };
+        let Some(api::client_action::Action::CommitTransaction(_)) = &actions[2].action else {
+            panic!("expected commit transaction");
+        };
+        assert_eq!(add_messages.task_id, "task_1");
+        assert_eq!(add_messages.messages.len(), 1);
+
+        let message = &add_messages.messages[0];
+        assert_eq!(message.task_id, "task_1");
+        assert_eq!(message.request_id, "request_1");
+        let Some(api::message::Message::ToolCallResult(tool_call_result)) = &message.message else {
+            panic!("expected persisted ToolCallResult message");
+        };
+        assert_eq!(tool_call_result.tool_call_id, "call_1");
+        assert!(matches!(
+            &tool_call_result.result,
+            Some(api::message::tool_call_result::Result::ReadFiles(_))
+        ));
+    }
+
+    #[test]
+    fn cancelled_action_result_persists_cancel_tool_call_result() {
+        let result = AIAgentActionResult {
+            id: AIAgentActionId::from("call_1".to_string()),
+            task_id: TaskId::new("task_1".to_string()),
+            result: AIAgentActionResultType::ReadFiles(ReadFilesResult::Cancelled),
+        };
+
+        let actions =
+            action_result_to_tool_call_result_client_actions(&result, "request_1").unwrap();
+        let Some(api::client_action::Action::AddMessagesToTask(add_messages)) = &actions[1].action
+        else {
+            panic!("expected AddMessagesToTask action");
+        };
+        let Some(api::message::Message::ToolCallResult(tool_call_result)) =
+            &add_messages.messages[0].message
+        else {
+            panic!("expected persisted ToolCallResult message");
+        };
+
+        assert_eq!(tool_call_result.tool_call_id, "call_1");
+        assert!(matches!(
+            &tool_call_result.result,
+            Some(api::message::tool_call_result::Result::Cancel(()))
+        ));
     }
 }
 
