@@ -16,8 +16,8 @@ use warpui::r#async::{Spawnable, Timer};
 use warpui::{Entity, EntityId, ModelContext, ModelHandle, SingletonEntity};
 
 use crate::ai::agent::{
-    AIAgentActionId, AIAgentActionType, AIAgentPtyWriteMode, ReadShellCommandOutputResult,
-    RequestCommandOutputResult, ShellCommandDelay, ShellCommandError,
+    conversation::AIConversationId, AIAgentActionId, AIAgentActionType, AIAgentPtyWriteMode,
+    ReadShellCommandOutputResult, RequestCommandOutputResult, ShellCommandDelay, ShellCommandError,
     TransferShellCommandControlToUserResult, WriteToLongRunningShellCommandResult,
 };
 use crate::ai::blocklist::permissions::CommandExecutionPermission;
@@ -252,6 +252,7 @@ impl ShellCommandExecutor {
                     };
                 ctx.emit(ShellCommandExecutorEvent::ExecuteCommand {
                     action_id: action_id.clone(),
+                    conversation_id: input.conversation_id,
                     command: decorated_command,
                 });
 
@@ -849,6 +850,7 @@ fn action_result_for_transfer_shell_command_control_to_user(
 pub enum ShellCommandExecutorEvent {
     ExecuteCommand {
         action_id: AIAgentActionId,
+        conversation_id: AIConversationId,
         command: String,
     },
     WriteToPty {

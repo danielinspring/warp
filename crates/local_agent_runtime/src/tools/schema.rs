@@ -161,6 +161,7 @@ impl ToolSchemaBuilder {
                 "type": "object",
                 "properties": self.properties,
                 "required": self.required,
+                "additionalProperties": false,
             }),
         }
     }

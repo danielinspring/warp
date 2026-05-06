@@ -43,10 +43,11 @@ Update each item from `[ ]` to `[x]` as the work lands.
   - Consider plan, ask-user-question, subagent/agent, web, document, and computer-use tools separately.
   - Avoid advertising tools before execution, permissions, UI rendering, and result conversion are implemented.
 
-- [ ] **Add schema and value validation before execution**
+- [x] **Add schema and value validation before execution**
   - Validate local runtime tool inputs against precise schemas before queuing Warp actions.
   - Return structured tool errors for invalid or missing arguments.
   - Add tool-specific validation for paths, grep/glob patterns, shell command options, and unsupported fields.
+  - Implemented object/type/non-empty validation, unsupported-argument rejection, strict tool schemas, and focused regression tests for the current five local tools.
 
 - [ ] **Improve permission flow semantics**
   - Make permission decisions explicit in the local runtime instead of treating supported tools as `Allow`.

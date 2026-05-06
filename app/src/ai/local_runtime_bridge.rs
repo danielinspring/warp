@@ -351,55 +351,131 @@ pub fn tool_call_to_proto_tool(
     use api::message::tool_call::Tool;
 
     match call.name.as_str() {
-        "run_shell_command" => Ok(Tool::RunShellCommand(
-            api::message::tool_call::RunShellCommand {
-                command: required_string(&call.arguments, "command", &call.name)?,
-                is_read_only: optional_bool(&call.arguments, "is_read_only").unwrap_or(false),
-                is_risky: optional_bool(&call.arguments, "is_risky").unwrap_or(false),
-                uses_pager: optional_bool(&call.arguments, "uses_pager").unwrap_or(false),
-                ..Default::default()
-            },
-        )),
-        "read_files" => Ok(Tool::ReadFiles(api::message::tool_call::ReadFiles {
-            files: required_string_array(&call.arguments, &["paths", "files"], &call.name)?
-                .into_iter()
-                .map(|path| api::message::tool_call::read_files::File {
-                    name: path,
-                    line_ranges: vec![],
-                })
-                .collect(),
-        })),
-        "grep" => Ok(Tool::Grep(api::message::tool_call::Grep {
-            queries: required_string_array(&call.arguments, &["queries", "patterns"], &call.name)
-                .or_else(|_| {
-                required_string(&call.arguments, "pattern", &call.name).map(|p| vec![p])
-            })?,
-            path: optional_string(&call.arguments, "path").unwrap_or_else(|| ".".to_string()),
-        })),
-        "file_glob_v2" => Ok(Tool::FileGlobV2(api::message::tool_call::FileGlobV2 {
-            patterns: required_string_array(&call.arguments, &["patterns"], &call.name).or_else(
-                |_| required_string(&call.arguments, "pattern", &call.name).map(|p| vec![p]),
-            )?,
-            search_dir: optional_string(&call.arguments, "search_dir")
-                .or_else(|| optional_string(&call.arguments, "path"))
-                .unwrap_or_default(),
-            min_depth: 0,
-            max_depth: 0,
-            max_matches: 0,
-        })),
-        "search_codebase" => Ok(Tool::SearchCodebase(
-            api::message::tool_call::SearchCodebase {
-                query: required_string(&call.arguments, "query", &call.name)?,
-                path_filters: optional_string_array(&call.arguments, "path_filters")
-                    .unwrap_or_default(),
-                codebase_path: optional_string(&call.arguments, "codebase_path")
-                    .unwrap_or_default(),
-            },
-        )),
+        "run_shell_command" => {
+            validate_allowed_arguments(
+                &call.arguments,
+                &["command", "is_read_only", "is_risky", "uses_pager"],
+                &call.name,
+            )?;
+            Ok(Tool::RunShellCommand(
+                api::message::tool_call::RunShellCommand {
+                    command: required_string(&call.arguments, "command", &call.name)?,
+                    is_read_only: optional_bool(&call.arguments, "is_read_only")?.unwrap_or(false),
+                    is_risky: optional_bool(&call.arguments, "is_risky")?.unwrap_or(false),
+                    uses_pager: optional_bool(&call.arguments, "uses_pager")?.unwrap_or(false),
+                    ..Default::default()
+                },
+            ))
+        }
+        "read_files" => {
+            validate_allowed_arguments(&call.arguments, &["paths", "files"], &call.name)?;
+            Ok(Tool::ReadFiles(api::message::tool_call::ReadFiles {
+                files: required_string_array(&call.arguments, &["paths", "files"], &call.name)?
+                    .into_iter()
+                    .map(|path| api::message::tool_call::read_files::File {
+                        name: path,
+                        line_ranges: vec![],
+                    })
+                    .collect(),
+            }))
+        }
+        "grep" => {
+            validate_allowed_arguments(
+                &call.arguments,
+                &["queries", "patterns", "pattern", "path"],
+                &call.name,
+            )?;
+            Ok(Tool::Grep(api::message::tool_call::Grep {
+                queries: if has_any_argument(&call.arguments, &["queries", "patterns"]) {
+                    required_string_array(&call.arguments, &["queries", "patterns"], &call.name)?
+                } else {
+                    vec![required_string(&call.arguments, "pattern", &call.name)?]
+                },
+                path: optional_string(&call.arguments, "path")?.unwrap_or_else(|| ".".to_string()),
+            }))
+        }
+        "file_glob_v2" => {
+            validate_allowed_arguments(
+                &call.arguments,
+                &["patterns", "pattern", "search_dir", "path"],
+                &call.name,
+            )?;
+            let search_dir = match optional_string(&call.arguments, "search_dir")? {
+                Some(search_dir) => search_dir,
+                None => optional_string(&call.arguments, "path")?.unwrap_or_default(),
+            };
+            Ok(Tool::FileGlobV2(api::message::tool_call::FileGlobV2 {
+                patterns: if has_any_argument(&call.arguments, &["patterns"]) {
+                    required_string_array(&call.arguments, &["patterns"], &call.name)?
+                } else {
+                    vec![required_string(&call.arguments, "pattern", &call.name)?]
+                },
+                search_dir,
+                min_depth: 0,
+                max_depth: 0,
+                max_matches: 0,
+            }))
+        }
+        "search_codebase" => {
+            validate_allowed_arguments(
+                &call.arguments,
+                &["query", "path_filters", "codebase_path"],
+                &call.name,
+            )?;
+            Ok(Tool::SearchCodebase(
+                api::message::tool_call::SearchCodebase {
+                    query: required_string(&call.arguments, "query", &call.name)?,
+                    path_filters: optional_string_array(&call.arguments, "path_filters")?
+                        .unwrap_or_default(),
+                    codebase_path: optional_string(&call.arguments, "codebase_path")?
+                        .unwrap_or_default(),
+                },
+            ))
+        }
         _ => Err(ToolExecutionError::NotFound {
             name: call.name.clone(),
         }),
     }
+}
+
+fn has_any_argument(arguments: &Value, names: &[&str]) -> bool {
+    names.iter().any(|name| arguments.get(name).is_some())
+}
+
+fn validate_allowed_arguments(
+    arguments: &Value,
+    allowed: &[&str],
+    tool_name: &str,
+) -> Result<(), ToolExecutionError> {
+    let object = arguments_object(arguments, tool_name)?;
+    let mut unsupported = object
+        .keys()
+        .filter(|name| !allowed.contains(&name.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if unsupported.is_empty() {
+        return Ok(());
+    }
+
+    unsupported.sort();
+    Err(ToolExecutionError::InvalidInput {
+        reason: format!(
+            "Tool `{tool_name}` does not support argument(s): `{}`",
+            unsupported.join("`, `")
+        ),
+    })
+}
+
+fn arguments_object<'a>(
+    arguments: &'a Value,
+    tool_name: &str,
+) -> Result<&'a serde_json::Map<String, Value>, ToolExecutionError> {
+    arguments
+        .as_object()
+        .ok_or_else(|| ToolExecutionError::InvalidInput {
+            reason: format!("Tool `{tool_name}` requires object arguments"),
+        })
 }
 
 fn required_string(
@@ -407,20 +483,51 @@ fn required_string(
     name: &str,
     tool_name: &str,
 ) -> Result<String, ToolExecutionError> {
-    optional_string(arguments, name).ok_or_else(|| ToolExecutionError::InvalidInput {
-        reason: format!("Tool `{tool_name}` requires string argument `{name}`"),
-    })
+    let value =
+        optional_string(arguments, name)?.ok_or_else(|| ToolExecutionError::InvalidInput {
+            reason: format!("Tool `{tool_name}` requires non-empty string argument `{name}`"),
+        })?;
+
+    if value.trim().is_empty() {
+        return Err(ToolExecutionError::InvalidInput {
+            reason: format!("Tool `{tool_name}` requires non-empty string argument `{name}`"),
+        });
+    }
+
+    Ok(value)
 }
 
-fn optional_string(arguments: &Value, name: &str) -> Option<String> {
-    arguments
-        .get(name)
-        .and_then(|value| value.as_str())
-        .map(str::to_string)
+fn optional_string(arguments: &Value, name: &str) -> Result<Option<String>, ToolExecutionError> {
+    let Some(value) = arguments.get(name) else {
+        return Ok(None);
+    };
+
+    let Some(value) = value.as_str() else {
+        return Err(ToolExecutionError::InvalidInput {
+            reason: format!("Argument `{name}` must be a string"),
+        });
+    };
+
+    if value.trim().is_empty() {
+        return Err(ToolExecutionError::InvalidInput {
+            reason: format!("Argument `{name}` must be a non-empty string"),
+        });
+    }
+
+    Ok(Some(value.to_string()))
 }
 
-fn optional_bool(arguments: &Value, name: &str) -> Option<bool> {
-    arguments.get(name).and_then(|value| value.as_bool())
+fn optional_bool(arguments: &Value, name: &str) -> Result<Option<bool>, ToolExecutionError> {
+    let Some(value) = arguments.get(name) else {
+        return Ok(None);
+    };
+
+    value
+        .as_bool()
+        .map(Some)
+        .ok_or_else(|| ToolExecutionError::InvalidInput {
+            reason: format!("Argument `{name}` must be a boolean"),
+        })
 }
 
 fn required_string_array(
@@ -428,32 +535,92 @@ fn required_string_array(
     names: &[&str],
     tool_name: &str,
 ) -> Result<Vec<String>, ToolExecutionError> {
-    names
-        .iter()
-        .find_map(|name| optional_string_array(arguments, name))
-        .filter(|values| !values.is_empty())
-        .ok_or_else(|| ToolExecutionError::InvalidInput {
-            reason: format!(
-                "Tool `{tool_name}` requires non-empty string array argument `{}`",
-                names.join("` or `")
-            ),
-        })
+    for name in names {
+        let Some(values) = optional_string_array(arguments, name)? else {
+            continue;
+        };
+
+        if values.is_empty() {
+            return Err(ToolExecutionError::InvalidInput {
+                reason: format!(
+                    "Tool `{tool_name}` requires non-empty string array argument `{name}`"
+                ),
+            });
+        }
+
+        return Ok(values);
+    }
+
+    Err(ToolExecutionError::InvalidInput {
+        reason: format!(
+            "Tool `{tool_name}` requires non-empty string array argument `{}`",
+            names.join("` or `")
+        ),
+    })
 }
 
-fn optional_string_array(arguments: &Value, name: &str) -> Option<Vec<String>> {
-    let value = arguments.get(name)?;
+fn optional_string_array(
+    arguments: &Value,
+    name: &str,
+) -> Result<Option<Vec<String>>, ToolExecutionError> {
+    let Some(value) = arguments.get(name) else {
+        return Ok(None);
+    };
+
     if let Some(values) = value.as_array() {
-        return Some(
+        return validate_string_values(
+            name,
             values
                 .iter()
-                .filter_map(|value| value.as_str().map(str::to_string))
-                .collect(),
-        );
+                .map(|value| {
+                    value.as_str().map(str::to_string).ok_or_else(|| {
+                        ToolExecutionError::InvalidInput {
+                            reason: format!("Argument `{name}` must contain only strings"),
+                        }
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        )
+        .map(Some);
     }
-    let value = value.as_str()?;
-    serde_json::from_str::<Vec<String>>(value)
-        .ok()
-        .or_else(|| Some(vec![value.to_string()]))
+
+    let Some(value) = value.as_str() else {
+        return Err(ToolExecutionError::InvalidInput {
+            reason: format!("Argument `{name}` must be a string array"),
+        });
+    };
+
+    if let Ok(values) = serde_json::from_str::<Vec<Value>>(value) {
+        return validate_string_values(
+            name,
+            values
+                .into_iter()
+                .map(|value| {
+                    value.as_str().map(str::to_string).ok_or_else(|| {
+                        ToolExecutionError::InvalidInput {
+                            reason: format!("Argument `{name}` must contain only strings"),
+                        }
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        )
+        .map(Some);
+    }
+
+    validate_string_values(name, vec![value.to_string()]).map(Some)
+}
+
+fn validate_string_values(
+    name: &str,
+    values: Vec<String>,
+) -> Result<Vec<String>, ToolExecutionError> {
+    if values.iter().any(|value| value.trim().is_empty()) {
+        return Err(ToolExecutionError::InvalidInput {
+            reason: format!("Argument `{name}` must contain only non-empty strings"),
+        });
+    }
+
+    Ok(values)
 }
 
 #[cfg(test)]
@@ -469,11 +636,25 @@ mod tests {
         }
     }
 
+    fn assert_invalid_input(call: ToolCall, expected_reason: &str) {
+        let task_id = TaskId::new("task_1".to_string());
+        let err = tool_call_to_ai_action(&call, &task_id).unwrap_err();
+
+        let ToolExecutionError::InvalidInput { reason } = err else {
+            panic!("expected invalid input");
+        };
+        assert!(
+            reason.contains(expected_reason),
+            "expected `{reason}` to contain `{expected_reason}`"
+        );
+    }
+
     #[test]
     fn schemas_advertise_only_supported_v1_tools() {
-        let names = build_tool_schemas()
-            .into_iter()
-            .map(|schema| schema.name)
+        let schemas = build_tool_schemas();
+        let names = schemas
+            .iter()
+            .map(|schema| schema.name.as_str())
             .collect::<Vec<_>>();
 
         assert_eq!(
@@ -486,8 +667,236 @@ mod tests {
                 "search_codebase"
             ]
         );
-        assert!(!names.iter().any(|name| name == "edit_files"));
-        assert!(!names.iter().any(|name| name == "create_file"));
+        assert!(!names.iter().any(|name| *name == "edit_files"));
+        assert!(!names.iter().any(|name| *name == "create_file"));
+        assert!(schemas
+            .iter()
+            .all(|schema| schema.parameters["additionalProperties"] == false));
+    }
+
+    #[test]
+    fn schemas_keep_arguments_conservative() {
+        let schemas = build_tool_schemas()
+            .into_iter()
+            .map(|schema| (schema.name.clone(), schema))
+            .collect::<std::collections::HashMap<_, _>>();
+
+        assert_eq!(
+            schemas["run_shell_command"].parameters["required"],
+            serde_json::json!(["command"])
+        );
+        assert_eq!(
+            schemas["read_files"].parameters["required"],
+            serde_json::json!(["paths"])
+        );
+        assert_eq!(
+            schemas["grep"].parameters["required"],
+            serde_json::json!(["queries"])
+        );
+        assert_eq!(
+            schemas["file_glob_v2"].parameters["required"],
+            serde_json::json!(["patterns"])
+        );
+        assert_eq!(
+            schemas["search_codebase"].parameters["required"],
+            serde_json::json!(["query"])
+        );
+    }
+
+    #[test]
+    fn tool_calls_map_legacy_aliases_to_warp_actions() {
+        let task_id = TaskId::new("task_1".to_string());
+
+        let read_action = tool_call_to_ai_action(
+            &call("read_files", serde_json::json!({"files": ["src/lib.rs"]})),
+            &task_id,
+        )
+        .unwrap();
+        assert!(matches!(
+            read_action.action,
+            AIAgentActionType::ReadFiles(ref request)
+                if request.locations.iter().any(|location| location.name == "src/lib.rs")
+        ));
+
+        let grep_action = tool_call_to_ai_action(
+            &call("grep", serde_json::json!({"pattern": "needle"})),
+            &task_id,
+        )
+        .unwrap();
+        assert!(matches!(
+            grep_action.action,
+            AIAgentActionType::Grep { ref queries, ref path }
+                if queries == &vec!["needle".to_string()] && path == "."
+        ));
+
+        let glob_action = tool_call_to_ai_action(
+            &call(
+                "file_glob_v2",
+                serde_json::json!({"pattern": "**/*.rs", "path": "crates"}),
+            ),
+            &task_id,
+        )
+        .unwrap();
+        assert!(matches!(
+            glob_action.action,
+            AIAgentActionType::FileGlobV2 { ref patterns, ref search_dir }
+                if patterns == &vec!["**/*.rs".to_string()] && search_dir.as_deref() == Some("crates")
+        ));
+    }
+
+    #[test]
+    fn tool_calls_reject_non_object_arguments() {
+        assert_invalid_input(
+            call("read_files", serde_json::json!("src/lib.rs")),
+            "requires object arguments",
+        );
+    }
+
+    #[test]
+    fn tool_calls_reject_unsupported_arguments() {
+        assert_invalid_input(
+            call(
+                "run_shell_command",
+                serde_json::json!({"command": "pwd", "cwd": "/tmp"}),
+            ),
+            "does not support argument",
+        );
+    }
+
+    #[test]
+    fn tool_calls_reject_wrong_argument_types() {
+        let cases = [
+            (
+                call("run_shell_command", serde_json::json!({"command": 1})),
+                "command` must be a string",
+            ),
+            (
+                call(
+                    "run_shell_command",
+                    serde_json::json!({"command": "pwd", "is_read_only": "yes"}),
+                ),
+                "is_read_only` must be a boolean",
+            ),
+            (
+                call(
+                    "read_files",
+                    serde_json::json!({"paths": ["src/lib.rs", 1]}),
+                ),
+                "paths` must contain only strings",
+            ),
+            (
+                call("grep", serde_json::json!({"queries": []})),
+                "requires non-empty string array argument `queries`",
+            ),
+            (
+                call("file_glob_v2", serde_json::json!({"pattern": ""})),
+                "pattern` must be a non-empty string",
+            ),
+            (
+                call(
+                    "search_codebase",
+                    serde_json::json!({"query": "runtime loop", "path_filters": ["app", false]}),
+                ),
+                "path_filters` must contain only strings",
+            ),
+        ];
+
+        for (call, expected_reason) in cases {
+            assert_invalid_input(call, expected_reason);
+        }
+    }
+
+    #[test]
+    fn tool_calls_reject_empty_required_values() {
+        let cases = [
+            (
+                call("run_shell_command", serde_json::json!({"command": "  "})),
+                "command` must be a non-empty string",
+            ),
+            (
+                call("read_files", serde_json::json!({"paths": []})),
+                "requires non-empty string array argument `paths`",
+            ),
+            (
+                call("search_codebase", serde_json::json!({"query": ""})),
+                "query` must be a non-empty string",
+            ),
+        ];
+
+        for (call, expected_reason) in cases {
+            assert_invalid_input(call, expected_reason);
+        }
+    }
+
+    #[test]
+    fn tool_calls_reject_invalid_preferred_alias_instead_of_falling_back() {
+        assert_invalid_input(
+            call(
+                "grep",
+                serde_json::json!({"queries": 1, "pattern": "needle"}),
+            ),
+            "queries` must be a string array",
+        );
+        assert_invalid_input(
+            call(
+                "file_glob_v2",
+                serde_json::json!({"patterns": 1, "pattern": "**/*.rs"}),
+            ),
+            "patterns` must be a string array",
+        );
+    }
+
+    #[test]
+    fn tool_calls_accept_stringified_string_arrays() {
+        let task_id = TaskId::new("task_1".to_string());
+        let read_action = tool_call_to_ai_action(
+            &call(
+                "read_files",
+                serde_json::json!({"paths": "[\"src/lib.rs\"]"}),
+            ),
+            &task_id,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            read_action.action,
+            AIAgentActionType::ReadFiles(ref request)
+                if request.locations.iter().any(|location| location.name == "src/lib.rs")
+        ));
+    }
+
+    #[test]
+    fn tool_calls_reject_stringified_arrays_with_non_strings() {
+        assert_invalid_input(
+            call(
+                "read_files",
+                serde_json::json!({"paths": "[\"src/lib.rs\", 1]"}),
+            ),
+            "paths` must contain only strings",
+        );
+    }
+
+    #[test]
+    fn supported_tool_names_match_advertised_schema_names() {
+        let advertised_names = build_tool_schemas()
+            .into_iter()
+            .map(|schema| schema.name)
+            .collect::<Vec<_>>();
+
+        for name in &advertised_names {
+            assert!(is_supported_tool(name));
+        }
+
+        assert_eq!(
+            advertised_names,
+            vec![
+                "run_shell_command",
+                "read_files",
+                "grep",
+                "file_glob_v2",
+                "search_codebase"
+            ]
+        );
     }
 
     #[test]
