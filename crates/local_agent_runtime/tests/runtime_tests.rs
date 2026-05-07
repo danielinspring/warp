@@ -1,7 +1,7 @@
 //! Integration tests for the local agent runtime.
 
 use futures::StreamExt;
-use local_agent_runtime::provider::{ChatRequest, ChatResponse, ChatStopReason};
+use local_agent_runtime::provider::{ChatRequest, ChatResponse, ChatStopReason, ChatStreamEvent};
 use local_agent_runtime::{
     AgentRuntime, FinishReason, LLMProvider, Message, PermissionDecision, ProviderCapabilities,
     ProviderError, RuntimeConfig, RuntimeEvent, ToolCall, ToolCallResult, ToolExecutionError,
@@ -161,6 +161,58 @@ impl LLMProvider for SlowProvider {
     }
 }
 
+struct StreamingProvider {
+    response: ChatResponse,
+    deltas: Vec<String>,
+}
+
+impl StreamingProvider {
+    fn text(deltas: &[&str]) -> Self {
+        Self {
+            response: ChatResponse {
+                text: deltas.join(""),
+                tool_calls: vec![],
+                stop_reason: ChatStopReason::Stop,
+            },
+            deltas: deltas.iter().map(|delta| delta.to_string()).collect(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LLMProvider for StreamingProvider {
+    async fn chat(&self, _request: ChatRequest) -> Result<ChatResponse, ProviderError> {
+        Err(ProviderError::EmptyResponse)
+    }
+
+    async fn chat_stream(
+        &self,
+        _request: ChatRequest,
+        event_tx: async_channel::Sender<ChatStreamEvent>,
+    ) -> Result<ChatResponse, ProviderError> {
+        for delta in &self.deltas {
+            let _ = event_tx
+                .send(ChatStreamEvent::TextDelta {
+                    text: delta.clone(),
+                })
+                .await;
+        }
+        Ok(self.response.clone())
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            streaming: true,
+            tool_calling: true,
+            vision: false,
+        }
+    }
+
+    fn name(&self) -> &str {
+        "streaming"
+    }
+}
+
 #[tokio::test]
 async fn test_simple_text_response() {
     let provider = MockProvider::text_only("Hello! I can help you with that.");
@@ -184,6 +236,36 @@ async fn test_simple_text_response() {
             reason: FinishReason::Done
         }
     )));
+}
+
+#[tokio::test]
+async fn test_streaming_text_response_emits_deltas_without_completed_text() {
+    let provider = StreamingProvider::text(&["streamed ", "hello"]);
+    let executor = MockExecutor::allow_all();
+    let config = RuntimeConfig::default();
+
+    let runtime = AgentRuntime::new(provider, executor, config);
+    let (events, messages) = runtime
+        .run_to_completion("test-model", vec![], "Hi there")
+        .await
+        .unwrap();
+
+    let deltas = events
+        .iter()
+        .filter_map(|event| match event {
+            RuntimeEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(deltas, vec!["streamed ", "hello"]);
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, RuntimeEvent::TextCompleted { .. })));
+
+    let Some(Message::Assistant(message)) = messages.last() else {
+        panic!("expected final assistant message");
+    };
+    assert_eq!(message.content, "streamed hello");
 }
 
 #[tokio::test]

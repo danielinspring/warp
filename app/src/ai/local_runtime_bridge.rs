@@ -1090,6 +1090,7 @@ pub mod event_mapper {
         pub run_id: String,
         pub task_id: String,
         task_created: bool,
+        current_text_message_id: Option<String>,
     }
 
     impl EventMapper {
@@ -1106,6 +1107,7 @@ pub mod event_mapper {
                 run_id,
                 task_id,
                 task_created: task_exists,
+                current_text_message_id: None,
             }
         }
 
@@ -1113,6 +1115,7 @@ pub mod event_mapper {
         pub fn map_event(&mut self, event: &RuntimeEvent) -> Vec<api::ResponseEvent> {
             match event {
                 RuntimeEvent::TurnStarted { turn } => {
+                    self.current_text_message_id = None;
                     if *turn == 1 {
                         // Emit Init on first turn
                         vec![api::ResponseEvent {
@@ -1128,7 +1131,53 @@ pub mod event_mapper {
                         vec![]
                     }
                 }
+                RuntimeEvent::TextDelta { text } => {
+                    if text.is_empty() {
+                        return vec![];
+                    }
+
+                    let mut actions = Vec::new();
+                    actions.push(begin_transaction());
+
+                    if !self.task_created {
+                        actions.push(create_task(&self.task_id));
+                        self.task_created = true;
+                    }
+
+                    match self.current_text_message_id.clone() {
+                        Some(message_id) => {
+                            actions.push(append_agent_output(
+                                &self.task_id,
+                                &message_id,
+                                &self.request_id,
+                                text,
+                            ));
+                        }
+                        None => {
+                            let message_id = Uuid::new_v4().to_string();
+                            actions.push(add_agent_output(
+                                &self.task_id,
+                                &message_id,
+                                &self.request_id,
+                                text,
+                            ));
+                            self.current_text_message_id = Some(message_id);
+                        }
+                    }
+
+                    actions.push(commit_transaction());
+
+                    vec![api::ResponseEvent {
+                        r#type: Some(api::response_event::Type::ClientActions(
+                            api::response_event::ClientActions { actions },
+                        )),
+                    }]
+                }
                 RuntimeEvent::TextCompleted { text } => {
+                    if self.current_text_message_id.is_some() {
+                        return vec![];
+                    }
+
                     let mut actions = Vec::new();
                     actions.push(begin_transaction());
 
@@ -1144,6 +1193,7 @@ pub mod event_mapper {
                         &self.request_id,
                         text,
                     ));
+                    self.current_text_message_id = Some(message_id);
                     actions.push(commit_transaction());
 
                     vec![api::ResponseEvent {
@@ -1307,6 +1357,114 @@ pub mod event_mapper {
                     messages: vec![message],
                 },
             )),
+        }
+    }
+
+    fn append_agent_output(
+        task_id: &str,
+        message_id: &str,
+        request_id: &str,
+        text: &str,
+    ) -> api::ClientAction {
+        let message = api::Message {
+            id: message_id.to_string(),
+            task_id: task_id.to_string(),
+            request_id: request_id.to_string(),
+            timestamp: None,
+            server_message_data: String::new(),
+            citations: vec![],
+            message: Some(api::message::Message::AgentOutput(
+                api::message::AgentOutput {
+                    text: text.to_string(),
+                },
+            )),
+        };
+        api::ClientAction {
+            action: Some(api::client_action::Action::AppendToMessageContent(
+                api::client_action::AppendToMessageContent {
+                    task_id: task_id.to_string(),
+                    message: Some(message),
+                    mask: Some(prost_types::FieldMask {
+                        paths: vec!["agent_output.text".to_string()],
+                    }),
+                },
+            )),
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn client_actions(event: &api::ResponseEvent) -> &[api::ClientAction] {
+            let Some(api::response_event::Type::ClientActions(client_actions)) = &event.r#type
+            else {
+                panic!("expected client actions event");
+            };
+            &client_actions.actions
+        }
+
+        #[test]
+        fn text_delta_creates_then_appends_agent_output_message() {
+            let mut mapper = EventMapper::new(
+                "conversation_1".to_string(),
+                "request_1".to_string(),
+                "run_1".to_string(),
+                "task_1".to_string(),
+                true,
+            );
+
+            let first = mapper.map_event(&RuntimeEvent::TextDelta {
+                text: "hel".to_string(),
+            });
+            let second = mapper.map_event(&RuntimeEvent::TextDelta {
+                text: "lo".to_string(),
+            });
+
+            let first_actions = client_actions(&first[0]);
+            assert_eq!(first_actions.len(), 3);
+            let Some(api::client_action::Action::AddMessagesToTask(add)) = &first_actions[1].action
+            else {
+                panic!("expected AddMessagesToTask action");
+            };
+            let message_id = add.messages[0].id.clone();
+            let Some(api::message::Message::AgentOutput(output)) = &add.messages[0].message else {
+                panic!("expected agent output message");
+            };
+            assert_eq!(output.text, "hel");
+
+            let second_actions = client_actions(&second[0]);
+            assert_eq!(second_actions.len(), 3);
+            let Some(api::client_action::Action::AppendToMessageContent(append)) =
+                &second_actions[1].action
+            else {
+                panic!("expected AppendToMessageContent action");
+            };
+            assert_eq!(append.task_id, "task_1");
+            assert_eq!(
+                append.mask.as_ref().unwrap().paths,
+                vec!["agent_output.text"]
+            );
+
+            let message = append.message.as_ref().unwrap();
+            assert_eq!(message.id, message_id);
+            let Some(api::message::Message::AgentOutput(output)) = &message.message else {
+                panic!("expected agent output message");
+            };
+            assert_eq!(output.text, "lo");
+
+            let merged = field_mask::FieldMaskOperation::append(
+                &api::MESSAGE_DESCRIPTOR,
+                &add.messages[0],
+                message,
+                append.mask.clone().unwrap(),
+            )
+            .apply()
+            .expect("append field mask should apply");
+            let Some(api::message::Message::AgentOutput(output)) = &merged.message else {
+                panic!("expected merged agent output message");
+            };
+            assert_eq!(output.text, "hello");
         }
     }
 }

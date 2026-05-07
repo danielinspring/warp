@@ -58,9 +58,11 @@ pub mod tools;
 // Re-export primary types at crate root for convenience.
 pub use config::RuntimeConfig;
 pub use error::{ProviderError, RuntimeError, ToolExecutionError};
-pub use events::{FinishReason, RuntimeEvent, RunResult, StopReason};
+pub use events::{FinishReason, RunResult, RuntimeEvent, StopReason};
 pub use messages::Message;
-pub use provider::{ChatRequest, ChatResponse, ChatStopReason, LLMProvider, ProviderCapabilities};
+pub use provider::{
+    ChatRequest, ChatResponse, ChatStopReason, ChatStreamEvent, LLMProvider, ProviderCapabilities,
+};
 pub use runtime::{AgentRuntime, CancelHandle};
-pub use tools::{PermissionDecision, ToolCall, ToolCallResult, ToolExecutor};
 pub use tools::schema::{ToolSchema, ToolSchemaBuilder};
+pub use tools::{PermissionDecision, ToolCall, ToolCallResult, ToolExecutor};

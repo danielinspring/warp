@@ -13,7 +13,7 @@ use crate::error::RuntimeError;
 use crate::events::{FinishReason, RuntimeEvent, StopReason};
 use crate::messages::normalize::truncate_tool_results;
 use crate::messages::{ConversationHistory, Message};
-use crate::provider::{ChatRequest, ChatStopReason, LLMProvider};
+use crate::provider::{ChatRequest, ChatResponse, ChatStopReason, ChatStreamEvent, LLMProvider};
 use crate::tools::{PermissionDecision, ToolCallResult, ToolExecutor};
 
 /// The local agent runtime.
@@ -200,11 +200,12 @@ where
             tools: tools.clone(),
         };
 
-        let response = match chat_with_cancel(
+        let chat_result = match chat_with_cancel(
             Arc::clone(&provider),
             request,
             config.llm_timeout,
             &mut cancel_rx,
+            sink,
         )
         .await?
         {
@@ -217,8 +218,9 @@ where
                 return Err(RuntimeError::Cancelled);
             }
         };
+        let response = chat_result.response;
 
-        if !response.text.is_empty() {
+        if !response.text.is_empty() && !chat_result.streamed_text {
             sink.send(RuntimeEvent::TextCompleted {
                 text: response.text.clone(),
             })
@@ -359,21 +361,38 @@ where
     }
 }
 
+struct ChatRunResult {
+    response: ChatResponse,
+    streamed_text: bool,
+}
+
 async fn chat_with_cancel<P>(
     provider: Arc<P>,
     request: ChatRequest,
     timeout: std::time::Duration,
     cancel_rx: &mut Option<watch::Receiver<bool>>,
-) -> Result<Option<crate::provider::ChatResponse>, RuntimeError>
+    sink: &mut (impl RuntimeEventSink + Send),
+) -> Result<Option<ChatRunResult>, RuntimeError>
 where
     P: LLMProvider,
 {
+    if provider.capabilities().streaming {
+        return chat_stream_with_cancel(provider, request, timeout, cancel_rx, sink).await;
+    }
+
     let call = tokio::time::timeout(timeout, provider.chat(request));
     if let Some(cancel_rx) = cancel_rx.as_mut() {
         tokio::select! {
             _ = wait_cancelled(cancel_rx) => Ok(None),
             result = call => match result {
-                Ok(response) => response.map(Some).map_err(RuntimeError::Provider),
+                Ok(response) => response
+                    .map(|response| {
+                        Some(ChatRunResult {
+                            response,
+                            streamed_text: false,
+                        })
+                    })
+                    .map_err(RuntimeError::Provider),
                 Err(_) => Err(RuntimeError::Provider(crate::ProviderError::Timeout {
                     seconds: timeout.as_secs(),
                 })),
@@ -381,11 +400,114 @@ where
         }
     } else {
         match call.await {
-            Ok(response) => response.map(Some).map_err(RuntimeError::Provider),
+            Ok(response) => response
+                .map(|response| {
+                    Some(ChatRunResult {
+                        response,
+                        streamed_text: false,
+                    })
+                })
+                .map_err(RuntimeError::Provider),
             Err(_) => Err(RuntimeError::Provider(crate::ProviderError::Timeout {
                 seconds: timeout.as_secs(),
             })),
         }
+    }
+}
+
+async fn chat_stream_with_cancel<P>(
+    provider: Arc<P>,
+    request: ChatRequest,
+    timeout: std::time::Duration,
+    cancel_rx: &mut Option<watch::Receiver<bool>>,
+    sink: &mut (impl RuntimeEventSink + Send),
+) -> Result<Option<ChatRunResult>, RuntimeError>
+where
+    P: LLMProvider,
+{
+    let (event_tx, event_rx) = async_channel::unbounded();
+    let call = tokio::time::timeout(timeout, provider.chat_stream(request, event_tx));
+    futures::pin_mut!(call);
+
+    let mut streamed_text = false;
+    let mut stream_events_open = true;
+
+    loop {
+        if let Some(cancel_rx) = cancel_rx.as_mut() {
+            tokio::select! {
+                _ = wait_cancelled(cancel_rx) => return Ok(None),
+                event = event_rx.recv(), if stream_events_open => {
+                    match event {
+                        Ok(ChatStreamEvent::TextDelta { text }) => {
+                            if !text.is_empty() {
+                                streamed_text = true;
+                                sink.send(RuntimeEvent::TextDelta { text }).await;
+                            }
+                        }
+                        Err(_) => stream_events_open = false,
+                    }
+                }
+                result = &mut call => {
+                    streamed_text = drain_stream_events(&event_rx, sink, streamed_text).await;
+                    return finish_chat_result(result, timeout, streamed_text);
+                }
+            }
+        } else {
+            tokio::select! {
+                event = event_rx.recv(), if stream_events_open => {
+                    match event {
+                        Ok(ChatStreamEvent::TextDelta { text }) => {
+                            if !text.is_empty() {
+                                streamed_text = true;
+                                sink.send(RuntimeEvent::TextDelta { text }).await;
+                            }
+                        }
+                        Err(_) => stream_events_open = false,
+                    }
+                }
+                result = &mut call => {
+                    streamed_text = drain_stream_events(&event_rx, sink, streamed_text).await;
+                    return finish_chat_result(result, timeout, streamed_text);
+                }
+            }
+        }
+    }
+}
+
+async fn drain_stream_events(
+    event_rx: &async_channel::Receiver<ChatStreamEvent>,
+    sink: &mut (impl RuntimeEventSink + Send),
+    mut streamed_text: bool,
+) -> bool {
+    while let Ok(event) = event_rx.try_recv() {
+        match event {
+            ChatStreamEvent::TextDelta { text } if !text.is_empty() => {
+                streamed_text = true;
+                sink.send(RuntimeEvent::TextDelta { text }).await;
+            }
+            ChatStreamEvent::TextDelta { .. } => {}
+        }
+    }
+    streamed_text
+}
+
+fn finish_chat_result(
+    result: Result<Result<ChatResponse, crate::ProviderError>, tokio::time::error::Elapsed>,
+    timeout: std::time::Duration,
+    streamed_text: bool,
+) -> Result<Option<ChatRunResult>, RuntimeError> {
+    match result {
+        Ok(response) => response
+            .map(|response| {
+                Some(ChatRunResult {
+                    response,
+                    streamed_text,
+                })
+            })
+            .map_err(RuntimeError::Provider),
+        Err(_) => Err(RuntimeError::Provider(crate::ProviderError::Timeout {
+            seconds: timeout.as_secs(),
+        })),
     }
 }
 

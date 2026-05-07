@@ -2,7 +2,10 @@
 //!
 //! Talks to Ollama's OpenAI-compatible `/v1/chat/completions` endpoint.
 
+use std::collections::BTreeMap;
+
 use anyhow::anyhow;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -10,7 +13,9 @@ use crate::error::ProviderError;
 use crate::messages::Message;
 use crate::tools::ToolCall;
 
-use super::{ChatRequest, ChatResponse, ChatStopReason, LLMProvider, ProviderCapabilities};
+use super::{
+    ChatRequest, ChatResponse, ChatStopReason, ChatStreamEvent, LLMProvider, ProviderCapabilities,
+};
 
 /// Configuration for connecting to an Ollama server.
 #[derive(Debug, Clone)]
@@ -151,11 +156,12 @@ impl OllamaProvider {
             })
             .collect()
     }
-}
 
-#[async_trait::async_trait]
-impl LLMProvider for OllamaProvider {
-    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ProviderError> {
+    async fn send_chat_request(
+        &self,
+        request: ChatRequest,
+        stream: bool,
+    ) -> Result<reqwest::Response, ProviderError> {
         let url = format!("{}/v1/chat/completions", self.base_url());
 
         let tools: Option<Vec<Value>> = if request.tools.is_empty() {
@@ -167,7 +173,7 @@ impl LLMProvider for OllamaProvider {
         let body = OllamaChatRequest {
             model: request.model,
             messages: Self::translate_messages(&request.messages),
-            stream: false,
+            stream,
             tools,
         };
 
@@ -203,6 +209,57 @@ impl LLMProvider for OllamaProvider {
             )));
         }
 
+        Ok(resp)
+    }
+
+    async fn process_stream_line(
+        line: &str,
+        assembly: &mut StreamAssembly,
+        event_tx: &async_channel::Sender<ChatStreamEvent>,
+    ) -> Result<bool, ProviderError> {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return Ok(false);
+        }
+
+        let Some(data) = trimmed.strip_prefix("data:") else {
+            return Ok(false);
+        };
+        let data = data.trim();
+        if data == "[DONE]" {
+            return Ok(true);
+        }
+
+        let chunk: OllamaChatStreamChunk =
+            serde_json::from_str(data).map_err(|e| ProviderError::RequestFailed(e.into()))?;
+        for choice in chunk.choices {
+            if let Some(finish_reason) = choice.finish_reason {
+                assembly.finish_reason = Some(finish_reason);
+            }
+
+            if let Some(content) = choice.delta.content {
+                if !content.is_empty() {
+                    assembly.text.push_str(&content);
+                    let _ = event_tx
+                        .send(ChatStreamEvent::TextDelta { text: content })
+                        .await;
+                }
+            }
+
+            if let Some(tool_calls) = choice.delta.tool_calls {
+                assembly.apply_tool_call_deltas(tool_calls);
+            }
+        }
+
+        Ok(false)
+    }
+}
+
+#[async_trait::async_trait]
+impl LLMProvider for OllamaProvider {
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ProviderError> {
+        let resp = self.send_chat_request(request, false).await?;
+
         let chat_resp: OllamaChatResponse = resp
             .json()
             .await
@@ -237,9 +294,45 @@ impl LLMProvider for OllamaProvider {
         })
     }
 
+    async fn chat_stream(
+        &self,
+        request: ChatRequest,
+        event_tx: async_channel::Sender<ChatStreamEvent>,
+    ) -> Result<ChatResponse, ProviderError> {
+        let resp = self.send_chat_request(request, true).await?;
+        let mut byte_stream = resp.bytes_stream();
+        let mut buffer = String::new();
+        let mut assembly = StreamAssembly::default();
+
+        while let Some(chunk) = byte_stream.next().await {
+            let chunk = chunk.map_err(|e| {
+                ProviderError::RequestFailed(anyhow!("Ollama stream failed: {}", e))
+            })?;
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+            while let Some(newline_index) = buffer.find('\n') {
+                let mut line = buffer[..newline_index].to_string();
+                if line.ends_with('\r') {
+                    line.pop();
+                }
+                buffer.drain(..=newline_index);
+
+                if Self::process_stream_line(&line, &mut assembly, &event_tx).await? {
+                    return Ok(assembly.into_response());
+                }
+            }
+        }
+
+        if !buffer.trim().is_empty() {
+            let _ = Self::process_stream_line(&buffer, &mut assembly, &event_tx).await?;
+        }
+
+        Ok(assembly.into_response())
+    }
+
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
-            streaming: false, // TODO: add streaming support
+            streaming: true,
             tool_calling: true,
             vision: false,
         }
@@ -307,6 +400,46 @@ struct OllamaChatMessageResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct OllamaChatStreamChunk {
+    #[serde(default)]
+    choices: Vec<OllamaChatStreamChoice>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaChatStreamChoice {
+    #[serde(default)]
+    delta: OllamaChatDelta,
+    #[serde(default)]
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OllamaChatDelta {
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<RawStreamToolCall>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawStreamToolCall {
+    #[serde(default)]
+    index: usize,
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    function: RawStreamFunction,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawStreamFunction {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<RawArguments>,
+}
+
+#[derive(Debug, Deserialize)]
 struct RawToolCall {
     #[serde(default)]
     id: String,
@@ -340,6 +473,92 @@ impl RawArguments {
                 serde_json::from_str(arguments).unwrap_or(Value::String(arguments.clone()))
             }
             RawArguments::Value(arguments) => arguments.clone(),
+        }
+    }
+
+    fn as_argument_fragment(&self) -> String {
+        match self {
+            RawArguments::String(arguments) => arguments.clone(),
+            RawArguments::Value(Value::String(arguments)) => arguments.clone(),
+            RawArguments::Value(arguments) => arguments.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct StreamAssembly {
+    text: String,
+    tool_calls: BTreeMap<usize, StreamToolCallAssembly>,
+    finish_reason: Option<String>,
+}
+
+impl StreamAssembly {
+    fn apply_tool_call_deltas(&mut self, tool_calls: Vec<RawStreamToolCall>) {
+        for call in tool_calls {
+            let assembled = self.tool_calls.entry(call.index).or_default();
+
+            if !call.id.is_empty() {
+                assembled.id = call.id;
+            }
+            if let Some(name) = call.function.name {
+                assembled.name.push_str(&name);
+            }
+            if let Some(arguments) = call.function.arguments {
+                assembled
+                    .arguments
+                    .push_str(&arguments.as_argument_fragment());
+            }
+        }
+    }
+
+    fn into_response(self) -> ChatResponse {
+        let tool_calls = self
+            .tool_calls
+            .into_values()
+            .filter(|call| !call.name.is_empty())
+            .map(StreamToolCallAssembly::into_tool_call)
+            .collect::<Vec<_>>();
+
+        let stop_reason = if !tool_calls.is_empty() {
+            ChatStopReason::ToolUse
+        } else {
+            match self.finish_reason.as_deref() {
+                Some("length") => ChatStopReason::MaxTokens,
+                _ => ChatStopReason::Stop,
+            }
+        };
+
+        ChatResponse {
+            text: self.text,
+            tool_calls,
+            stop_reason,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct StreamToolCallAssembly {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+impl StreamToolCallAssembly {
+    fn into_tool_call(self) -> ToolCall {
+        let arguments = if self.arguments.is_empty() {
+            Value::Object(Default::default())
+        } else {
+            serde_json::from_str(&self.arguments).unwrap_or(Value::String(self.arguments))
+        };
+
+        ToolCall {
+            id: if self.id.is_empty() {
+                uuid::Uuid::new_v4().to_string()
+            } else {
+                self.id
+            },
+            name: self.name,
+            arguments,
         }
     }
 }
@@ -388,6 +607,62 @@ mod tests {
         assert_eq!(
             calls[0].arguments,
             serde_json::json!({"paths": ["src/lib.rs"]})
+        );
+    }
+
+    #[test]
+    fn assembles_streamed_tool_call_arguments_from_fragments() {
+        let mut assembly = StreamAssembly::default();
+        assembly.apply_tool_call_deltas(vec![RawStreamToolCall {
+            index: 0,
+            id: "call_1".to_string(),
+            function: RawStreamFunction {
+                name: Some("run_shell_command".to_string()),
+                arguments: Some(RawArguments::String(r#"{"command":"pw"#.to_string())),
+            },
+        }]);
+        assembly.apply_tool_call_deltas(vec![RawStreamToolCall {
+            index: 0,
+            id: String::new(),
+            function: RawStreamFunction {
+                name: None,
+                arguments: Some(RawArguments::String(r#"d"}"#.to_string())),
+            },
+        }]);
+
+        let response = assembly.into_response();
+
+        assert_eq!(response.text, "");
+        assert_eq!(response.stop_reason, ChatStopReason::ToolUse);
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].id, "call_1");
+        assert_eq!(response.tool_calls[0].name, "run_shell_command");
+        assert_eq!(
+            response.tool_calls[0].arguments,
+            serde_json::json!({"command": "pwd"})
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_line_emits_text_delta_and_accumulates_text() {
+        let (tx, rx) = async_channel::unbounded();
+        let mut assembly = StreamAssembly::default();
+
+        let done = OllamaProvider::process_stream_line(
+            r#"data: {"choices":[{"delta":{"content":"hel"},"finish_reason":null}]}"#,
+            &mut assembly,
+            &tx,
+        )
+        .await
+        .unwrap();
+
+        assert!(!done);
+        assert_eq!(assembly.text, "hel");
+        assert_eq!(
+            rx.recv().await.unwrap(),
+            ChatStreamEvent::TextDelta {
+                text: "hel".to_string()
+            }
         );
     }
 }

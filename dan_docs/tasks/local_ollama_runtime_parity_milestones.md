@@ -14,7 +14,7 @@ Update each item from `[ ]` to `[x]` as the work lands.
   - Ensure later turns, resume, sharing, and transcript rendering do not see orphaned tool calls.
   - Implemented by emitting `AddMessagesToTask` with a `ToolCallResult` when the queued Warp action finishes.
 
-- [ ] **Add real Ollama response streaming**
+- [x] **Add real Ollama response streaming**
   - Switch the Ollama provider from non-streaming `stream: false` to streaming where supported.
   - Emit `RuntimeEvent::TextDelta` for text chunks.
   - Preserve tool-call assembly while streaming.
@@ -93,7 +93,7 @@ Update each item from `[ ]` to `[x]` as the work lands.
 
 - [ ] The local Ollama runtime currently uses a narrow provider/tool loop around five V1 tools.
 - [ ] MCP and skills are visible in the local runtime spec, but are not connected to execution.
-- [ ] The provider currently uses non-streaming OpenAI-compatible chat completions.
+- [x] The provider streams OpenAI-compatible chat completions when supported.
 - [x] Tool results are fed back inside the runtime loop and persisted as Warp transcript `ToolCallResult` messages.
 - [ ] Tool execution is serial.
 - [ ] Context management is limited to truncating tool result strings.
