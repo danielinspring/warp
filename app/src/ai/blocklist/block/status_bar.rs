@@ -823,7 +823,6 @@ impl BlocklistAIStatusBar {
         Some(render_warping_indicator(
             WarpingProps {
                 model: model.as_ref(),
-                terminal_model: &terminal_model,
                 action_model: self.action_model.as_ref(app),
                 shimmering_text_handle: &self.shimmering_text_handle,
                 summarization_start_time: self.summarization_start_time,

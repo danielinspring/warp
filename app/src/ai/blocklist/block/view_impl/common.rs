@@ -57,7 +57,7 @@ use crate::{
         },
         loading::shimmering_warp_loading_text,
     },
-    terminal::{self, TerminalModel},
+    terminal::{self},
     util::link_detection::{add_link_detection_mouse_interactions, DetectedLinksState},
     workspaces::{user_workspaces::UserWorkspaces, workspace::CustomerType},
 };
@@ -188,7 +188,6 @@ pub struct WarpingProps<'a, V> {
     /// short-circuited on click and a fresh snapshot is returned immediately.
     pub force_refresh_button: Option<ForceRefreshButtonProps<'a>>,
     pub action_model: &'a BlocklistAIActionModel,
-    pub terminal_model: &'a TerminalModel,
     pub default_warping_text: String,
     pub secondary_element: Option<Box<dyn Element>>,
     /// When an LRC subagent has sent at least one snapshot, the timestamp of the most recent snapshot.
@@ -367,11 +366,7 @@ pub fn render_warping_indicator<V: View>(
                 LOAD_OUTPUT_MESSAGE_FOR_WRITING_TO_COMMAND.to_owned()
             }
             action => {
-                let active_block = props.terminal_model.block_list().active_block();
-                if !props.model.status(app).is_streaming()
-                    && active_block.is_active_and_long_running()
-                    && active_block.agent_interaction_metadata().is_some()
-                {
+                if !props.model.status(app).is_streaming() {
                     if action.is_none() {
                         should_render_waiting_icon = true;
                         WAITING_FOR_USER_INPUT_MESSAGE.to_owned()
