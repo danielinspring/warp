@@ -98,7 +98,7 @@ async fn run_runtime(
     );
 
     let runtime_config = RuntimeConfig {
-        system_prompt: Some(local_runtime_spec::system_prompt().to_string()),
+        system_prompt: Some(local_runtime_spec::system_prompt_for_request(&params)),
         max_turns: 10,
         ..Default::default()
     };

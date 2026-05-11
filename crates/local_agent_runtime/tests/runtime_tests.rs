@@ -362,6 +362,42 @@ async fn test_tool_schemas_are_sent_to_provider() {
 }
 
 #[tokio::test]
+async fn test_system_prompt_is_prepended_to_runtime_history() {
+    let provider = MockProvider::text_only("done");
+    let requests = provider.requests.clone();
+    let executor = MockExecutor::allow_all();
+    let prompt = "dynamic prompt with cwd /repo".to_string();
+    let config = RuntimeConfig {
+        system_prompt: Some(prompt.clone()),
+        ..Default::default()
+    };
+    let initial_messages = vec![Message::User(local_agent_runtime::messages::UserMessage {
+        content: "Earlier context".to_string(),
+    })];
+
+    let runtime = AgentRuntime::new(provider, executor, config);
+    let (_events, messages) = runtime
+        .run_to_completion("test-model", initial_messages, "Current request")
+        .await
+        .unwrap();
+
+    let Message::System(system_message) = &messages[0] else {
+        panic!("expected final runtime history to start with system prompt");
+    };
+    assert_eq!(system_message.content, prompt);
+
+    let requests = requests.lock().unwrap();
+    let Message::System(request_system_message) = &requests[0].messages[0] else {
+        panic!("expected provider request to start with system prompt");
+    };
+    assert_eq!(request_system_message.content, prompt);
+    assert!(matches!(
+        &requests[0].messages[1],
+        Message::User(message) if message.content == "Earlier context"
+    ));
+}
+
+#[tokio::test]
 async fn test_tool_result_is_fed_back_with_original_call_id() {
     let provider = MockProvider::with_tool_call(
         "run_shell_command",

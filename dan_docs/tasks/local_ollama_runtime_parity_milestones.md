@@ -20,7 +20,7 @@ Update each item from `[ ]` to `[x]` as the work lands.
   - Preserve tool-call assembly while streaming.
   - Ensure UI receives incremental text instead of only `TextCompleted`.
 
-- [ ] **Build dynamic local runtime prompt and context**
+- [x] **Build dynamic local runtime prompt and context**
   - Replace the static local runtime prompt with a prompt assembled from request context.
   - Include working directory, relevant system context, user context, memory settings, and available runtime capabilities.
   - Respect `RequestParams.is_memory_enabled`.
