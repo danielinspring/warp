@@ -1965,6 +1965,13 @@ impl PaneGroup {
                     "Agent viz pane should not have been persisted, as it cannot be restored"
                 ))
             }
+            LeafContents::Welcome { .. } => {
+                // Welcome panes are ephemeral entrypoint panes and are not
+                // restored across launches.
+                Err(anyhow::anyhow!(
+                    "Welcome pane should not have been persisted, as it cannot be restored"
+                ))
+            }
             LeafContents::NetworkLog => {
                 // Network log panes are intentionally not restored. Two
                 // reasons:

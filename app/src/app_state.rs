@@ -180,6 +180,7 @@ impl LeafContents {
             // an on-disk log via the app-state database.
             LeafContents::NetworkLog
             | LeafContents::AgentViz
+            | LeafContents::Welcome { .. }
             // Environment management panes are opened on-demand via workspace
             // actions and have no persistable state.
             | LeafContents::EnvironmentManagement(_) => false,

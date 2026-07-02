@@ -159,7 +159,6 @@ use code_review::git_repo_model::GitRepoModels;
 use code_review::GlobalCodeReviewModel;
 use quit_warning::UnsavedStateSummary;
 use ai::agent_viz::pane_manager::AgentVizPaneManager;
-use server::network_logging::NetworkLogModel;
 #[cfg(feature = "local_fs")]
 use repo_metadata::{
     repositories::DetectedRepositories, watcher::DirectoryWatcher, RepoMetadataModel,

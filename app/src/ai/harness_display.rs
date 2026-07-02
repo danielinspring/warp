@@ -63,7 +63,7 @@ pub fn circle_background(harness: Harness, theme: &WarpTheme) -> WarpThemeFill {
         Harness::Codex => WarpThemeFill::Solid(OPENAI_COLOR),
         Harness::Gemini => WarpThemeFill::Solid(GEMINI_BLUE),
         Harness::OpenCode => WarpThemeFill::Solid(OPENCODE_COLOR),
-        Harness::Unknown => internal_colors::fg_overlay_2(theme),
+        Harness::Ollama | Harness::Unknown => internal_colors::fg_overlay_2(theme),
     }
 }
 
@@ -74,7 +74,9 @@ pub fn icon_fill_on_circle(harness: Harness, theme: &WarpTheme) -> WarpThemeFill
         Harness::Claude | Harness::Codex | Harness::Gemini | Harness::OpenCode => {
             WarpThemeFill::Solid(ColorU::white())
         }
-        Harness::Unknown => theme.main_text_color(internal_colors::fg_overlay_2(theme)),
+        Harness::Ollama | Harness::Unknown => {
+            theme.main_text_color(internal_colors::fg_overlay_2(theme))
+        }
     }
 }
 

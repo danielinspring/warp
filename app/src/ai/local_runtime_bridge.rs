@@ -219,6 +219,7 @@ pub fn action_result_to_tool_call_result_client_actions(
         timestamp: None,
         server_message_data: String::new(),
         citations: vec![],
+        fetched_memories: vec![],
         message: Some(api::message::Message::ToolCallResult(
             api::message::ToolCallResult {
                 tool_call_id: result.id.to_string(),
@@ -1282,6 +1283,7 @@ pub mod event_mapper {
             timestamp: None,
             server_message_data: String::new(),
             citations: vec![],
+            fetched_memories: vec![],
             message: Some(api::message::Message::ToolCall(api::message::ToolCall {
                 tool_call_id: call.id.clone(),
                 tool: Some(proto_tool),
@@ -1344,6 +1346,7 @@ pub mod event_mapper {
             timestamp: None,
             server_message_data: String::new(),
             citations: vec![],
+            fetched_memories: vec![],
             message: Some(api::message::Message::AgentOutput(
                 api::message::AgentOutput {
                     text: text.to_string(),
@@ -1373,6 +1376,7 @@ pub mod event_mapper {
             timestamp: None,
             server_message_data: String::new(),
             citations: vec![],
+            fetched_memories: vec![],
             message: Some(api::message::Message::AgentOutput(
                 api::message::AgentOutput {
                     text: text.to_string(),

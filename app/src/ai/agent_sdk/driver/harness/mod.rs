@@ -451,7 +451,12 @@ pub(crate) fn harness_model_env_vars(
         Harness::Claude => {
             env_vars.insert(OsString::from("ANTHROPIC_MODEL"), OsString::from(model_id));
         }
-        Harness::Oz | Harness::OpenCode | Harness::Gemini | Harness::Codex | Harness::Unknown => {}
+        Harness::Oz
+        | Harness::OpenCode
+        | Harness::Gemini
+        | Harness::Codex
+        | Harness::Ollama
+        | Harness::Unknown => {}
     }
 
     env_vars

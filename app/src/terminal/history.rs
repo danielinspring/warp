@@ -485,6 +485,17 @@ impl History {
         self.session_id_to_shell_host.keys().cloned().collect()
     }
 
+    /// Returns a tuple of (count, &HistoryEntry) for all commands in the history, where count is
+    /// the number of times the command has been run.
+    pub fn command_summaries(&self, hostname: String) -> Vec<(u32, &HistoryEntry)> {
+        self.persisted_commands_summary
+            .iter()
+            .filter(|(shell_host, _)| shell_host.hostname == hostname)
+            .flat_map(|(_, summaries)| summaries.values())
+            .map(|summary| (summary.count, &summary.most_recent_entry))
+            .collect()
+    }
+
     /// Initializes the history model for the given session.
     ///
     /// Command history from the shell's history file is read asynchronously on a background

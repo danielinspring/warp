@@ -245,6 +245,20 @@ fn render_context_line(context: &AIAgentContext) -> String {
             option_or_unknown(branch.as_deref()),
             head
         ),
+        AIAgentContext::Repository { name, owner } => format!(
+            "Repository: name={}, owner={}",
+            name,
+            option_or_unknown(owner.as_deref())
+        ),
+        AIAgentContext::PullRequest {
+            number,
+            state,
+            draft,
+            base_branch,
+        } => format!(
+            "Pull request: number={}, state={}, draft={}, base_branch={}",
+            number, state, draft, base_branch
+        ),
         AIAgentContext::Skills { skills } => format!(
             "Skills available in request context: {}",
             join_or_none(

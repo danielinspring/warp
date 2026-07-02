@@ -1,7 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
-use ai::api_keys::{ApiKeyManager, ApiKeyManagerEvent, CustomEndpoint, CustomEndpointModel};
+use ai::api_keys::{
+    ApiKeyManager, ApiKeyManagerEvent, ApiKeys, CustomEndpoint, CustomEndpointModel,
+    OllamaConnectionState,
+};
 pub use ai::LLMId;
 use parking_lot::FairMutex;
 use serde::{de, Deserialize, Serialize};
@@ -12,7 +15,6 @@ use warp_multi_agent_api as api;
 use warpui::{AppContext, Entity, EntityId, ModelContext, SingletonEntity};
 
 use super::custom_model_routers::{self, CustomModelRouter, ModelConfigError};
-use ai::api_keys::{ApiKeyManager, ApiKeyManagerEvent, ApiKeys, OllamaConnectionState};
 use super::execution_profiles::profiles::AIExecutionProfilesModel;
 use crate::auth::auth_manager::{AuthManager, AuthManagerEvent};
 use crate::auth::AuthStateProvider;
@@ -49,6 +51,7 @@ pub fn is_using_api_key_for_provider(provider: &LLMProvider, app: &AppContext) -
         LLMProvider::Anthropic => manager.keys().anthropic.is_some(),
         LLMProvider::Google => manager.keys().google.is_some(),
         LLMProvider::Xai => manager.grok_tokens().is_some(),
+        LLMProvider::Ollama => false,
         LLMProvider::Unknown => false,
     }
 }
@@ -152,6 +155,7 @@ impl LLMProvider {
             LLMProvider::Anthropic => "Anthropic",
             LLMProvider::Google => "Google",
             LLMProvider::Xai => "xAI",
+            LLMProvider::Ollama => "Ollama",
             LLMProvider::Unknown => "this provider",
         }
     }

@@ -227,7 +227,7 @@ impl ResponseStream {
                 |_, _| {},
             );
 
-            ctx.subscribe_to_model(&action_model, |me, event, ctx| {
+            ctx.subscribe_to_model(&action_model, |me, _, event, ctx| {
                 me.handle_local_runtime_action_event(event, ctx);
             });
         } else {

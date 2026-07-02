@@ -298,6 +298,7 @@ fn add_agent_output(
         timestamp: None,
         server_message_data: String::new(),
         citations: vec![],
+        fetched_memories: vec![],
         message: Some(api::message::Message::AgentOutput(
             api::message::AgentOutput {
                 text: text.to_string(),
@@ -351,6 +352,7 @@ fn tool_call_to_action(
         timestamp: None,
         server_message_data: String::new(),
         citations: vec![],
+        fetched_memories: vec![],
         message: Some(api::message::Message::ToolCall(api::message::ToolCall {
             tool_call_id,
             tool: Some(proto_tool),

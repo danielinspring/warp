@@ -279,6 +279,11 @@ impl PaneId {
         Self::new_from_ctx(IPaneType::GetStarted, ctx)
     }
 
+    /// Creates a [`PaneId`] from a [`ViewContext<PaneView<WelcomeView>>`].
+    pub fn from_welcome_pane_ctx(ctx: &ViewContext<PaneView<WelcomeView>>) -> Self {
+        Self::new_from_ctx(IPaneType::Welcome, ctx)
+    }
+
     /// Creates a [`PaneId`] from a [`ViewContext<PaneView<NetworkLogView>>`].
     pub fn from_network_log_pane_ctx(ctx: &ViewContext<PaneView<NetworkLogView>>) -> Self {
         Self::new_from_ctx(IPaneType::NetworkLog, ctx)
@@ -384,6 +389,13 @@ impl PaneId {
         get_started_pane_view: &ViewHandle<PaneView<GetStartedView>>,
     ) -> Self {
         Self::new(IPaneType::GetStarted, get_started_pane_view)
+    }
+
+    /// Creates a [`PaneId`] from a [`PaneView<WelcomeView>`] entity ID.
+    pub fn from_welcome_pane_view(
+        welcome_pane_view: &ViewHandle<PaneView<WelcomeView>>,
+    ) -> Self {
+        Self::new(IPaneType::Welcome, welcome_pane_view)
     }
 
     /// Creates a [`PaneId`] from a [`PaneView<NetworkLogView>`] entity ID.

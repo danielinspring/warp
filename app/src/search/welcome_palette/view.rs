@@ -36,9 +36,11 @@ use crate::search::command_palette::mixer::CommandPaletteItemAction;
 use crate::search::command_palette::new_session::{AllowedSessionKinds, NewSessionDataSource};
 use crate::search::command_palette::{launch_config, warp_drive, CommandPaletteMixer};
 use crate::search::command_search::projects::project_data_source::ProjectDataSource;
-use crate::search::command_search::projects::{ProjectSearchItem, SuggestedProjectsDataSource};
+use crate::search::command_search::projects::{
+    os_probably_case_sensitive, ProjectSearchItem, SuggestedProjectsDataSource,
+};
 use crate::search::data_source::QueryResult;
-use crate::search::mixer::{dedupe_score, DedupeStrategy};
+
 use crate::search::result_renderer::QueryResultRenderer;
 use crate::search::search_bar::{
     SearchBar, SearchBarEvent, SearchBarState, SearchResultOrdering, SelectionUpdate,
@@ -64,6 +66,36 @@ const MAX_SEARCH_RESULTS: usize = 250;
 
 const MAX_PROJECTS_IN_ZERO_STATE: usize = 4;
 const MAX_ITEMS_IN_ZERO_STATE: usize = 5;
+
+/// Deduplicate project results by path, keeping the first (highest-priority) occurrence.
+fn dedupe_project_query_results(
+    results: Vec<QueryResult<CommandPaletteItemAction>>,
+) -> Vec<QueryResult<CommandPaletteItemAction>> {
+    let mut deduped = Vec::with_capacity(results.len());
+    let mut seen_paths = HashSet::new();
+
+    for result in results {
+        let path_key = match result.accept_result() {
+            CommandPaletteItemAction::NewConversationInProject { path, .. } => {
+                if os_probably_case_sensitive() {
+                    path
+                } else {
+                    path.to_lowercase()
+                }
+            }
+            _ => {
+                deduped.push(result);
+                continue;
+            }
+        };
+
+        if seen_paths.insert(path_key) {
+            deduped.push(result);
+        }
+    }
+
+    deduped
+}
 
 #[derive(Debug)]
 pub enum Action {
@@ -173,7 +205,7 @@ impl warpui::View for WelcomePalette {
         let mut palette = Flex::column();
         palette.add_child(self.render_search_bar());
 
-        if self.search_bar_state.as_ref(app).should_show_zero_state() {
+        if self.search_bar.as_ref(app).should_show_zero_state(app) {
             palette.add_child(
                 Shrinkable::new(
                     1.,
@@ -258,7 +290,6 @@ impl WelcomePalette {
                 mixer.add_sync_source(new_session_data_source.clone(), HashSet::new());
             }
 
-            mixer.set_dedupe_strategy(DedupeStrategy::HighestScore);
             mixer
         });
 
@@ -368,7 +399,7 @@ impl WelcomePalette {
             vec![]
         };
 
-        let projects = dedupe_score(
+        let projects = dedupe_project_query_results(
             projects
                 .into_iter()
                 .map(QueryResult::from)
@@ -391,29 +422,27 @@ impl WelcomePalette {
     /// Set the active query filter in the search bar to be `filter`.
     pub fn set_active_query_filter(&mut self, filter: QueryFilter, ctx: &mut ViewContext<Self>) {
         self.search_bar.update(ctx, |view, ctx| {
-            view.set_visible_query_filter(Some((filter, filter.filter_atom().primary_text)), ctx)
+            view.set_query_filter(Some((filter, filter.filter_atom().primary_text)), ctx)
         });
         ctx.notify();
     }
 
     pub fn select_next_item(&mut self, ctx: &mut ViewContext<Self>) {
-        self.search_bar_state.update(ctx, |state, ctx| {
-            state.handle_selection_update(SelectionUpdate::Down, ctx);
+        self.search_bar.update(ctx, |search_bar, ctx| {
+            search_bar.handle_selection_update(SelectionUpdate::Down, ctx);
         });
         ctx.notify();
     }
 
     pub fn select_prev_item(&mut self, ctx: &mut ViewContext<Self>) {
-        self.search_bar_state.update(ctx, |state, ctx| {
-            state.handle_selection_update(SelectionUpdate::Up, ctx);
+        self.search_bar.update(ctx, |search_bar, ctx| {
+            search_bar.handle_selection_update(SelectionUpdate::Up, ctx);
         });
         ctx.notify();
     }
 
     pub fn active_query_filter(&self, app: &AppContext) -> Option<QueryFilter> {
-        self.search_bar_state
-            .as_ref(app)
-            .active_visible_query_filter()
+        self.search_bar_state.as_ref(app).active_query_filter()
     }
 
     pub fn is_mode_enabled(&self, mode: PaletteMode, app: &AppContext) -> bool {
