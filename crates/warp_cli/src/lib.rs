@@ -1,10 +1,10 @@
 #![cfg_attr(target_family = "wasm", allow(dead_code))]
 
-use std::{env, fmt, path::Path};
+use std::path::Path;
+use std::{env, fmt};
 
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use url::Url;
-
 use warp_core::channel::ChannelState;
 use warp_core::features::FeatureFlag;
 
@@ -16,16 +16,22 @@ mod process_handle;
 pub mod artifact;
 pub mod scope;
 pub mod skill;
+mod sort_order;
+pub use sort_order::SortOrderArg;
 
 pub mod agent;
+pub mod api_key;
 pub mod completions;
 pub mod config_file;
+mod date_time;
 pub mod environment;
 pub mod federate;
 pub mod harness_support;
 pub mod integration;
 pub mod json_filter;
+pub mod local_control;
 pub mod mcp;
+pub mod memory_store;
 pub mod model;
 pub mod provider;
 pub mod schedule;
@@ -61,6 +67,26 @@ pub struct ParentOpts {
     pub handle: Option<process_handle::ProcessHandle>,
 }
 
+/// Returns whether an argument requests one of Warp's hidden worker modes.
+pub fn is_worker_invocation(arg: &str) -> bool {
+    let command = WorkerCommand::augment_subcommands(clap::Command::new("worker"));
+    command.find_subcommand(arg).is_some()
+        || arg.strip_prefix("--").is_some_and(|long_flag| {
+            command
+                .get_subcommands()
+                .any(|subcommand| subcommand.get_long_flag() == Some(long_flag))
+        })
+}
+
+/// Hidden worker args used to scope remote-server proxy/daemon sockets by
+/// Warp identity without exposing credentials.
+#[derive(Debug, Clone, Default, clap::Args)]
+pub struct RemoteServerIdentityArgs {
+    /// Non-secret identity partition key for the remote-server daemon.
+    #[arg(long = "identity-key", hide = true)]
+    pub identity_key: String,
+}
+
 /// Global options that apply to all CLI commands.
 #[derive(Debug, Default, Clone, clap::Args)]
 pub struct GlobalOptions {
@@ -79,7 +105,11 @@ pub struct GlobalOptions {
     pub output_format: OutputFormat,
 }
 
-/// Command-line argument parser for the main Warp binary. This is used across all channels.
+/// Normal argument parser for the shared Warp executable across all channels.
+///
+/// Oz commands are subcommands of this parser, so invoking an `oz` symlink does
+/// not require a mode flag. Warp Control uses its separate [`local_control::ControlArgs`]
+/// parser, selected before this parser sees the arguments.
 #[derive(Debug, Default, Parser, Clone)]
 #[command(
     name = "oz",
@@ -234,6 +264,15 @@ impl Args {
                     }
                 }
 
+                if !FeatureFlag::APIKeyManagement.is_enabled() {
+                    let args: Vec<String> = env::args().collect();
+                    if args.len() > 1 && args[1] == "api-key" {
+                        eprintln!("error: unrecognized subcommand 'api-key'\n");
+                        eprintln!("For more information, try '--help'");
+                        std::process::exit(2);
+                    }
+                }
+
                 let command = Self::clap_command();
 
                 command.try_get_matches()
@@ -328,17 +367,20 @@ impl Args {
                     })
             });
         }
-        // Hide the message subcommand from help text.
-        if !FeatureFlag::OrchestrationV2.is_enabled() {
-            command = command.mut_subcommand("run", |run_cmd| {
-                run_cmd.mut_subcommand("message", |c| c.hide(true))
-            });
-        }
 
         // Hide the artifact subcommand from help text.
         if !FeatureFlag::ArtifactCommand.is_enabled() {
             command = command.mut_subcommand("artifact", |c| c.hide(true));
         }
+
+        // Hide the api-key subcommand from help text.
+        if !FeatureFlag::APIKeyManagement.is_enabled() {
+            command = command.mut_subcommand("api-key", |c| c.hide(true));
+        }
+
+        // Wire up `--version` / `-V` using the same version metadata used elsewhere in the
+        // app, so the CLI reports the build's release tag.
+        command = command.version(version_string());
 
         // Substitute the actual binary name into help output. Ideally clap would do this for us.
         let bin_name =
@@ -437,14 +479,14 @@ pub enum WorkerCommand {
     /// to the daemon via a Unix domain socket.
     #[cfg(not(target_family = "wasm"))]
     #[clap(hide = true)]
-    RemoteServerProxy,
+    RemoteServerProxy(RemoteServerIdentityArgs),
 
     /// Run the long-lived remote development server daemon.
     /// Listens on a Unix domain socket and accepts multiple concurrent
     /// connections from proxy processes.
     #[cfg(not(target_family = "wasm"))]
     #[clap(hide = true)]
-    RemoteServerDaemon,
+    RemoteServerDaemon(RemoteServerIdentityArgs),
 
     /// Run a headless ripgrep search worker.
     #[cfg(not(target_family = "wasm"))]
@@ -486,6 +528,12 @@ pub enum CliCommand {
     /// Manage available models.
     #[command(subcommand)]
     Model(crate::model::ModelCommand),
+    /// Manage memory stores.
+    #[command(subcommand, alias = "memory-stores")]
+    MemoryStore(crate::memory_store::MemoryStoreCommand),
+    /// Manage memories.
+    #[command(subcommand)]
+    Memory(crate::memory_store::MemoryCommand),
 
     /// Log in to Warp.
     Login,
@@ -522,6 +570,36 @@ pub enum CliCommand {
     /// Manage artifacts.
     #[command(subcommand)]
     Artifact(crate::artifact::ArtifactCommand),
+
+    /// Manage API keys.
+    #[command(subcommand)]
+    ApiKey(crate::api_key::ApiKeyCommand),
+}
+
+impl CliCommand {
+    /// Returns the command path used to identify this invocation in tracing.
+    pub fn as_str_for_tracing(&self) -> &'static str {
+        match self {
+            CliCommand::Agent(command) => command.as_str_for_tracing(),
+            CliCommand::Environment(command) => command.as_str_for_tracing(),
+            CliCommand::MCP(command) => command.as_str_for_tracing(),
+            CliCommand::Run(command) => command.as_str_for_tracing(),
+            CliCommand::Model(command) => command.as_str_for_tracing(),
+            CliCommand::Login => "login",
+            CliCommand::Logout => "logout",
+            CliCommand::Whoami => "whoami",
+            CliCommand::Provider(command) => command.as_str_for_tracing(),
+            CliCommand::Integration(command) => command.as_str_for_tracing(),
+            CliCommand::Schedule(command) => command.as_str_for_tracing(),
+            CliCommand::Secret(command) => command.as_str_for_tracing(),
+            CliCommand::Federate(command) => command.as_str_for_tracing(),
+            CliCommand::HarnessSupport(args) => args.command.as_str_for_tracing(),
+            CliCommand::Artifact(command) => command.as_str_for_tracing(),
+            CliCommand::ApiKey(command) => command.as_str_for_tracing(),
+            CliCommand::MemoryStore(command) => command.as_str_for_tracing(),
+            CliCommand::Memory(command) => command.as_str_for_tracing(),
+        }
+    }
 }
 
 /// A subcommand of the main Warp application. This includes all [`WorkerCommand`]s as well as app-specific debugging tools.
@@ -590,7 +668,7 @@ pub struct TerminalServerArgs {
 
 #[derive(Debug, Copy, Clone, clap::ValueEnum)]
 pub enum RecoveryMechanism {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     #[value(name = "force-x11")]
     X11,
     #[value(name = "force-dedicated-gpu")]
@@ -677,6 +755,15 @@ pub fn binary_name() -> Option<String> {
     // Unfortunately, we can't use Command::get_bin_name because it's not populated until args are parsed.
     let arg0 = env::args().next()?;
     Path::new(&arg0).file_name()?.to_str().map(|s| s.to_owned())
+}
+
+/// The version string shown for `--version` / `-V`.
+///
+/// Sourced from [`ChannelState::app_version`], which is populated from the
+/// `GIT_RELEASE_TAG` env var at compile time. Falls back to a placeholder for
+/// untagged builds (e.g. local `cargo run`).
+pub fn version_string() -> &'static str {
+    ChannelState::app_version().unwrap_or("<unknown>")
 }
 
 #[cfg(test)]

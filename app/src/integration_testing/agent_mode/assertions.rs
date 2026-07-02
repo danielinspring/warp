@@ -3,21 +3,20 @@
 // `assert!` causes the app to crash before debug info can be exported. Use `integration_assert!` instead.
 #![deny(clippy::assertions_on_constants)]
 
-use super::llm_judge::{LLMJudge, LLMJudgeConfig};
-use crate::{
-    ai::agent::{
-        conversation::{AIConversation, AIConversationId, ConversationStatus},
-        todos::AIAgentTodoList,
-        AIAgentActionResultType, AIAgentActionType, AIAgentExchange, AIAgentInput,
-        AIAgentOutputMessageType, AIAgentOutputStatus, AIAgentTextSection, FileEdit,
-        FinishedAIAgentOutput, ReadFilesRequest, TodoOperation,
-    },
-    integration_testing::view_getters::terminal_view,
-    BlocklistAIHistoryModel,
-};
 use warp_multi_agent_api as api;
-use warpui::{integration::AssertionCallback, integration_assert, EntityId};
-use warpui::{integration::AssertionOutcome, SingletonEntity};
+use warpui::integration::{AssertionCallback, AssertionOutcome};
+use warpui::{integration_assert, EntityId, SingletonEntity};
+
+use super::llm_judge::{LLMJudge, LLMJudgeConfig};
+use crate::ai::agent::conversation::{AIConversation, AIConversationId, ConversationStatus};
+use crate::ai::agent::todos::AIAgentTodoList;
+use crate::ai::agent::{
+    AIAgentActionResultType, AIAgentActionType, AIAgentExchange, AIAgentInput,
+    AIAgentOutputMessageType, AIAgentOutputStatus, AIAgentTextSection, FileEdit,
+    FinishedAIAgentOutput, ReadFilesRequest, TodoOperation,
+};
+use crate::integration_testing::view_getters::terminal_view;
+use crate::BlocklistAIHistoryModel;
 
 type TextAssertion = Box<dyn Fn(&str) -> bool + 'static>;
 type ActionAssertion = Box<dyn Fn(&AIAgentActionType) -> bool + 'static>;
@@ -523,7 +522,7 @@ pub fn assert_no_suggested_prompt() -> AssertionCallback {
         let terminal_view = terminal_view(app, window_id, 0, 0);
         BlocklistAIHistoryModel::handle(app).update(app, |history_model, _| {
             let mut exchanges =
-                history_model.all_live_root_task_exchanges_for_terminal_view(terminal_view.id());
+                history_model.all_live_root_task_exchanges_for_terminal_surface(terminal_view.id());
 
             if exchanges.any(|exchange| {
                 let AIAgentOutputStatus::Finished { finished_output } = &exchange.output_status
@@ -648,7 +647,7 @@ fn get_conversation(
         ConversationTarget::Only => {
             // Get all conversations (including passive ones)
             let mut conversations: Vec<_> = history_model
-                .all_live_conversations_for_terminal_view(terminal_view_id)
+                .all_live_conversations_for_terminal_surface(terminal_view_id)
                 .collect();
             match conversations.len() {
                 1 => conversations.pop().ok_or(AssertionOutcome::failure(
@@ -1103,7 +1102,7 @@ pub fn assert_no_exchanges() -> AssertionCallback {
         let terminal_view = terminal_view(app, window_id, 0, 0);
         BlocklistAIHistoryModel::handle(app).update(app, |history_model, _| {
             let exchange_count = history_model
-                .all_live_root_task_exchanges_for_terminal_view(terminal_view.id())
+                .all_live_root_task_exchanges_for_terminal_surface(terminal_view.id())
                 .count();
 
             if exchange_count == 0 {

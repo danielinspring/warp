@@ -9,26 +9,21 @@ use warp_core::channel::ChannelState;
 use warp_core::user_preferences::GetUserPreferences;
 use warpui::{AppContext, Entity, EntityId, ModelContext, SingletonEntity};
 
-use crate::ai::llms::LLMId;
-use crate::ai::mcp::templatable_manager::TemplatableMCPServerManagerEvent;
-use crate::cloud_object::model::persistence::{CloudModelEvent, UpdateSource};
-use crate::{send_telemetry_from_ctx, LaunchMode, TelemetryEvent};
-
-use crate::ai::mcp::TemplatableMCPServerManager;
-use crate::cloud_object::{GenericStringObjectFormat, JsonObjectType};
-use crate::drive::CloudObjectTypeAndId;
-use crate::server::cloud_objects::update_manager::UpdateManager;
-use crate::server::ids::SyncId;
-use crate::settings::AgentModeCommandExecutionPredicate;
-use crate::workspaces::user_workspaces::UserWorkspaces;
-use crate::CloudModel;
-use crate::{
-    cloud_object::model::generic_string_model::GenericStringObjectId, server::ids::ClientId,
-};
-
 use super::{
     AIExecutionProfile, ActionPermission, CloudAIExecutionProfileModel, WriteToPtyPermission,
 };
+use crate::ai::llms::{LLMId, LLMPreferences};
+use crate::ai::mcp::templatable_manager::TemplatableMCPServerManagerEvent;
+use crate::ai::mcp::TemplatableMCPServerManager;
+use crate::cloud_object::model::generic_string_model::GenericStringObjectId;
+use crate::cloud_object::model::persistence::{CloudModelEvent, UpdateSource};
+use crate::cloud_object::{CloudObject as _, GenericStringObjectFormat, JsonObjectType};
+use crate::drive::CloudObjectTypeAndId;
+use crate::server::cloud_objects::update_manager::UpdateManager;
+use crate::server::ids::{ClientId, SyncId};
+use crate::settings::AgentModeCommandExecutionPredicate;
+use crate::workspaces::user_workspaces::UserWorkspaces;
+use crate::{send_telemetry_from_ctx, CloudModel, LaunchMode, TelemetryEvent};
 
 /// ExecutionProfileId is the identifier that users of the AIExecutionProfilesModel use
 /// to refer back to a specific profile. These are unique across the lifespan of the app.
@@ -144,6 +139,7 @@ impl AIExecutionProfilesModel {
                 let cloud_model = CloudModel::handle(ctx).as_ref(ctx);
                 let all_profiles_from_cloud: Vec<&super::CloudAIExecutionProfile> = cloud_model
                     .get_all_objects_of_type::<GenericStringObjectId, CloudAIExecutionProfileModel>()
+                    .filter(|p| Self::is_owned_by_current_user(p, ctx))
                     .collect();
 
                 let default_profile_from_cloud: Option<&super::CloudAIExecutionProfile> = all_profiles_from_cloud
@@ -161,19 +157,25 @@ impl AIExecutionProfilesModel {
                 }
 
                 let default_profile_state = match launch_mode {
-                    LaunchMode::App { .. } | LaunchMode::Test { .. } => match default_profile_from_cloud {
-                        Some(p) => {
-                            let execution_profile_id = ClientProfileId::new();
-                            profile_id_to_sync_id.insert(execution_profile_id, p.id);
-                            DefaultProfileState::Synced {
-                                id: execution_profile_id,
+                    // The TUI front-end is an app-style client, so it shares the
+                    // GUI app's cloud-synced default execution profile.
+                    LaunchMode::App { .. }
+                    | LaunchMode::Test { .. }
+                    | LaunchMode::Tui { .. } => {
+                        match default_profile_from_cloud {
+                            Some(p) => {
+                                let execution_profile_id = ClientProfileId::new();
+                                profile_id_to_sync_id.insert(execution_profile_id, p.id);
+                                DefaultProfileState::Synced {
+                                    id: execution_profile_id,
+                                }
                             }
+                            None => DefaultProfileState::Unsynced {
+                                id: ClientProfileId::new(),
+                                profile: super::create_default_from_legacy_settings(ctx),
+                            },
                         }
-                        None => DefaultProfileState::Unsynced {
-                            id: ClientProfileId::new(),
-                            profile: AIExecutionProfile::create_default_from_legacy_settings(ctx),
-                        },
-                    },
+                    }
                     // When running as a CLI, we ignore the GUI default and use a more permissive default.
                     LaunchMode::CommandLine { is_sandboxed, computer_use_override, .. } => {
                         DefaultProfileState::Cli {
@@ -181,6 +183,14 @@ impl AIExecutionProfilesModel {
                             id: ClientProfileId::new()
                         }
                     }
+                    // RemoteServerProxy and RemoteServerDaemon don't use AI
+                    // execution profiles. They never reach this code path
+                    // since they don't go through initialize_app, but handle
+                    // exhaustively.
+                    LaunchMode::RemoteServerProxy | LaunchMode::RemoteServerDaemon { .. } => DefaultProfileState::Unsynced {
+                        id: ClientProfileId::new(),
+                        profile: super::create_default_from_legacy_settings(ctx),
+                    },
                 };
             }
         }
@@ -190,14 +200,14 @@ impl AIExecutionProfilesModel {
         // (2) Let views subscribed to us know whenever a backing profile changes.
         // (3) Keep profile_id_to_sync_id map up to date when profiles are created/deleted remotely
         if !cfg!(feature = "agent_mode_evals") {
-            ctx.subscribe_to_model(&CloudModel::handle(ctx), |me, event, ctx| {
+            ctx.subscribe_to_model(&CloudModel::handle(ctx), |me, _, event, ctx| {
                 me.handle_cloud_model_event(event, ctx);
             });
         }
 
         ctx.subscribe_to_model(
             &TemplatableMCPServerManager::handle(ctx),
-            |me, event, ctx| {
+            |me, _, event, ctx| {
                 me.handle_templatable_mcp_server_manager_event(event, ctx);
             },
         );
@@ -211,7 +221,7 @@ impl AIExecutionProfilesModel {
                 let sync_id_of_default_profile = *profile_id_to_sync_id
                     .get(id)
                     .expect("default profile is synced but no sync id found");
-                ctx.subscribe_to_model(&CloudModel::handle(ctx), move |me, event, _| {
+                ctx.subscribe_to_model(&CloudModel::handle(ctx), move |me, _, event, _| {
                 if let CloudModelEvent::ObjectDeleted {
                     type_and_id: CloudObjectTypeAndId::GenericStringObject {
                         id: deleted_sync_id,
@@ -238,6 +248,15 @@ impl AIExecutionProfilesModel {
 
         model.maybe_inherit_from_legacy_settings(ctx);
         model
+    }
+
+    fn is_owned_by_current_user(
+        profile: &super::CloudAIExecutionProfile,
+        ctx: &AppContext,
+    ) -> bool {
+        UserWorkspaces::as_ref(ctx)
+            .personal_drive(ctx)
+            .is_some_and(|owner| profile.permissions().owner == owner)
     }
 
     /// This function performs one-time migrations from legacy settings into the default profile.
@@ -600,6 +619,48 @@ impl AIExecutionProfilesModel {
         }
     }
 
+    pub fn set_context_window_limit(
+        &mut self,
+        profile_id: ClientProfileId,
+        limit: Option<u32>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let changed = self.edit_profile_internal(
+            profile_id,
+            |profile| {
+                if profile.context_window_limit != limit {
+                    profile.context_window_limit = limit;
+                    return true;
+                }
+                false
+            },
+            ctx,
+        );
+
+        // Gate on the limit being non-empty. The limit is cleared during
+        // reconciliation, which runs inside an `LLMPreferences` update where the
+        // `LLMPreferences::as_ref` read below would panic.
+        if changed && limit.is_some() {
+            let Some(profile) = self.get_profile_by_id(profile_id, ctx) else {
+                return;
+            };
+            let llm_preferences = LLMPreferences::as_ref(ctx);
+            let model_info = profile
+                .data()
+                .base_model
+                .as_ref()
+                .and_then(|id| llm_preferences.get_llm_info(id))
+                .unwrap_or_else(|| llm_preferences.get_default_base_model());
+            send_telemetry_from_ctx!(
+                TelemetryEvent::AIExecutionProfileContextWindowSelected {
+                    tokens: limit,
+                    model_id: model_info.id.to_string(),
+                },
+                ctx
+            );
+        }
+    }
+
     pub fn set_apply_code_diffs(
         &mut self,
         profile_id: ClientProfileId,
@@ -799,6 +860,39 @@ impl AIExecutionProfilesModel {
             send_telemetry_from_ctx!(
                 TelemetryEvent::AIExecutionProfileSettingUpdated {
                     setting_type: "ask_user_question".to_string(),
+                    setting_value: format!("{permission:?}"),
+                },
+                ctx
+            );
+        }
+    }
+
+    pub fn set_run_agents(
+        &mut self,
+        profile_id: ClientProfileId,
+        permission: super::RunAgentsPermission,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let current_value = self
+            .get_profile_by_id(profile_id, ctx)
+            .map(|p| p.data().run_agents);
+
+        self.edit_profile_internal(
+            profile_id,
+            |profile| {
+                if profile.run_agents != permission {
+                    profile.run_agents = permission;
+                    return true;
+                }
+                false
+            },
+            ctx,
+        );
+
+        if current_value != Some(permission) {
+            send_telemetry_from_ctx!(
+                TelemetryEvent::AIExecutionProfileSettingUpdated {
+                    setting_type: "run_agents".to_string(),
                     setting_value: format!("{permission:?}"),
                 },
                 ctx
@@ -1150,19 +1244,23 @@ impl AIExecutionProfilesModel {
     /// `edit_profile_internal` edits an AIExecutionProfile and upserts the changed profile to the cloud
     /// Parameters:
     /// * `profile_id`: The id of the profile to edit
-    /// * `edit_fn`: a closure that safely modifies the AIExecutionProfile. It should return `true` if the profile was changed, `false` otherwise. When `true`, it syncs the changes to the cloud, and otherwise exits early to prevent excessive cloud operations if no changes occured.
+    /// * `edit_fn`: a closure that safely modifies the AIExecutionProfile. It should return `true` if the profile was changed, `false` otherwise. When `true`, it syncs the changes to the cloud, and otherwise exits early to prevent excessive cloud operations if no changes occurred.
     /// * `ctx`: The model context
+    ///
+    /// Returns `true` if the profile was actually changed (and synced),
+    /// `false` otherwise. Callers can use this to gate side effects such as
+    /// telemetry on real changes.
     fn edit_profile_internal(
         &mut self,
         profile_id: ClientProfileId,
         edit_fn: impl FnOnce(&mut AIExecutionProfile) -> bool,
         ctx: &mut ModelContext<Self>,
-    ) {
+    ) -> bool {
         // We don't yet support editing the default profile for the CLI.
         if let DefaultProfileState::Cli { id, .. } = &self.default_profile_state {
             if *id == profile_id {
                 log::warn!("Attempted to edit CLI default profile, which is not yet supported.");
-                return;
+                return false;
             }
         }
 
@@ -1174,7 +1272,7 @@ impl AIExecutionProfilesModel {
                 // If the edit function didn't make any changes to the profile, it's still the default profile, so we don't need to sync it
                 let value_changed = edit_fn(&mut new_profile);
                 if !value_changed {
-                    return;
+                    return false;
                 }
 
                 if let Some(owner) = UserWorkspaces::as_ref(ctx).personal_drive(ctx) {
@@ -1215,10 +1313,11 @@ impl AIExecutionProfilesModel {
                     );
                 }
                 ctx.emit(AIExecutionProfilesModelEvent::ProfileUpdated(profile_id));
-                return;
+                return true;
             }
         }
 
+        let mut value_changed = false;
         if let Some(sync_id) = self.profile_id_to_sync_id.get(&profile_id) {
             let cloud_model = CloudModel::as_ref(ctx);
             if let Some(object) = cloud_model
@@ -1226,9 +1325,9 @@ impl AIExecutionProfilesModel {
             {
                 let mut data = object.model().string_model.clone();
                 // If the edit function didn't make any changes to the profile, we should exit early
-                let value_changed = edit_fn(&mut data);
+                value_changed = edit_fn(&mut data);
                 if !value_changed {
-                    return;
+                    return false;
                 }
                 let update_manager = UpdateManager::handle(ctx);
                 update_manager.update(ctx, |update_manager, ctx| {
@@ -1241,6 +1340,7 @@ impl AIExecutionProfilesModel {
             }
         }
         ctx.emit(AIExecutionProfilesModelEvent::ProfileUpdated(profile_id));
+        value_changed
     }
 
     /// Handle CloudModel events to keep the profile_id_to_sync_id map and default profile state up to date.
@@ -1319,6 +1419,7 @@ impl AIExecutionProfilesModel {
         let cloud_model = CloudModel::as_ref(ctx);
         let all_profiles: Vec<(SyncId, bool)> = cloud_model
             .get_all_objects_of_type::<GenericStringObjectId, CloudAIExecutionProfileModel>()
+            .filter(|o| Self::is_owned_by_current_user(o, ctx))
             .map(|o| (o.id, o.model().string_model.is_default_profile))
             .collect();
 
@@ -1335,7 +1436,7 @@ impl AIExecutionProfilesModel {
             }
         }
 
-        // Register any non-default profiles from cloud that we aren't
+        // Register non-default profiles from cloud that we aren't
         // already tracking so later edits find their backing sync_id.
         let mut added_non_default = false;
         for (sync_id, is_default) in all_profiles {
@@ -1385,6 +1486,11 @@ impl AIExecutionProfilesModel {
             log::warn!("Received ObjectCreated event for AI execution profile but object not found in CloudModel: {sync_id:?}");
             return;
         };
+
+        if !Self::is_owned_by_current_user(object, ctx) {
+            log::info!("Ignoring non-owned execution profile from cloud: {sync_id:?}");
+            return;
+        }
 
         // Check if this is the default profile
         if object.model().string_model.is_default_profile {

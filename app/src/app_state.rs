@@ -1,27 +1,28 @@
-use pathfinder_geometry::rect::RectF;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use warpui::platform::FullscreenState;
 
-use warpui::AppContext;
+use pathfinder_geometry::rect::RectF;
+use serde::{Deserialize, Serialize};
+use warpui::platform::FullscreenState;
+use warpui::{AppContext, SingletonEntity as _};
 
 use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::agent_conversations_model::AgentManagementFilters;
 use crate::ai::ambient_agents::AmbientAgentTaskId;
-use crate::ai::blocklist::InputConfig;
-use crate::ai::blocklist::SerializedBlockListItem;
+use crate::ai::blocklist::{InputConfig, SerializedBlockListItem};
 use crate::code::editor_management::CodeSource;
 use crate::drive::OpenWarpDriveObjectSettings;
 use crate::root_view::quake_mode_window_id;
 use crate::server::ids::SyncId;
-use crate::settings_view::{environments_page::EnvironmentsPage, SettingsSection};
+use crate::settings_view::environments_page::EnvironmentsPage;
+use crate::settings_view::SettingsSection;
 use crate::tab::SelectedTabColor;
 use crate::terminal::ShellLaunchData;
 use crate::themes::theme::AnsiColorIdentifier;
+use crate::workspace::tab_group::TabGroupId;
 use crate::workspace::view::left_panel::ToolPanelView;
-use crate::workspace::Workspace;
+use crate::workspace::WorkspaceRegistry;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AppState {
@@ -56,6 +57,18 @@ pub struct WindowSnapshot {
     pub left_panel_width: Option<f32>,
     pub right_panel_width: Option<f32>,
     pub agent_management_filters: Option<PersistedAgentManagementFilters>,
+    /// Tab groups defined in this window. Group order is implicit from
+    /// member tabs' positions, so no explicit ordering is persisted.
+    pub tab_groups: Vec<TabGroupSnapshot>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TabGroupSnapshot {
+    pub id: TabGroupId,
+    pub name: Option<String>,
+    pub color: SelectedTabColor,
+    pub collapsed: bool,
+    pub pinned: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -66,6 +79,10 @@ pub struct TabSnapshot {
     pub selected_color: SelectedTabColor,
     pub left_panel: Option<LeftPanelSnapshot>,
     pub right_panel: Option<RightPanelSnapshot>,
+    /// Tab group this tab belongs to, if any.
+    pub group_id: Option<TabGroupId>,
+    /// True when this tab is pinned to the front of the tab list.
+    pub pinned: bool,
 }
 
 impl TabSnapshot {
@@ -126,6 +143,7 @@ pub enum LeafContents {
     Workflow(WorkflowPaneSnapshot),
     Settings(SettingsPaneSnapshot),
     AIFact(AIFactPaneSnapshot),
+    CustomRouterEditor,
     ExecutionProfileEditor,
     CodeReview(CodeReviewPaneSnapshot),
     AmbientAgent(AmbientAgentPaneSnapshot),
@@ -173,10 +191,10 @@ impl LeafContents {
             | LeafContents::Workflow(_)
             | LeafContents::Settings(_)
             | LeafContents::AIFact(_)
+            | LeafContents::CustomRouterEditor
             | LeafContents::ExecutionProfileEditor
             | LeafContents::CodeReview(_)
             | LeafContents::AmbientAgent(_)
-            | LeafContents::Welcome { .. }
             | LeafContents::GetStarted => true,
         }
     }
@@ -357,13 +375,14 @@ pub fn get_app_state(app: &AppContext) -> AppState {
             }
         }
 
-        if let Some(first_workspace) = app
-            .views_of_type::<Workspace>(window_id)
-            .as_ref()
-            .and_then(|workspaces| workspaces.first())
-        {
-            let ws = first_workspace.as_ref(app);
-            if ws.is_drag_preview_workspace() {
+        if let Some(workspace) = WorkspaceRegistry::as_ref(app).get(window_id, app) {
+            let ws = workspace.as_ref(app);
+            // Transient drag-preview windows are not real user-visible
+            // workspaces; skip them so they never end up in the persisted
+            // session. (Persistence is also short-circuited entirely while a
+            // cross-window drag is active; see `save_app` in
+            // `workspace/global_actions.rs`.)
+            if ws.is_tab_drag_preview() {
                 continue;
             }
             let snapshot = ws.snapshot(

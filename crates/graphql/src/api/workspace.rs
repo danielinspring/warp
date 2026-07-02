@@ -1,6 +1,5 @@
+use super::billing::{BillingCycleUsageHistory, BillingMetadata, BonusGrantsInfo};
 use crate::schema;
-
-use super::billing::{BillingMetadata, BonusGrantsInfo};
 
 #[derive(cynic::QueryFragment, Debug, Clone)]
 pub struct Workspace {
@@ -11,6 +10,7 @@ pub struct Workspace {
     pub teams: Vec<Team>,
     pub billing_metadata: BillingMetadata,
     pub bonus_grants_info: BonusGrantsInfo,
+    pub billing_cycle_usage_history: Option<BillingCycleUsageHistory>,
     pub settings: WorkspaceSettings,
     pub has_billing_history: bool,
     pub invite_code: Option<String>,
@@ -44,6 +44,14 @@ pub struct RoutingHostConfig {
 }
 
 #[derive(cynic::QueryFragment, Debug, Clone)]
+pub struct LlmContextWindow {
+    pub is_configurable: bool,
+    pub min: crate::scalars::Uint32,
+    pub max: crate::scalars::Uint32,
+    pub default: crate::scalars::Uint32,
+}
+
+#[derive(cynic::QueryFragment, Debug, Clone)]
 pub struct LlmInfo {
     pub display_name: String,
     pub base_model_name: String,
@@ -57,6 +65,7 @@ pub struct LlmInfo {
     pub provider: LlmProvider,
     pub host_configs: Vec<RoutingHostConfig>,
     pub pricing: LlmPricing,
+    pub context_window: LlmContextWindow,
 }
 
 #[derive(cynic::QueryFragment, Debug, Clone)]
@@ -123,6 +132,7 @@ pub struct CodebaseContextSettings {
 #[derive(cynic::QueryFragment, Debug, Clone)]
 pub struct AmbientAgentSettings {
     pub enable_warp_attribution: AdminEnablementSetting,
+    pub default_host_slug: Option<String>,
 }
 
 #[derive(cynic::QueryFragment, Debug, Clone)]
@@ -275,7 +285,9 @@ pub enum MembershipRole {
 #[derive(cynic::Enum, Clone, Debug)]
 pub enum LlmModelHost {
     AwsBedrock,
+    CustomEndpoint,
     DirectApi,
+    GeminiEnterprise,
     #[cynic(fallback)]
     Other(String),
 }
@@ -292,6 +304,8 @@ pub struct LlmHostSettings {
     pub enabled: bool,
     pub opt_out_of_new_models: bool,
     pub enablement_setting: Option<HostEnablementSetting>,
+    pub gcp_audience: Option<String>,
+    pub gcp_sa_email: Option<String>,
 }
 
 #[derive(cynic::QueryFragment, Debug, Clone)]

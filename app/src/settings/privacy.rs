@@ -3,11 +3,15 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
+use settings::macros::{define_settings_group, maybe_define_setting, register_settings_events};
+use settings::{RespectUserSyncSetting, Setting, SupportedPlatforms, SyncToCloud};
 use warp_core::features::FeatureFlag;
 use warp_core::report_if_error;
-use warp_core::user_preferences::GetUserPreferences as _;
+use warp_graphql::mutations::update_user_settings::UpdateUserSettingsInput;
 use warpui::{AppContext, Entity, ModelContext, SingletonEntity, UpdateModel};
 
+use super::cloud_preferences_syncer::CloudPreferencesSyncer;
 use crate::ai::blocklist::telemetry_banner::should_collect_ai_ugc_telemetry;
 use crate::auth::auth_state::AuthState;
 use crate::auth::AuthStateProvider;
@@ -19,15 +23,6 @@ use crate::server::server_api::auth::MockAuthClient;
 use crate::server::server_api::auth::{AuthClient, SyncedUserSettings};
 use crate::server::server_api::ServerApiProvider;
 use crate::terminal::safe_mode_settings::SafeModeSettings;
-
-use settings::{
-    macros::{define_settings_group, maybe_define_setting, register_settings_events},
-    RespectUserSyncSetting, Setting, SupportedPlatforms, SyncToCloud,
-};
-
-use serde::{Deserialize, Serialize};
-
-use super::cloud_preferences_syncer::CloudPreferencesSyncer;
 use crate::workspaces::workspace::EnterpriseSecretRegex;
 
 pub trait RegexDisplayInfo {
@@ -248,73 +243,46 @@ impl PrivacySettings {
         let auth_state = AuthStateProvider::as_ref(ctx).get().clone();
         let auth_client = ServerApiProvider::as_ref(ctx).get_auth_client();
 
-        let is_telemetry_enabled: bool = ctx
-            .private_user_preferences()
-            .read_value(TELEMETRY_ENABLED_DEFAULTS_KEY)
-            .unwrap_or_default()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or(true);
-
-        let is_crash_reporting_enabled: bool = ctx
-            .private_user_preferences()
-            .read_value(CRASH_REPORTING_ENABLED_DEFAULTS_KEY)
-            .unwrap_or_default()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or(true);
-
-        let is_cloud_conversation_storage_enabled: bool = ctx
-            .private_user_preferences()
-            .read_value(CLOUD_CONVERSATION_STORAGE_ENABLED_DEFAULTS_KEY)
-            .unwrap_or_default()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or(true);
-
-        // Make sure the user-preferences stores match what's in memory.
-        // Needed for warp drive preferences to work and no harm in doing in general.
-        let _ = ctx.private_user_preferences().write_value(
-            TELEMETRY_ENABLED_DEFAULTS_KEY,
-            serde_json::to_string(&is_telemetry_enabled)
-                .expect("is_telemetry_enabled is a boolean."),
-        );
-        let _ = ctx.private_user_preferences().write_value(
-            CRASH_REPORTING_ENABLED_DEFAULTS_KEY,
-            serde_json::to_string(&is_crash_reporting_enabled)
-                .expect("is_crash_reporting_enabled is a boolean."),
-        );
-        let _ = ctx.private_user_preferences().write_value(
-            CLOUD_CONVERSATION_STORAGE_ENABLED_DEFAULTS_KEY,
-            serde_json::to_string(&is_cloud_conversation_storage_enabled)
-                .expect("is_cloud_conversation_storage_enabled is a boolean."),
-        );
+        // Initialize from `WarpDrivePrivacySettings`, which is the source of truth for these
+        // booleans.
+        let warp_drive_privacy = WarpDrivePrivacySettings::as_ref(ctx);
+        let is_telemetry_enabled = *warp_drive_privacy.is_telemetry_enabled.value();
+        let is_crash_reporting_enabled = *warp_drive_privacy.is_crash_reporting_enabled.value();
+        let is_cloud_conversation_storage_enabled = *warp_drive_privacy
+            .is_cloud_conversation_storage_enabled
+            .value();
 
         // Listen for changes to the cloud model and update ourselves when they happen.
-        ctx.subscribe_to_model(&WarpDrivePrivacySettings::handle(ctx), |me, event, ctx| {
-            let privacy_settings = WarpDrivePrivacySettings::as_ref(ctx);
-            match event {
-                WarpDrivePrivacySettingsChangedEvent::IsTelemetryEnabled { .. } => {
-                    me.set_is_telemetry_enabled(
-                        *privacy_settings.is_telemetry_enabled.value(),
-                        ctx,
-                    );
+        ctx.subscribe_to_model(
+            &WarpDrivePrivacySettings::handle(ctx),
+            |me, _, event, ctx| {
+                let privacy_settings = WarpDrivePrivacySettings::as_ref(ctx);
+                match event {
+                    WarpDrivePrivacySettingsChangedEvent::IsTelemetryEnabled { .. } => {
+                        me.set_is_telemetry_enabled(
+                            *privacy_settings.is_telemetry_enabled.value(),
+                            ctx,
+                        );
+                    }
+                    WarpDrivePrivacySettingsChangedEvent::IsCrashReportingEnabled { .. } => {
+                        me.set_is_crash_reporting_enabled(
+                            *privacy_settings.is_crash_reporting_enabled.value(),
+                            ctx,
+                        );
+                    }
+                    WarpDrivePrivacySettingsChangedEvent::IsCloudConversationStorageEnabled {
+                        ..
+                    } => {
+                        me.set_is_cloud_conversation_storage_enabled(
+                            *privacy_settings
+                                .is_cloud_conversation_storage_enabled
+                                .value(),
+                            ctx,
+                        );
+                    }
                 }
-                WarpDrivePrivacySettingsChangedEvent::IsCrashReportingEnabled { .. } => {
-                    me.set_is_crash_reporting_enabled(
-                        *privacy_settings.is_crash_reporting_enabled.value(),
-                        ctx,
-                    );
-                }
-                WarpDrivePrivacySettingsChangedEvent::IsCloudConversationStorageEnabled {
-                    ..
-                } => {
-                    me.set_is_cloud_conversation_storage_enabled(
-                        *privacy_settings
-                            .is_cloud_conversation_storage_enabled
-                            .value(),
-                        ctx,
-                    );
-                }
-            }
-        });
+            },
+        );
 
         let user_secret_regex_list: CustomSecretRegexList =
             CustomSecretRegexList::new_from_storage(ctx);
@@ -710,7 +678,14 @@ impl PrivacySettings {
             let snapshot = self.get_snapshot(ctx);
             let _ = ctx.spawn(
                 async move {
-                    let result = auth_client.update_user_settings(snapshot).await;
+                    let result = auth_client
+                        .update_user_settings(UpdateUserSettingsInput {
+                            telemetry_enabled: Some(snapshot.is_telemetry_enabled()),
+                            crash_reporting_enabled: Some(snapshot.is_crash_reporting_enabled()),
+                            cloud_conversation_storage_enabled: snapshot
+                                .cloud_conversation_storage_enabled(),
+                        })
+                        .await;
                     if let Err(err) = result {
                         report_error!(
                             err.context("Failed to update server with local privacy settings.")

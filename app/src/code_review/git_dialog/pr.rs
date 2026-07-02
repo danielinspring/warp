@@ -4,30 +4,24 @@
 //! with expandable per-file stats. On confirm, spawns `create_pr` and shows
 //! a toast with a clickable "Open PR" link.
 
+use warp_core::send_telemetry_from_ctx;
 use warp_core::ui::appearance::Appearance;
-use warpui::{
-    elements::{
-        ClippedScrollStateHandle, Container, Element, Flex, MouseStateHandle, ParentElement, Text,
-    },
-    SingletonEntity, ViewContext,
+use warpui::elements::{
+    ClippedScrollStateHandle, Container, Element, Flex, MouseStateHandle, ParentElement, Text,
 };
+use warpui::{SingletonEntity, ViewContext};
 
-use crate::{
-    ai::generate_code_review_content::api::{GenerateCodeReviewContentRequest, OutputType},
-    code_review::git_dialog::{
-        interactive_path_future, render_branch_section, render_file_changes_box,
-        should_send_git_ops_ai_request, show_toast, user_facing_git_error, GitDialog,
-        GitDialogAction, GitDialogEvent, GitDialogMode,
-    },
-    server::server_api::{ai::AIClient, ServerApiProvider},
-    ui_components::icons::Icon,
-    util::git::{
-        create_pr, get_branch_commit_messages, get_branch_diff_entries, get_diff_for_pr,
-        FileChangeEntry, PrInfo,
-    },
-    view_components::{DismissibleToast, ToastLink},
-    workspace::ToastStack,
+use crate::code_review::git_dialog::{
+    render_branch_section, render_file_changes_box, should_send_git_ops_ai_request, show_toast,
+    user_facing_git_error, GitDialog, GitDialogAction, GitDialogEvent, GitDialogMode,
 };
+use crate::code_review::telemetry_event::{
+    CodeReviewTelemetryEvent, GitDialogStatus, GitOperationKind,
+};
+use crate::ui_components::icons::Icon;
+use crate::util::git::{FileChangeEntry, PrInfo};
+use crate::view_components::{DismissibleToast, ToastLink};
+use crate::workspace::ToastStack;
 
 /// PR-mode sub-actions, dispatched wrapped in `GitDialogAction::Pr`.
 #[derive(Clone, Debug, PartialEq)]
@@ -36,6 +30,7 @@ pub enum PrSubAction {
 }
 
 pub struct PrState {
+    base_branch_name: Option<String>,
     file_changes: Vec<FileChangeEntry>,
     changes_expanded: bool,
     summary_mouse_state: MouseStateHandle,
@@ -60,36 +55,48 @@ pub(super) fn is_ready_to_confirm(_state: &PrState) -> bool {
     true
 }
 
-pub(super) fn new_state(
-    repo_path: &std::path::Path,
-    parent_branch: Option<&str>,
-    ctx: &mut ViewContext<GitDialog>,
-) -> PrState {
-    let diff_repo_path = repo_path.to_path_buf();
-    let parent_branch = parent_branch.map(|s| s.to_string());
-    ctx.spawn(
-        async move { get_branch_diff_entries(&diff_repo_path, parent_branch.as_deref()).await },
-        |me, result, ctx| {
-            if let GitDialogMode::CreatePr(state) = &mut me.mode {
-                match result {
-                    Ok(entries) => {
-                        state.file_changes = entries;
-                        ctx.notify();
-                    }
-                    Err(err) => {
-                        log::error!("Failed to load branch diff entries: {err}");
-                    }
-                }
-            }
-        },
-    );
-
+pub(super) fn new_state(base_branch_name: Option<String>) -> PrState {
     PrState {
+        base_branch_name: base_branch_name.map(|name| {
+            let name = name.trim();
+            name.strip_prefix("origin/").unwrap_or(name).to_string()
+        }),
         file_changes: Vec::new(),
         changes_expanded: false,
         summary_mouse_state: MouseStateHandle::default(),
         changes_scroll_state: ClippedScrollStateHandle::default(),
     }
+}
+
+/// Kicks off an on-demand fetch of the committed branch diff
+/// (`merge_base(HEAD, main)..HEAD`) for the create-PR Changes box. The result
+/// arrives via `DiffStateModelEvent::BranchCommittedFilesReceived` and is
+/// applied by [`apply_committed_file_changes`]. Unlike the working-tree-based
+/// `against_base_branch` metadata, this is committed-only, so the box previews
+/// exactly what `gh pr create` will include — not uncommitted or untracked
+/// changes. Called on dialog open; local computes it off-thread, remote fetches
+/// it via RPC.
+pub(super) fn fetch_committed_file_changes(me: &mut GitDialog, ctx: &mut ViewContext<GitDialog>) {
+    me.diff_state_model().update(ctx, |model, ctx| {
+        model.fetch_committed_branch_files(ctx);
+    });
+}
+
+/// Applies the committed branch files delivered via
+/// `DiffStateModelEvent::BranchCommittedFilesReceived` to the create-PR
+/// Changes box. No-op when the dialog isn't in create-PR mode.
+pub(super) fn apply_committed_file_changes(
+    me: &mut GitDialog,
+    files: Vec<FileChangeEntry>,
+    ctx: &mut ViewContext<GitDialog>,
+) {
+    {
+        let GitDialogMode::CreatePr(state) = me.mode_mut() else {
+            return;
+        };
+        state.file_changes = files;
+    }
+    ctx.notify();
 }
 
 pub(super) fn handle_sub_action(
@@ -111,113 +118,46 @@ pub(super) fn start_confirm(me: &mut GitDialog, ctx: &mut ViewContext<GitDialog>
     let GitDialogMode::CreatePr(_) = me.mode() else {
         return;
     };
-    let repo_path = me.repo_path().clone();
     let branch_name = me.branch_name().to_string();
-    let parent_branch = me.parent_branch_name.clone();
+    // AI-generate the PR title/body when the user has it enabled; falls back to
+    // `gh pr create --fill`.
+    let autogenerate_content = should_send_git_ops_ai_request(ctx);
 
     me.set_loading(loading_label_for(), ctx);
 
-    let code_review_ai = if should_send_git_ops_ai_request(ctx) {
-        Some(ServerApiProvider::handle(ctx).read(ctx, |p, _| p.get_ai_client()))
-    } else {
-        None
-    };
-    let path_future = interactive_path_future(ctx);
-
-    ctx.spawn(
-        async move {
-            let path_env = path_future.await;
-            if let Some(code_review_ai) = code_review_ai.as_ref() {
-                create_pr_with_ai_content(
-                    &repo_path,
-                    &branch_name,
-                    parent_branch.as_deref(),
-                    code_review_ai.as_ref(),
-                    path_env.as_deref(),
-                )
-                .await
-            } else {
-                create_pr(
-                    &repo_path,
-                    None,
-                    None,
-                    parent_branch.as_deref(),
-                    path_env.as_deref(),
-                )
-                .await
-            }
-        },
-        move |_me, result, ctx| {
-            match result {
-                Ok(pr_info) => {
-                    show_pr_created_toast(&pr_info, ctx);
-                }
-                Err(err) => {
-                    log::error!("Failed to create PR: {err}");
-                    show_toast(user_facing_git_error(&err.to_string()), ctx);
-                }
-            }
-            ctx.emit(GitDialogEvent::Completed);
-        },
-    );
+    me.diff_state_model().update(ctx, |m, ctx| {
+        m.create_pr(branch_name, autogenerate_content, ctx);
+    });
 }
 
-/// Generates PR title and body via AI (in parallel) and creates the PR.
-/// Falls back to `gh pr create --fill` if AI generation fails or returns
-/// empty content.
-pub(super) async fn create_pr_with_ai_content(
-    repo_path: &std::path::Path,
-    branch_name: &str,
-    parent_branch: Option<&str>,
-    code_review_ai: &dyn AIClient,
-    path_env: Option<&str>,
-) -> anyhow::Result<PrInfo> {
-    let diff = get_diff_for_pr(repo_path, parent_branch).await?;
-    let commit_messages = get_branch_commit_messages(repo_path, parent_branch)
-        .await
-        .unwrap_or_default();
-
-    let title_req = GenerateCodeReviewContentRequest {
-        output_type: OutputType::PrTitle,
-        diff: diff.clone(),
-        branch_name: branch_name.to_string(),
-        commit_messages: commit_messages.clone(),
+/// Shared create-PR completion: toast (with Open PR link) + telemetry +
+/// close.
+pub(super) fn finish_create_pr(
+    me: &GitDialog,
+    result: anyhow::Result<PrInfo>,
+    ctx: &mut ViewContext<GitDialog>,
+) {
+    let (status, error) = match &result {
+        Ok(_) => (GitDialogStatus::Succeeded, None),
+        Err(err) => (GitDialogStatus::Failed, Some(err.to_string())),
     };
-    let body_req = GenerateCodeReviewContentRequest {
-        output_type: OutputType::PrDescription,
-        diff,
-        branch_name: branch_name.to_string(),
-        commit_messages,
-    };
-
-    match futures::try_join!(
-        code_review_ai.generate_code_review_content(title_req),
-        code_review_ai.generate_code_review_content(body_req),
-    ) {
-        Ok((title_resp, body_resp))
-            if !title_resp.content.trim().is_empty() && !body_resp.content.trim().is_empty() =>
-        {
-            create_pr(
-                repo_path,
-                Some(&title_resp.content),
-                Some(&body_resp.content),
-                parent_branch,
-                path_env,
-            )
-            .await
-        }
-        Ok(_) => {
-            // Empty title/body would make `gh pr create` fail; fall back to --fill.
-            log::warn!(
-                "AI PR content generation returned empty title/body, falling back to --fill"
-            );
-            crate::util::git::create_pr(repo_path, None, None, parent_branch, path_env).await
-        }
+    match &result {
+        Ok(pr_info) => show_pr_created_toast(pr_info, ctx),
         Err(err) => {
-            log::warn!("AI PR content generation failed, falling back to --fill: {err}");
-            crate::util::git::create_pr(repo_path, None, None, parent_branch, path_env).await
+            log::error!("Failed to create PR: {err}");
+            show_toast(user_facing_git_error(&err.to_string()), ctx);
         }
     }
+    send_telemetry_from_ctx!(
+        CodeReviewTelemetryEvent::GitDialogCompleted {
+            is_local: Some(!me.repo_location().is_remote()),
+            operation: GitOperationKind::CreatePr,
+            status,
+            error,
+        },
+        ctx
+    );
+    ctx.emit(GitDialogEvent::Completed);
 }
 
 /// Shows a toast announcing PR creation with a clickable "Open PR" link.
@@ -237,6 +177,11 @@ pub(super) fn render_body(
     branch_name: &str,
     appearance: &Appearance,
 ) -> Box<dyn Element> {
+    let base_branch = state
+        .base_branch_name
+        .as_deref()
+        .unwrap_or("default branch");
+    let branch_name = format!("{branch_name} \u{2192} {base_branch}");
     Flex::column()
         .with_child(
             Container::new(render_branch_section(branch_name, appearance))

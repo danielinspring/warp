@@ -1,7 +1,7 @@
 use warp_graphql::ai::{AgentTaskState, PlatformErrorCode};
 
 use super::classify_driver_error;
-use crate::ai::agent_sdk::driver::terminal::ShareSessionError;
+use crate::ai::agent_sdk::driver::terminal::{BootstrapError, ShareSessionError};
 use crate::ai::agent_sdk::driver::AgentDriverError;
 
 fn assert_state_and_code(
@@ -20,12 +20,56 @@ fn assert_state_and_code(
 // --- Infrastructure errors → ERROR ---
 
 #[test]
-fn bootstrap_failed_is_error_with_internal() {
-    assert_state_and_code(
-        AgentDriverError::BootstrapFailed,
-        AgentTaskState::Error,
-        Some(PlatformErrorCode::InternalError),
+fn bootstrap_pty_spawn_failed_with_reason_includes_reason_in_message() {
+    let (state, update) = classify_driver_error(&AgentDriverError::BootstrapFailed {
+        error: BootstrapError::PtySpawnFailed {
+            reason: Some("Argument list too long (os error 7)".to_string()),
+        },
+    });
+    assert_eq!(state, AgentTaskState::Error);
+    assert_eq!(update.error_code, Some(PlatformErrorCode::InternalError));
+    assert!(
+        update.message.contains("Argument list too long"),
+        "message should include the specific failure reason: {:?}",
+        update.message
     );
+}
+
+#[test]
+fn bootstrap_pty_spawn_failed_without_reason_is_generic() {
+    let (state, update) = classify_driver_error(&AgentDriverError::BootstrapFailed {
+        error: BootstrapError::PtySpawnFailed { reason: None },
+    });
+    assert_eq!(state, AgentTaskState::Error);
+    assert_eq!(update.error_code, Some(PlatformErrorCode::InternalError));
+    assert!(
+        update.message.contains("Shell spawn failed"),
+        "message should describe the spawn failure: {:?}",
+        update.message
+    );
+}
+
+#[test]
+fn bootstrap_timed_out_is_error_with_internal() {
+    let (state, update) = classify_driver_error(&AgentDriverError::BootstrapFailed {
+        error: BootstrapError::TimedOut,
+    });
+    assert_eq!(state, AgentTaskState::Error);
+    assert_eq!(update.error_code, Some(PlatformErrorCode::InternalError));
+    assert!(
+        update.message.contains("did not start within"),
+        "message should describe the timeout: {:?}",
+        update.message
+    );
+}
+
+#[test]
+fn bootstrap_internal_error_is_error_with_internal() {
+    let (state, update) = classify_driver_error(&AgentDriverError::BootstrapFailed {
+        error: BootstrapError::InternalError,
+    });
+    assert_eq!(state, AgentTaskState::Error);
+    assert_eq!(update.error_code, Some(PlatformErrorCode::InternalError));
 }
 
 #[test]
@@ -73,6 +117,40 @@ fn mcp_server_not_found_is_failed_with_env_setup() {
 }
 
 #[test]
+fn managed_mcp_resolution_failed_is_failed_with_env_setup() {
+    assert_state_and_code(
+        AgentDriverError::ManagedMcpResolutionFailed {
+            uid: uuid::Uuid::nil(),
+            message: "not active".into(),
+        },
+        AgentTaskState::Failed,
+        Some(PlatformErrorCode::EnvironmentSetupFailed),
+    );
+}
+
+#[test]
+fn mcp_startup_failed_is_failed_with_env_setup_and_per_server_details() {
+    let (state, update) = classify_driver_error(&AgentDriverError::MCPStartupFailed {
+        details: vec![
+            "'devin' failed to start: connection refused".to_string(),
+            "'datadog' did not start within 20s".to_string(),
+        ],
+    });
+    assert_eq!(state, AgentTaskState::Failed);
+    assert_eq!(
+        update.error_code,
+        Some(PlatformErrorCode::EnvironmentSetupFailed)
+    );
+    // Each unavailable server is rendered as its own bullet line.
+    assert!(update
+        .message
+        .contains("- 'devin' failed to start: connection refused"));
+    assert!(update
+        .message
+        .contains("- 'datadog' did not start within 20s"));
+}
+
+#[test]
 fn environment_setup_failed_is_failed() {
     assert_state_and_code(
         AgentDriverError::EnvironmentSetupFailed("bad repo".into()),
@@ -97,6 +175,35 @@ fn environment_not_found_is_failed_with_resource_not_found() {
         AgentTaskState::Failed,
         Some(PlatformErrorCode::ResourceNotFound),
     );
+}
+
+#[test]
+fn conversation_harness_mismatch_is_failed_with_env_setup() {
+    let (state, update) = classify_driver_error(&AgentDriverError::ConversationHarnessMismatch {
+        conversation_id: "conv-123".into(),
+        expected: "claude".into(),
+        got: "oz".into(),
+    });
+    assert_eq!(state, AgentTaskState::Failed);
+    assert_eq!(
+        update.error_code,
+        Some(PlatformErrorCode::EnvironmentSetupFailed)
+    );
+    assert!(update.message.contains("conv-123"));
+    assert!(update.message.contains("--harness claude"));
+}
+
+#[test]
+fn conversation_resume_state_missing_is_failed_with_resource_not_found() {
+    let (state, update) =
+        classify_driver_error(&AgentDriverError::ConversationResumeStateMissing {
+            harness: "claude".into(),
+            conversation_id: "conv-123".into(),
+        });
+    assert_eq!(state, AgentTaskState::Failed);
+    assert_eq!(update.error_code, Some(PlatformErrorCode::ResourceNotFound));
+    assert!(update.message.contains("conv-123"));
+    assert!(update.message.contains("claude"));
 }
 
 // --- ShareSessionFailed variants ---
@@ -152,4 +259,42 @@ fn conversation_blocked_is_blocked() {
     });
     assert_eq!(state, AgentTaskState::Blocked);
     assert!(update.message.contains("rm -rf /"));
+}
+
+// --- Harness auth preflight errors ---
+
+#[test]
+fn harness_auth_check_failed_is_failed_with_auth_required() {
+    let (state, update) = classify_driver_error(&AgentDriverError::HarnessAuthCheckFailed {
+        harness: "claude".into(),
+        detail: "exit code 1".into(),
+    });
+    assert_eq!(state, AgentTaskState::Failed);
+    assert_eq!(
+        update.error_code,
+        Some(PlatformErrorCode::AuthenticationRequired)
+    );
+    assert!(update.message.contains("authentication check failed"));
+    assert!(update.message.contains("claude"));
+}
+
+// --- Runtime failure detection ---
+
+#[test]
+fn harness_runtime_failure_detected_is_failed_with_auth_required() {
+    let (state, update) = classify_driver_error(&AgentDriverError::HarnessRuntimeFailureDetected {
+        harness: "claude".into(),
+        pattern: "credit balance is too low".into(),
+        excerpt: "Error: Your credit balance is too low to make this request.".into(),
+    });
+    assert_eq!(state, AgentTaskState::Failed);
+    assert_eq!(
+        update.error_code,
+        Some(PlatformErrorCode::AuthenticationRequired)
+    );
+    // The user-visible message must surface both the matched pattern and
+    // the excerpt so on-call/users have actionable context.
+    assert!(update.message.contains("claude"));
+    assert!(update.message.contains("credit balance is too low"));
+    assert!(update.message.contains("Your credit balance is too low"));
 }
