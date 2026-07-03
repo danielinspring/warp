@@ -24,6 +24,12 @@ fn main() -> Result<()> {
     if cfg!(debug_assertions) {
         state = state.with_additional_features(warp_core::features::DEBUG_FLAGS);
     }
+    #[cfg(feature = "local_ollama_runtime_tool_use")]
+    {
+        state = state.with_additional_features(&[
+            warp_core::features::FeatureFlag::LocalOllamaRuntimeToolUse,
+        ]);
+    }
     ChannelState::set(state);
 
     warp::run()

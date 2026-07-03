@@ -345,6 +345,8 @@ fn enabled_features() -> HashSet<FeatureFlag> {
         FeatureFlag::AgentModeComputerUse,
         #[cfg(feature = "local_computer_use")]
         FeatureFlag::LocalComputerUse,
+        #[cfg(feature = "local_ollama_runtime_tool_use")]
+        FeatureFlag::LocalOllamaRuntimeToolUse,
         #[cfg(feature = "local_claude_codex_child_harnesses")]
         FeatureFlag::LocalClaudeCodexChildHarnesses,
         #[cfg(feature = "team_api_keys")]
