@@ -178,6 +178,9 @@ impl ResponseStream {
             error_event_emitted: false,
             deferred_retry_pending: false,
             current_request_id: Some(Uuid::new_v4()),
+            local_runtime_tool_loop: false,
+            action_model: None,
+            pending_local_runtime_tool_results: HashMap::new(),
         }
     }
 

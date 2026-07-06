@@ -910,10 +910,84 @@ pub fn tool_call_to_proto_tool(
                 },
             ))
         }
+        "edit_files" => Ok(Tool::ApplyFileDiffs(edit_files_tool_call_to_proto(call)?)),
         _ => Err(ToolExecutionError::NotFound {
             name: call.name.clone(),
         }),
     }
+}
+
+fn edit_files_tool_call_to_proto(
+    call: &ToolCall,
+) -> Result<api::message::tool_call::ApplyFileDiffs, ToolExecutionError> {
+    validate_allowed_arguments(&call.arguments, &["title", "edits"], &call.name)?;
+    let edits_value = call
+        .arguments
+        .get("edits")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ToolExecutionError::InvalidInput {
+            reason: "Tool `edit_files` requires array argument `edits`".to_string(),
+        })?;
+
+    if edits_value.is_empty() {
+        return Err(ToolExecutionError::InvalidInput {
+            reason: "Tool `edit_files` requires at least one edit".to_string(),
+        });
+    }
+
+    let mut diffs = Vec::new();
+    let mut new_files = Vec::new();
+    let mut deleted_files = Vec::new();
+
+    for edit in edits_value {
+        let object = edit
+            .as_object()
+            .ok_or_else(|| ToolExecutionError::InvalidInput {
+                reason: "`edit_files.edits` entries must be objects".to_string(),
+            })?;
+        let arguments = Value::Object(object.clone());
+        validate_allowed_arguments(
+            &arguments,
+            &["type", "file", "search", "replace", "content"],
+            "edit_files edit",
+        )?;
+
+        let edit_type = required_string(&arguments, "type", "edit_files edit")?;
+        let file_path = required_string(&arguments, "file", "edit_files edit")?;
+        match edit_type.as_str() {
+            "replace" => {
+                diffs.push(api::message::tool_call::apply_file_diffs::FileDiff {
+                    file_path,
+                    search: required_string(&arguments, "search", "edit_files replace edit")?,
+                    replace: required_string(&arguments, "replace", "edit_files replace edit")?,
+                });
+            }
+            "create" => {
+                new_files.push(api::message::tool_call::apply_file_diffs::NewFile {
+                    file_path,
+                    content: required_string(&arguments, "content", "edit_files create edit")?,
+                });
+            }
+            "delete" => {
+                deleted_files
+                    .push(api::message::tool_call::apply_file_diffs::DeleteFile { file_path });
+            }
+            _ => {
+                return Err(ToolExecutionError::InvalidInput {
+                    reason: "Tool `edit_files` edit type must be `replace`, `create`, or `delete`"
+                        .to_string(),
+                });
+            }
+        }
+    }
+
+    Ok(api::message::tool_call::ApplyFileDiffs {
+        summary: optional_string(&call.arguments, "title")?.unwrap_or_default(),
+        diffs,
+        new_files,
+        deleted_files,
+        v4a_updates: vec![],
+    })
 }
 
 fn has_any_argument(arguments: &Value, names: &[&str]) -> bool {
@@ -1589,6 +1663,41 @@ mod tests {
     }
 
     #[test]
+    fn edit_files_maps_to_apply_file_diffs_proto_for_ui_rendering() {
+        let proto = tool_call_to_proto_tool(&call(
+            "edit_files",
+            serde_json::json!({
+                "title": "Update greeting",
+                "edits": [
+                    {
+                        "type": "replace",
+                        "file": "/tmp/warp-agent-easy/hello.rs",
+                        "search": "println!(\"Hello\");",
+                        "replace": "println!(\"Hello from the local agent!\");"
+                    }
+                ]
+            }),
+        ))
+        .unwrap();
+
+        let api::message::tool_call::Tool::ApplyFileDiffs(diff) = proto else {
+            panic!("expected ApplyFileDiffs tool call");
+        };
+
+        assert_eq!(diff.summary, "Update greeting");
+        assert_eq!(diff.diffs.len(), 1);
+        assert_eq!(diff.diffs[0].file_path, "/tmp/warp-agent-easy/hello.rs");
+        assert_eq!(diff.diffs[0].search, "println!(\"Hello\");");
+        assert_eq!(
+            diff.diffs[0].replace,
+            "println!(\"Hello from the local agent!\");"
+        );
+        assert!(diff.new_files.is_empty());
+        assert!(diff.deleted_files.is_empty());
+        assert!(diff.v4a_updates.is_empty());
+    }
+
+    #[test]
     fn action_result_content_includes_real_file_content() {
         let result = AIAgentActionResult {
             id: AIAgentActionId::from("call_1".to_string()),
@@ -2078,6 +2187,52 @@ pub mod event_mapper {
                 panic!("expected merged agent output message");
             };
             assert_eq!(output.text, "hello");
+        }
+
+        #[test]
+        fn edit_files_tool_call_maps_to_apply_file_diffs_client_action() {
+            let mut mapper = EventMapper::new(
+                "conversation_1".to_string(),
+                "request_1".to_string(),
+                "run_1".to_string(),
+                "task_1".to_string(),
+                true,
+            );
+
+            let events = mapper.map_event(&RuntimeEvent::ToolCallsRequested {
+                calls: vec![local_agent_runtime::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "edit_files".to_string(),
+                    arguments: serde_json::json!({
+                        "title": "Update greeting",
+                        "edits": [
+                            {
+                                "type": "replace",
+                                "file": "/tmp/warp-agent-easy/hello.rs",
+                                "search": "println!(\"Hello\");",
+                                "replace": "println!(\"Hello from the local agent!\");"
+                            }
+                        ]
+                    }),
+                }],
+            });
+
+            let actions = client_actions(&events[0]);
+            let Some(api::client_action::Action::AddMessagesToTask(add)) = &actions[1].action
+            else {
+                panic!("expected AddMessagesToTask action");
+            };
+            let Some(api::message::Message::ToolCall(tool_call)) = &add.messages[0].message else {
+                panic!("expected tool call message");
+            };
+            let Some(api::message::tool_call::Tool::ApplyFileDiffs(diff)) = &tool_call.tool else {
+                panic!("expected ApplyFileDiffs tool");
+            };
+
+            assert_eq!(tool_call.tool_call_id, "call_1");
+            assert_eq!(diff.summary, "Update greeting");
+            assert_eq!(diff.diffs.len(), 1);
+            assert_eq!(diff.diffs[0].file_path, "/tmp/warp-agent-easy/hello.rs");
         }
     }
 }

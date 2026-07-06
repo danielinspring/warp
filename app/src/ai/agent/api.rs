@@ -209,6 +209,7 @@ impl RequestParams {
             supported_tools_override: None,
             parent_agent_id: None,
             agent_name: None,
+            ollama_config: None,
         }
     }
 
