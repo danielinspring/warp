@@ -8,6 +8,7 @@
 //! The [`PaneContent`] interface requires implementers to maintain a [`PaneId`] for their pane.
 //! The [`PaneId`] must be created via a [`PaneView<BackingView>`]. The [`PaneId`] is consequently
 //! used to render a [`PaneView`] which internally renders the pane, including the [`BackingView`].
+pub(super) mod agent_viz_pane;
 pub(super) mod ai_document_pane;
 pub(super) mod ai_fact_pane;
 pub(super) mod code_diff_pane;
@@ -23,18 +24,16 @@ pub(super) mod get_started_view;
 #[cfg(not(target_family = "wasm"))]
 pub(super) mod local_harness_launch;
 pub(super) mod network_log_pane;
-pub(super) mod agent_viz_pane;
-pub(super) mod welcome_pane;
-pub(crate) mod welcome_view;
 pub(super) mod notebook_pane;
 pub(super) mod settings_pane;
 pub(super) mod terminal_pane;
 pub mod view;
+pub(super) mod welcome_pane;
+pub(crate) mod welcome_view;
 pub mod workflow_pane;
 
 use std::any::Any;
 use std::fmt::Display;
-
 
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -62,8 +61,8 @@ use crate::menu::MenuItem;
 use crate::notebooks::file::FileNotebookView;
 use crate::notebooks::notebook::NotebookView;
 use crate::pane_group::focus_state::PaneFocusHandle;
-use crate::pane_group::pane::welcome_view::WelcomeView;
 use crate::pane_group::pane::get_started_view::GetStartedView;
+use crate::pane_group::pane::welcome_view::WelcomeView;
 use crate::server::network_log_view::NetworkLogView;
 use crate::server::telemetry::SharingDialogSource;
 use crate::settings::PaneSettings;
@@ -392,9 +391,7 @@ impl PaneId {
     }
 
     /// Creates a [`PaneId`] from a [`PaneView<WelcomeView>`] entity ID.
-    pub fn from_welcome_pane_view(
-        welcome_pane_view: &ViewHandle<PaneView<WelcomeView>>,
-    ) -> Self {
+    pub fn from_welcome_pane_view(welcome_pane_view: &ViewHandle<PaneView<WelcomeView>>) -> Self {
         Self::new(IPaneType::Welcome, welcome_pane_view)
     }
 

@@ -12,13 +12,11 @@ use warpui::{Entity, ModelContext, ModelHandle, SingletonEntity};
 
 use crate::ai::agent::api::{self, generate_multi_agent_output, ConvertToAPITypeError};
 use crate::ai::agent::conversation::AIConversationId;
-use crate::ai::agent::{
-    AIAgentActionId, AIIdentifiers, CancellationReason,
-};
+use crate::ai::agent::{AIAgentActionId, AIIdentifiers, CancellationReason};
 use crate::ai::blocklist::action_model::{BlocklistAIActionEvent, BlocklistAIActionModel};
 use crate::ai::local_runtime_bridge::{
     action_result_to_tool_call_result_client_actions, action_result_to_tool_result,
-    tool_call_to_ai_action, ToolExecutionRequest,
+    ToolExecutionRequest,
 };
 use crate::network::NetworkStatus;
 use crate::server::server_api::{AIApiError, ServerApiProvider};
@@ -377,7 +375,11 @@ impl ResponseStream {
             return;
         };
 
-        let action = match tool_call_to_ai_action(&request.call, &request.task_id) {
+        let action = match crate::ai::local_runtime_bridge::tool_call_to_ai_action_with_registry(
+            &request.call,
+            &request.task_id,
+            &request.registry,
+        ) {
             Ok(action) => action,
             Err(err) => {
                 let _ = request.response_tx.send(Err(err));

@@ -8,7 +8,6 @@ use futures::stream::AbortHandle;
 use warp_core::user_preferences::GetUserPreferences as _;
 use warpui::{AppContext, Entity, ModelContext, SingletonEntity};
 
-use ::ai::api_keys::ApiKeyManager;
 use super::execution_context::WarpAiExecutionContext;
 use super::utils::{markdown_segments_from_text, FormattedTranscriptMessage, TranscriptPart};
 use crate::ai::ollama::OllamaClient;
@@ -20,6 +19,7 @@ use crate::server::server_api::ai::AIClient;
 use crate::server::server_api::ServerApi;
 use crate::server::telemetry::{TelemetryEvent, WarpAIRequestResult};
 use crate::workspaces::user_workspaces::UserWorkspaces;
+use ::ai::api_keys::ApiKeyManager;
 
 /// The key for the corresponding entry in UserDefaults.
 /// Not wiring through Settings for now since this data is only needed by the panel view.

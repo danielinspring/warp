@@ -8,6 +8,17 @@ pub mod schema;
 
 use serde::{Deserialize, Serialize};
 
+/// Conservative safety class used by the runtime to schedule tool calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ToolSafetyClass {
+    /// Purely read-only context gathering.
+    ReadOnly,
+    /// May mutate user state, files, or external services.
+    Mutating,
+    /// Requires an interactive UI/permission flow.
+    Interactive,
+}
+
 /// A tool call requested by the LLM.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
@@ -62,17 +73,21 @@ pub trait ToolExecutor: Send + Sync {
     /// Get all available tool schemas for the current session.
     fn available_tools(&self) -> Vec<schema::ToolSchema>;
 
+    /// Return the conservative safety class for a tool name.
+    fn safety_class(&self, _tool_name: &str) -> ToolSafetyClass {
+        ToolSafetyClass::Interactive
+    }
+
     /// Check if a tool call can auto-execute (permission check).
     async fn check_permission(&self, call: &ToolCall) -> PermissionDecision;
 
     /// Execute a tool call, returning the result.
-    async fn execute(&self, call: &ToolCall) -> Result<ToolCallResult, crate::error::ToolExecutionError>;
+    async fn execute(
+        &self,
+        call: &ToolCall,
+    ) -> Result<ToolCallResult, crate::error::ToolExecutionError>;
 
     /// Notify that a permission request was answered by the user.
     /// Returns the updated decision.
-    async fn on_permission_response(
-        &self,
-        call: &ToolCall,
-        granted: bool,
-    ) -> PermissionDecision;
+    async fn on_permission_response(&self, call: &ToolCall, granted: bool) -> PermissionDecision;
 }

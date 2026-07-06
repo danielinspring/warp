@@ -28,7 +28,9 @@ use warp_multi_agent_api as api;
 use crate::ai::agent::api::{Event, OllamaConfig, RequestParams, ResponseStream};
 use crate::ai::agent::AIAgentInput;
 use crate::ai::local_runtime_bridge::event_mapper::EventMapper;
-use crate::ai::local_runtime_bridge::{ToolExecutionRequest, WarpToolExecutor};
+use crate::ai::local_runtime_bridge::{
+    LocalRuntimeToolRegistry, ToolExecutionRequest, WarpToolExecutor,
+};
 use crate::ai::local_runtime_event_bus;
 use crate::ai::local_runtime_spec;
 use crate::server::server_api::AIApiError;
@@ -91,8 +93,10 @@ async fn run_runtime(
         .unwrap_or_else(|| Uuid::new_v4().to_string());
     let task_exists = !params.tasks.is_empty();
 
+    let registry = Arc::new(LocalRuntimeToolRegistry::from_request(&params));
     let executor = WarpToolExecutor::new(
         tool_request_tx,
+        Arc::clone(&registry),
         crate::ai::agent::task::TaskId::new(task_id.clone()),
         request_id.clone(),
     );

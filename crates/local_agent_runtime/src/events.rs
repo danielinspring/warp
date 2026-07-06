@@ -10,35 +10,22 @@ use crate::tools::{ToolCall, ToolCallResult};
 #[derive(Debug, Clone)]
 pub enum RuntimeEvent {
     /// A new LLM turn is starting.
-    TurnStarted {
-        turn: u32,
-    },
+    TurnStarted { turn: u32 },
 
     /// The LLM produced a text chunk (for streaming).
-    TextDelta {
-        text: String,
-    },
+    TextDelta { text: String },
 
     /// The LLM finished producing text for this turn (non-streaming fallback).
-    TextCompleted {
-        text: String,
-    },
+    TextCompleted { text: String },
 
     /// The LLM requested one or more tool calls.
-    ToolCallsRequested {
-        calls: Vec<ToolCall>,
-    },
+    ToolCallsRequested { calls: Vec<ToolCall> },
 
     /// A tool call requires user permission before execution.
-    PermissionRequired {
-        call: ToolCall,
-    },
+    PermissionRequired { call: ToolCall },
 
     /// Permission was granted (or auto-approved), tool execution starting.
-    ToolExecutionStarted {
-        call_id: String,
-        tool_name: String,
-    },
+    ToolExecutionStarted { call_id: String, tool_name: String },
 
     /// Tool execution completed with a result.
     ToolResult {
@@ -47,19 +34,13 @@ pub enum RuntimeEvent {
     },
 
     /// The LLM turn completed (no more tool calls requested).
-    TurnCompleted {
-        reason: StopReason,
-    },
+    TurnCompleted { reason: StopReason },
 
     /// A recoverable error occurred; runtime will continue.
-    Warning {
-        message: String,
-    },
+    Warning { message: String },
 
     /// The agent loop finished.
-    Finished {
-        reason: FinishReason,
-    },
+    Finished { reason: FinishReason },
 }
 
 /// Why a single LLM turn ended.

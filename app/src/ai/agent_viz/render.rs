@@ -8,16 +8,19 @@
 //! configuration: system prompt, tools, MCP servers, skills.
 
 use super::model::{AgentVizModel, Room};
-use crate::ai::local_runtime_spec::{
-    self, LocalRuntimeAttachment, McpServerInfo, SkillInfo,
-};
+use crate::ai::local_runtime_spec::{self, LocalRuntimeAttachment, McpServerInfo, SkillInfo};
 use local_agent_runtime::ToolSchema;
 
 const ROOM_WIDTH: usize = 24;
 const ROOM_HEIGHT: usize = 3;
 
 /// Build the full text snapshot for the visualization pane.
-pub fn render_snapshot<F>(model: &AgentVizModel, mcp: &[McpServerInfo], skills: &[SkillInfo], tools_provider: F) -> String
+pub fn render_snapshot<F>(
+    model: &AgentVizModel,
+    mcp: &[McpServerInfo],
+    skills: &[SkillInfo],
+    tools_provider: F,
+) -> String
 where
     F: FnOnce() -> Vec<ToolSchema>,
 {
@@ -33,7 +36,10 @@ where
     out.push_str(&render_status_line(model));
     out.push('\n');
 
-    out.push_str(&render_section("System prompt", local_runtime_spec::system_prompt()));
+    out.push_str(&render_section(
+        "System prompt",
+        local_runtime_spec::system_prompt(),
+    ));
     out.push('\n');
 
     out.push_str(&render_tools_section(&tools));
@@ -54,11 +60,7 @@ fn render_office(model: &AgentVizModel, tools: &[ToolSchema]) -> String {
     let bottom_rooms: Vec<Room> = vec![
         Room::Thinking,
         Room::Permission,
-        if model
-            .agents
-            .values()
-            .any(|m| m.current_room == Room::Done)
-        {
+        if model.agents.values().any(|m| m.current_room == Room::Done) {
             Room::Done
         } else {
             Room::Idle

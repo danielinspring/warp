@@ -179,6 +179,7 @@ use crate::ai::agent_management::view::{AgentManagementView, AgentManagementView
 use crate::ai::agent_management::AgentManagementEvent;
 #[cfg(not(target_family = "wasm"))]
 use crate::ai::agent_sdk::driver::harness::{claude_transcript, codex_transcript};
+use crate::ai::agent_viz::pane_manager::AgentVizPaneManager;
 use crate::ai::ambient_agents::telemetry::{CloudAgentTelemetryEvent, CloudModeEntryPoint};
 #[cfg(all(feature = "local_fs", not(target_family = "wasm")))]
 use crate::ai::ambient_agents::telemetry::{HandoffEntryPoint, HandoffInjectionPath};
@@ -287,9 +288,8 @@ use crate::palette::PaletteMode;
 use crate::pane_group::pane::ActionOrigin;
 #[cfg(feature = "local_fs")]
 use crate::pane_group::FilePane;
-use crate::ai::agent_viz::pane_manager::AgentVizPaneManager;
 use crate::pane_group::{
-    self, AgentVizPane, AIFactPane, AnyPaneContent, ChildAgentOrigin, CodeDiffPane, CodePane,
+    self, AIFactPane, AgentVizPane, AnyPaneContent, ChildAgentOrigin, CodeDiffPane, CodePane,
     CodeReviewPanelArg, CustomRouterEditorPane, Direction as PaneGroupDirection, Direction,
     EnvironmentManagementPane, ExecutionProfileEditorPane, NetworkLogPane, NewTerminalOptions,
     PaneGroup, PaneId, PanesLayout, TabBarHoverIndex, TerminalPaneId,

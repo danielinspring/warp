@@ -65,4 +65,4 @@ pub use provider::{
 };
 pub use runtime::{AgentRuntime, CancelHandle};
 pub use tools::schema::{ToolSchema, ToolSchemaBuilder};
-pub use tools::{PermissionDecision, ToolCall, ToolCallResult, ToolExecutor};
+pub use tools::{PermissionDecision, ToolCall, ToolCallResult, ToolExecutor, ToolSafetyClass};

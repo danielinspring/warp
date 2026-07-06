@@ -12,12 +12,21 @@
 
 use futures::channel::oneshot;
 use local_agent_runtime::tools::schema::{ToolSchema, ToolSchemaBuilder};
-use local_agent_runtime::tools::{PermissionDecision, ToolCall, ToolCallResult};
+use local_agent_runtime::tools::{PermissionDecision, ToolCall, ToolCallResult, ToolSafetyClass};
 use local_agent_runtime::{ToolExecutionError, ToolExecutor};
 use serde_json::Value;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
 use uuid::Uuid;
 use warp_multi_agent_api as api;
+use warp_util::local_or_remote_path::LocalOrRemotePath;
 
+use ai::agent::action::FileEdit;
+use ai::diff_validation::ParsedDiff;
+use ai::skills::SkillReference;
+
+use crate::ai::agent::api::RequestParams;
 use crate::ai::agent::task::TaskId;
 use crate::ai::agent::{
     AIAgentAction, AIAgentActionId, AIAgentActionResult, AIAgentActionResultType,
@@ -28,14 +37,216 @@ use crate::ai::agent::{
 /// Request sent from the runtime task to the app/UI model task for real Warp tool execution.
 pub struct ToolExecutionRequest {
     pub call: ToolCall,
+    pub registry: Arc<LocalRuntimeToolRegistry>,
     pub task_id: TaskId,
     pub request_id: String,
     pub response_tx: oneshot::Sender<Result<ToolCallResult, ToolExecutionError>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct LocalRuntimeToolRegistry {
+    schemas: Vec<ToolSchema>,
+    routes: HashMap<String, LocalRuntimeToolRoute>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LocalRuntimeToolRoute {
+    safety_class: ToolSafetyClass,
+    kind: LocalRuntimeToolRouteKind,
+}
+
+#[derive(Debug, Clone)]
+enum LocalRuntimeToolRouteKind {
+    BuiltIn,
+    McpTool {
+        server_id: Option<Uuid>,
+        name: String,
+    },
+    ReadMcpResource,
+    ReadSkill {
+        skill_lookup: HashMap<String, SkillReference>,
+    },
+}
+
+impl LocalRuntimeToolRegistry {
+    pub fn from_request(params: &RequestParams) -> Self {
+        let mut registry = Self::built_ins();
+
+        if let Some(context) = &params.mcp_context {
+            registry.add_mcp_context(context);
+        }
+
+        let skills = skill_references_for_request(params);
+        if !skills.is_empty() {
+            registry.add_read_skill(skills);
+        }
+
+        registry
+    }
+
+    pub fn built_ins() -> Self {
+        let mut registry = Self {
+            schemas: Vec::new(),
+            routes: HashMap::new(),
+        };
+
+        for schema in build_tool_schemas() {
+            let safety_class = match schema.name.as_str() {
+                "run_shell_command" | "edit_files" => ToolSafetyClass::Interactive,
+                "read_files" | "grep" | "file_glob_v2" | "search_codebase" => {
+                    ToolSafetyClass::ReadOnly
+                }
+                _ => ToolSafetyClass::Interactive,
+            };
+            registry.add_tool(schema, safety_class, LocalRuntimeToolRouteKind::BuiltIn);
+        }
+
+        registry
+    }
+
+    pub fn schemas(&self) -> Vec<ToolSchema> {
+        self.schemas.clone()
+    }
+
+    pub fn contains_tool(&self, name: &str) -> bool {
+        self.routes.contains_key(name)
+    }
+
+    pub fn safety_class(&self, name: &str) -> ToolSafetyClass {
+        self.routes
+            .get(name)
+            .map(|route| route.safety_class)
+            .unwrap_or(ToolSafetyClass::Interactive)
+    }
+
+    fn route(&self, name: &str) -> Option<&LocalRuntimeToolRoute> {
+        self.routes.get(name)
+    }
+
+    fn add_tool(
+        &mut self,
+        schema: ToolSchema,
+        safety_class: ToolSafetyClass,
+        kind: LocalRuntimeToolRouteKind,
+    ) {
+        if self.routes.contains_key(&schema.name) {
+            return;
+        }
+
+        self.routes.insert(
+            schema.name.clone(),
+            LocalRuntimeToolRoute { safety_class, kind },
+        );
+        self.schemas.push(schema);
+    }
+
+    fn add_mcp_context(&mut self, context: &crate::ai::agent::MCPContext) {
+        let mut has_resources = false;
+
+        for server in &context.servers {
+            let server_slug = sanitize_function_name(&server.name);
+            let server_id = Uuid::parse_str(&server.id).ok();
+            has_resources |= !server.resources.is_empty();
+
+            for tool in &server.tools {
+                let tool_name = tool.name.to_string();
+                let function_name = unique_tool_name(
+                    &self.routes,
+                    &format!("mcp__{server_slug}__{}", sanitize_function_name(&tool_name)),
+                );
+                let description = tool
+                    .description
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| {
+                        format!("Call MCP tool `{tool_name}` on server `{}`", server.name)
+                    });
+                let parameters = serde_json::to_value(tool.input_schema.as_ref())
+                    .unwrap_or_else(|_| serde_json::json!({ "type": "object" }));
+
+                self.add_tool(
+                    ToolSchema {
+                        name: function_name,
+                        description,
+                        parameters,
+                    },
+                    ToolSafetyClass::Interactive,
+                    LocalRuntimeToolRouteKind::McpTool {
+                        server_id,
+                        name: tool_name,
+                    },
+                );
+            }
+        }
+
+        #[allow(deprecated)]
+        {
+            has_resources |= !context.resources.is_empty();
+            for tool in &context.tools {
+                let tool_name = tool.name.to_string();
+                let function_name = unique_tool_name(
+                    &self.routes,
+                    &format!("mcp__default__{}", sanitize_function_name(&tool_name)),
+                );
+                let description = tool
+                    .description
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| format!("Call MCP tool `{tool_name}`"));
+                let parameters = serde_json::to_value(tool.input_schema.as_ref())
+                    .unwrap_or_else(|_| serde_json::json!({ "type": "object" }));
+
+                self.add_tool(
+                    ToolSchema {
+                        name: function_name,
+                        description,
+                        parameters,
+                    },
+                    ToolSafetyClass::Interactive,
+                    LocalRuntimeToolRouteKind::McpTool {
+                        server_id: None,
+                        name: tool_name,
+                    },
+                );
+            }
+        }
+
+        if has_resources {
+            self.add_read_mcp_resource();
+        }
+    }
+
+    fn add_read_mcp_resource(&mut self) {
+        self.add_tool(
+            ToolSchemaBuilder::new(
+                "read_mcp_resource",
+                "Read an active MCP resource by URI or by name.",
+            )
+            .optional_string("uri", "The MCP resource URI to read")
+            .optional_string("name", "The MCP resource name to read")
+            .build(),
+            ToolSafetyClass::ReadOnly,
+            LocalRuntimeToolRouteKind::ReadMcpResource,
+        );
+    }
+
+    fn add_read_skill(&mut self, skill_lookup: HashMap<String, SkillReference>) {
+        self.add_tool(
+            ToolSchemaBuilder::new("read_skill", "Read an available Warp skill by reference.")
+                .required_string(
+                    "skill",
+                    "The skill name or displayed reference to read, such as @warp-skill:name or a SKILL.md path",
+                )
+                .build(),
+            ToolSafetyClass::ReadOnly,
+            LocalRuntimeToolRouteKind::ReadSkill { skill_lookup },
+        );
+    }
+}
+
 pub struct WarpToolExecutor {
     /// Tools available in the current session.
-    tools: Vec<ToolSchema>,
+    registry: Arc<LocalRuntimeToolRegistry>,
     request_tx: async_channel::Sender<ToolExecutionRequest>,
     task_id: TaskId,
     request_id: String,
@@ -44,11 +255,12 @@ pub struct WarpToolExecutor {
 impl WarpToolExecutor {
     pub fn new(
         request_tx: async_channel::Sender<ToolExecutionRequest>,
+        registry: Arc<LocalRuntimeToolRegistry>,
         task_id: TaskId,
         request_id: String,
     ) -> Self {
         Self {
-            tools: build_tool_schemas(),
+            registry,
             request_tx,
             task_id,
             request_id,
@@ -59,11 +271,15 @@ impl WarpToolExecutor {
 #[async_trait::async_trait]
 impl ToolExecutor for WarpToolExecutor {
     fn available_tools(&self) -> Vec<ToolSchema> {
-        self.tools.clone()
+        self.registry.schemas()
+    }
+
+    fn safety_class(&self, tool_name: &str) -> ToolSafetyClass {
+        self.registry.safety_class(tool_name)
     }
 
     async fn check_permission(&self, call: &ToolCall) -> PermissionDecision {
-        if is_supported_tool(&call.name) {
+        if self.registry.contains_tool(&call.name) {
             // Warp's action model owns the real permission/autocomplete decision and may block on
             // user confirmation. The runtime should still enter `execute` so that existing UI path
             // can queue and resolve the action.
@@ -80,6 +296,7 @@ impl ToolExecutor for WarpToolExecutor {
         self.request_tx
             .send(ToolExecutionRequest {
                 call: call.clone(),
+                registry: Arc::clone(&self.registry),
                 task_id: self.task_id.clone(),
                 request_id: self.request_id.clone(),
                 response_tx,
@@ -158,20 +375,130 @@ pub fn build_tool_schemas() -> Vec<ToolSchema> {
         .optional_string_array("path_filters", "Optional path prefixes to restrict the search")
         .optional_string("codebase_path", "Optional codebase root path")
         .build(),
+        ToolSchema {
+            name: "edit_files".to_string(),
+            description: "Propose reviewed file edits. Supports replace, create, and delete edits. This opens Warp's review UI and never writes directly to disk.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Optional short title for the edit set"
+                    },
+                    "edits": {
+                        "type": "array",
+                        "description": "File edits to propose",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "type": {
+                                    "type": "string",
+                                    "enum": ["replace", "create", "delete"]
+                                },
+                                "file": {
+                                    "type": "string",
+                                    "description": "File path to edit"
+                                },
+                                "search": {
+                                    "type": "string",
+                                    "description": "Existing text for replace edits"
+                                },
+                                "replace": {
+                                    "type": "string",
+                                    "description": "Replacement text for replace edits"
+                                },
+                                "content": {
+                                    "type": "string",
+                                    "description": "New file content for create edits"
+                                }
+                            },
+                            "required": ["type", "file"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["edits"],
+                "additionalProperties": false
+            }),
+        },
     ]
 }
 
+#[cfg(test)]
 pub fn is_supported_tool(name: &str) -> bool {
-    matches!(
-        name,
-        "run_shell_command" | "read_files" | "grep" | "file_glob_v2" | "search_codebase"
-    )
+    LocalRuntimeToolRegistry::built_ins().contains_tool(name)
 }
 
+#[cfg(test)]
 pub fn tool_call_to_ai_action(
     call: &ToolCall,
     task_id: &TaskId,
 ) -> Result<AIAgentAction, ToolExecutionError> {
+    tool_call_to_ai_action_with_registry(call, task_id, &LocalRuntimeToolRegistry::built_ins())
+}
+
+pub fn tool_call_to_ai_action_with_registry(
+    call: &ToolCall,
+    task_id: &TaskId,
+    registry: &LocalRuntimeToolRegistry,
+) -> Result<AIAgentAction, ToolExecutionError> {
+    let route = registry
+        .route(&call.name)
+        .ok_or_else(|| ToolExecutionError::NotFound {
+            name: call.name.clone(),
+        })?;
+
+    let action = match &route.kind {
+        LocalRuntimeToolRouteKind::BuiltIn => built_in_tool_call_to_ai_action(call)?,
+        LocalRuntimeToolRouteKind::McpTool { server_id, name } => AIAgentActionType::CallMCPTool {
+            server_id: *server_id,
+            name: name.clone(),
+            input: arguments_object(&call.arguments, &call.name)?
+                .clone()
+                .into(),
+        },
+        LocalRuntimeToolRouteKind::ReadMcpResource => {
+            validate_allowed_arguments(&call.arguments, &["name", "uri"], &call.name)?;
+            let uri = optional_string(&call.arguments, "uri")?;
+            let name = optional_string(&call.arguments, "name")?;
+            let Some(name_or_uri) = name.clone().or_else(|| uri.clone()) else {
+                return Err(ToolExecutionError::InvalidInput {
+                    reason: "Tool `read_mcp_resource` requires `uri` or `name`".to_string(),
+                });
+            };
+            AIAgentActionType::ReadMCPResource {
+                server_id: None,
+                name: name_or_uri,
+                uri,
+            }
+        }
+        LocalRuntimeToolRouteKind::ReadSkill { skill_lookup } => {
+            validate_allowed_arguments(&call.arguments, &["skill"], &call.name)?;
+            let skill = required_string(&call.arguments, "skill", &call.name)?;
+            AIAgentActionType::ReadSkill(crate::ai::agent::ReadSkillRequest {
+                skill: skill_lookup
+                    .get(&skill)
+                    .cloned()
+                    .unwrap_or_else(|| parse_skill_reference(skill)),
+            })
+        }
+    };
+
+    Ok(AIAgentAction {
+        id: AIAgentActionId::from(call.id.clone()),
+        task_id: task_id.clone(),
+        action,
+        requires_result: true,
+    })
+}
+
+fn built_in_tool_call_to_ai_action(
+    call: &ToolCall,
+) -> Result<AIAgentActionType, ToolExecutionError> {
+    if call.name == "edit_files" {
+        return edit_files_tool_call_to_ai_action(call);
+    }
+
     let action: AIAgentActionType = match tool_call_to_proto_tool(call)? {
         api::message::tool_call::Tool::RunShellCommand(tool) => tool.into(),
         api::message::tool_call::Tool::ReadFiles(tool) => tool.into(),
@@ -185,12 +512,82 @@ pub fn tool_call_to_ai_action(
         }
     };
 
-    Ok(AIAgentAction {
-        id: AIAgentActionId::from(call.id.clone()),
-        task_id: task_id.clone(),
-        action,
-        requires_result: true,
+    Ok(action)
+}
+
+fn edit_files_tool_call_to_ai_action(
+    call: &ToolCall,
+) -> Result<AIAgentActionType, ToolExecutionError> {
+    validate_allowed_arguments(&call.arguments, &["title", "edits"], &call.name)?;
+    let edits_value = call
+        .arguments
+        .get("edits")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ToolExecutionError::InvalidInput {
+            reason: "Tool `edit_files` requires array argument `edits`".to_string(),
+        })?;
+
+    if edits_value.is_empty() {
+        return Err(ToolExecutionError::InvalidInput {
+            reason: "Tool `edit_files` requires at least one edit".to_string(),
+        });
+    }
+
+    let file_edits = edits_value
+        .iter()
+        .map(parse_file_edit)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(AIAgentActionType::RequestFileEdits {
+        file_edits,
+        title: optional_string(&call.arguments, "title")?,
     })
+}
+
+fn parse_file_edit(value: &Value) -> Result<FileEdit, ToolExecutionError> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| ToolExecutionError::InvalidInput {
+            reason: "`edit_files.edits` entries must be objects".to_string(),
+        })?;
+    let arguments = Value::Object(object.clone());
+    validate_allowed_arguments(
+        &arguments,
+        &["type", "file", "search", "replace", "content"],
+        "edit_files edit",
+    )?;
+
+    let edit_type = required_string(&arguments, "type", "edit_files edit")?;
+    let file = Some(required_string(&arguments, "file", "edit_files edit")?);
+
+    match edit_type.as_str() {
+        "replace" => Ok(FileEdit::Edit(ParsedDiff::StrReplaceEdit {
+            file,
+            search: Some(required_string(
+                &arguments,
+                "search",
+                "edit_files replace edit",
+            )?),
+            replace: Some(required_string(
+                &arguments,
+                "replace",
+                "edit_files replace edit",
+            )?),
+        })),
+        "create" => Ok(FileEdit::Create {
+            file,
+            content: Some(required_string(
+                &arguments,
+                "content",
+                "edit_files create edit",
+            )?),
+        }),
+        "delete" => Ok(FileEdit::Delete { file }),
+        _ => Err(ToolExecutionError::InvalidInput {
+            reason: "Tool `edit_files` edit type must be `replace`, `create`, or `delete`"
+                .to_string(),
+        }),
+    }
 }
 
 pub fn action_result_to_tool_result(result: &AIAgentActionResult) -> ToolCallResult {
@@ -318,6 +715,86 @@ fn action_result_to_content(result: &AIAgentActionResultType) -> String {
             "warnings": warnings,
         })
         .to_string(),
+        AIAgentActionResultType::RequestFileEdits(result) => match result {
+            crate::ai::agent::RequestFileEditsResult::Success {
+                updated_files,
+                diff,
+                ..
+            } => {
+                let updated_files = updated_files
+                    .iter()
+                    .map(|updated_file| {
+                        serde_json::json!({
+                            "was_edited_by_user": updated_file.was_edited_by_user,
+                            "file": {
+                                "path": updated_file.file_context.file_name,
+                                "line_count": updated_file.file_context.line_count,
+                            },
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                serde_json::json!({
+                    "status": "accepted",
+                    "updated_files": updated_files,
+                    "diff": diff,
+                })
+                .to_string()
+            }
+            crate::ai::agent::RequestFileEditsResult::DiffApplicationFailed { error } => {
+                serde_json::json!({
+                    "status": "error",
+                    "error": error,
+                })
+                .to_string()
+            }
+            crate::ai::agent::RequestFileEditsResult::Cancelled => serde_json::json!({
+                "status": "cancelled",
+            })
+            .to_string(),
+        },
+        AIAgentActionResultType::ReadMCPResource(result) => match result {
+            crate::ai::agent::ReadMCPResourceResult::Success { resource_contents } => {
+                serde_json::json!({
+                    "resource_contents": resource_contents,
+                })
+                .to_string()
+            }
+            crate::ai::agent::ReadMCPResourceResult::Error(error) => serde_json::json!({
+                "error": error,
+            })
+            .to_string(),
+            crate::ai::agent::ReadMCPResourceResult::Cancelled => serde_json::json!({
+                "status": "cancelled",
+            })
+            .to_string(),
+        },
+        AIAgentActionResultType::CallMCPTool(result) => match result {
+            crate::ai::agent::CallMCPToolResult::Success { result } => serde_json::json!({
+                "result": result,
+            })
+            .to_string(),
+            crate::ai::agent::CallMCPToolResult::Error(error) => serde_json::json!({
+                "error": error,
+            })
+            .to_string(),
+            crate::ai::agent::CallMCPToolResult::Cancelled => serde_json::json!({
+                "status": "cancelled",
+            })
+            .to_string(),
+        },
+        AIAgentActionResultType::ReadSkill(result) => match result {
+            crate::ai::agent::ReadSkillResult::Success { content } => {
+                file_contexts_to_json(std::slice::from_ref(content))
+            }
+            crate::ai::agent::ReadSkillResult::Error(error) => serde_json::json!({
+                "error": error,
+            })
+            .to_string(),
+            crate::ai::agent::ReadSkillResult::Cancelled => serde_json::json!({
+                "status": "cancelled",
+            })
+            .to_string(),
+        },
         _ => result.to_string(),
     }
 }
@@ -624,6 +1101,82 @@ fn validate_string_values(
     Ok(values)
 }
 
+fn skill_references_for_request(params: &RequestParams) -> HashMap<String, SkillReference> {
+    let mut skills_by_key = HashMap::new();
+    for input in &params.input {
+        let Some(contexts) = input.context() else {
+            continue;
+        };
+        for context in contexts {
+            let crate::ai::agent::AIAgentContext::Skills { skills } = context else {
+                continue;
+            };
+            for skill in skills {
+                skills_by_key.insert(skill.name.clone(), skill.reference.clone());
+                skills_by_key.insert(skill.reference.to_string(), skill.reference.clone());
+            }
+        }
+    }
+    skills_by_key
+}
+
+fn parse_skill_reference(value: String) -> SkillReference {
+    const BUNDLED_PREFIX: &str = "@warp-skill:";
+    if let Some(id) = value.strip_prefix(BUNDLED_PREFIX) {
+        SkillReference::BundledSkillId(id.to_string())
+    } else {
+        SkillReference::Path(LocalOrRemotePath::Local(PathBuf::from(value)))
+    }
+}
+
+fn sanitize_function_name(name: &str) -> String {
+    let mut sanitized = name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+
+    while sanitized.contains("__") {
+        sanitized = sanitized.replace("__", "_");
+    }
+
+    sanitized = sanitized.trim_matches('_').to_string();
+    if sanitized.is_empty() {
+        "tool".to_string()
+    } else if sanitized
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_')
+    {
+        sanitized
+    } else {
+        format!("tool_{sanitized}")
+    }
+}
+
+fn unique_tool_name(
+    routes: &HashMap<String, LocalRuntimeToolRoute>,
+    preferred_name: &str,
+) -> String {
+    if !routes.contains_key(preferred_name) {
+        return preferred_name.to_string();
+    }
+
+    for index in 2.. {
+        let candidate = format!("{preferred_name}_{index}");
+        if !routes.contains_key(&candidate) {
+            return candidate;
+        }
+    }
+
+    unreachable!("unbounded sequence must find a unique tool name")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -665,10 +1218,10 @@ mod tests {
                 "read_files",
                 "grep",
                 "file_glob_v2",
-                "search_codebase"
+                "search_codebase",
+                "edit_files"
             ]
         );
-        assert!(!names.iter().any(|name| *name == "edit_files"));
         assert!(!names.iter().any(|name| *name == "create_file"));
         assert!(schemas
             .iter()
@@ -701,6 +1254,10 @@ mod tests {
         assert_eq!(
             schemas["search_codebase"].parameters["required"],
             serde_json::json!(["query"])
+        );
+        assert_eq!(
+            schemas["edit_files"].parameters["required"],
+            serde_json::json!(["edits"])
         );
     }
 
@@ -895,7 +1452,8 @@ mod tests {
                 "read_files",
                 "grep",
                 "file_glob_v2",
-                "search_codebase"
+                "search_codebase",
+                "edit_files"
             ]
         );
     }
@@ -965,18 +1523,69 @@ mod tests {
             search_action.action,
             AIAgentActionType::SearchCodebase(ref request) if request.query == "runtime loop"
         ));
+
+        let edit_action = tool_call_to_ai_action(
+            &call(
+                "edit_files",
+                serde_json::json!({
+                    "title": "Update greeting",
+                    "edits": [
+                        {
+                            "type": "replace",
+                            "file": "src/lib.rs",
+                            "search": "hello",
+                            "replace": "hi"
+                        },
+                        {
+                            "type": "create",
+                            "file": "README.md",
+                            "content": "# Readme\n"
+                        },
+                        {
+                            "type": "delete",
+                            "file": "old.txt"
+                        }
+                    ]
+                }),
+            ),
+            &task_id,
+        )
+        .unwrap();
+        assert!(matches!(
+            edit_action.action,
+            AIAgentActionType::RequestFileEdits { ref file_edits, ref title }
+                if title.as_deref() == Some("Update greeting")
+                    && matches!(
+                        &file_edits[0],
+                        FileEdit::Edit(ParsedDiff::StrReplaceEdit { file, search, replace })
+                            if file.as_deref() == Some("src/lib.rs")
+                                && search.as_deref() == Some("hello")
+                                && replace.as_deref() == Some("hi")
+                    )
+                    && matches!(
+                        &file_edits[1],
+                        FileEdit::Create { file, content }
+                            if file.as_deref() == Some("README.md")
+                                && content.as_deref() == Some("# Readme\n")
+                    )
+                    && matches!(
+                        &file_edits[2],
+                        FileEdit::Delete { file }
+                            if file.as_deref() == Some("old.txt")
+                    )
+        ));
     }
 
     #[test]
     fn unsupported_tool_is_not_silently_mapped() {
         let task_id = TaskId::new("task_1".to_string());
         let err = tool_call_to_ai_action(
-            &call("edit_files", serde_json::json!({"path": "src/lib.rs"})),
+            &call("write_file", serde_json::json!({"path": "src/lib.rs"})),
             &task_id,
         )
         .unwrap_err();
 
-        assert!(matches!(err, ToolExecutionError::NotFound { name } if name == "edit_files"));
+        assert!(matches!(err, ToolExecutionError::NotFound { name } if name == "write_file"));
     }
 
     #[test]

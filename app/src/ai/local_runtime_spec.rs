@@ -16,7 +16,7 @@ use warpui::{AppContext, SingletonEntity};
 
 use crate::ai::agent::api::RequestParams;
 use crate::ai::agent::AIAgentContext;
-use crate::ai::local_runtime_bridge::build_tool_schemas;
+use crate::ai::local_runtime_bridge::LocalRuntimeToolRegistry;
 use crate::ai::skills::SkillManager;
 
 pub const SYSTEM_PROMPT: &str = "You are a coding assistant running locally via Ollama, integrated into the Warp terminal. Reply concisely. When you need to take an action (run a command, read a file, etc.), prefer to call the matching tool; otherwise reply with plain text.";
@@ -30,7 +30,7 @@ pub fn system_prompt_for_request(params: &RequestParams) -> String {
 }
 
 pub fn local_tools() -> Vec<ToolSchema> {
-    build_tool_schemas()
+    LocalRuntimeToolRegistry::built_ins().schemas()
 }
 
 #[derive(Debug, Clone, Default)]
@@ -75,7 +75,8 @@ impl PromptBuildInput {
             ask_user_question_enabled: params.ask_user_question_enabled,
             research_agent_enabled: params.research_agent_enabled,
             orchestration_enabled: params.orchestration_enabled,
-            local_tool_names: local_tools()
+            local_tool_names: LocalRuntimeToolRegistry::from_request(params)
+                .schemas()
                 .into_iter()
                 .map(|tool| tool.name)
                 .collect::<Vec<_>>(),
@@ -266,8 +267,12 @@ fn render_context_line(context: &AIAgentContext) -> String {
                     .iter()
                     .map(|skill| {
                         format!(
-                            "{} ({:?}, {:?}): {}",
-                            skill.name, skill.scope, skill.provider, skill.description
+                            "{} (reference: {}, scope: {:?}, provider: {:?}): {}",
+                            skill.name,
+                            skill.reference,
+                            skill.scope,
+                            skill.provider,
+                            skill.description
                         )
                     })
                     .collect::<Vec<_>>()
@@ -382,7 +387,7 @@ pub fn local_mcp_servers(ctx: &AppContext) -> Vec<McpServerInfo> {
         .into_iter()
         .map(|(_uuid, name)| McpServerInfo {
             name,
-            status: LocalRuntimeAttachment::NotConnectedToLocalRuntime,
+            status: LocalRuntimeAttachment::Active,
         })
         .collect()
 }
@@ -400,7 +405,7 @@ pub fn local_skills(ctx: &AppContext) -> Vec<SkillInfo> {
             name: skill.name,
             description: skill.description,
             source: format!("{:?}", skill.scope),
-            status: LocalRuntimeAttachment::NotConnectedToLocalRuntime,
+            status: LocalRuntimeAttachment::Active,
         })
         .collect()
 }

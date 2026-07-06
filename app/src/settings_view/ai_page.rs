@@ -9629,12 +9629,9 @@ impl OllamaWidget {
                 background: Some(appearance.theme().surface_2().into()),
                 ..Default::default()
             };
-            let label =
-                Text::new_inline(label, appearance.ui_font_family(), CONTENT_FONT_SIZE)
-                    .with_color(
-                        styles::header_font_color(true, app).into(),
-                    )
-                    .finish();
+            let label = Text::new_inline(label, appearance.ui_font_family(), CONTENT_FONT_SIZE)
+                .with_color(styles::header_font_color(true, app).into())
+                .finish();
             let input = appearance
                 .ui_builder()
                 .text_input(editor)
@@ -9819,7 +9816,6 @@ impl SettingsWidget for OllamaWidget {
     }
 }
 
-
 #[derive(Default)]
 struct CustomModelRoutersWidget;
 
@@ -9921,7 +9917,6 @@ impl SettingsWidget for CustomModelRoutersWidget {
             .finish()
     }
 }
-
 
 mod styles {
     use warp_core::ui::appearance::Appearance;

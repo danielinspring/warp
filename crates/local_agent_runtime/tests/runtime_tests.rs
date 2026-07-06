@@ -5,7 +5,7 @@ use local_agent_runtime::provider::{ChatRequest, ChatResponse, ChatStopReason, C
 use local_agent_runtime::{
     AgentRuntime, FinishReason, LLMProvider, Message, PermissionDecision, ProviderCapabilities,
     ProviderError, RuntimeConfig, RuntimeEvent, ToolCall, ToolCallResult, ToolExecutionError,
-    ToolExecutor, ToolSchema, ToolSchemaBuilder,
+    ToolExecutor, ToolSafetyClass, ToolSchema, ToolSchemaBuilder,
 };
 
 /// A mock LLM provider that returns scripted responses.
@@ -82,6 +82,8 @@ struct MockExecutor {
     permission: PermissionDecision,
     result: ToolCallResult,
     calls: std::sync::Arc<std::sync::Mutex<Vec<ToolCall>>>,
+    safety_class: ToolSafetyClass,
+    delay: std::time::Duration,
 }
 
 impl MockExecutor {
@@ -98,6 +100,8 @@ impl MockExecutor {
             permission: PermissionDecision::Allow,
             result: ToolCallResult::success("command output here"),
             calls: Default::default(),
+            safety_class: ToolSafetyClass::Interactive,
+            delay: std::time::Duration::ZERO,
         }
     }
 
@@ -109,7 +113,19 @@ impl MockExecutor {
             },
             result: ToolCallResult::error("should not reach here"),
             calls: Default::default(),
+            safety_class: ToolSafetyClass::Interactive,
+            delay: std::time::Duration::ZERO,
         }
+    }
+
+    fn with_safety_class(mut self, safety_class: ToolSafetyClass) -> Self {
+        self.safety_class = safety_class;
+        self
+    }
+
+    fn with_delay(mut self, delay: std::time::Duration) -> Self {
+        self.delay = delay;
+        self
     }
 }
 
@@ -119,11 +135,16 @@ impl ToolExecutor for MockExecutor {
         self.tools.clone()
     }
 
+    fn safety_class(&self, _tool_name: &str) -> ToolSafetyClass {
+        self.safety_class
+    }
+
     async fn check_permission(&self, _call: &ToolCall) -> PermissionDecision {
         self.permission.clone()
     }
 
     async fn execute(&self, call: &ToolCall) -> Result<ToolCallResult, ToolExecutionError> {
+        tokio::time::sleep(self.delay).await;
         self.calls.lock().unwrap().push(call.clone());
         Ok(self.result.clone())
     }
@@ -568,4 +589,267 @@ async fn test_conversation_history_preserved() {
     )));
     // Messages should include system + initial + user + assistant reply
     assert!(messages.len() >= 5); // system + 2 initial + user + assistant
+}
+
+#[tokio::test]
+async fn test_available_tools_refresh_each_provider_turn() {
+    struct RefreshingExecutor {
+        calls: std::sync::Arc<std::sync::Mutex<u32>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ToolExecutor for RefreshingExecutor {
+        fn available_tools(&self) -> Vec<ToolSchema> {
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            let name = if *calls == 1 {
+                "first_tool"
+            } else {
+                "second_tool"
+            };
+            vec![ToolSchemaBuilder::new(name, "dynamic tool").build()]
+        }
+
+        async fn check_permission(&self, _call: &ToolCall) -> PermissionDecision {
+            PermissionDecision::Allow
+        }
+
+        async fn execute(&self, _call: &ToolCall) -> Result<ToolCallResult, ToolExecutionError> {
+            Ok(ToolCallResult::success("ok"))
+        }
+
+        async fn on_permission_response(
+            &self,
+            _call: &ToolCall,
+            granted: bool,
+        ) -> PermissionDecision {
+            if granted {
+                PermissionDecision::Allow
+            } else {
+                PermissionDecision::Deny {
+                    reason: "user denied".to_string(),
+                }
+            }
+        }
+    }
+
+    let provider = MockProvider::with_tool_call("first_tool", serde_json::json!({}), "done");
+    let requests = provider.requests.clone();
+    let executor = RefreshingExecutor {
+        calls: Default::default(),
+    };
+
+    let runtime = AgentRuntime::new(provider, executor, RuntimeConfig::default());
+    runtime
+        .run_to_completion("test-model", vec![], "use tools")
+        .await
+        .unwrap();
+
+    let requests = requests.lock().unwrap();
+    let first_turn_tools = requests[0]
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>();
+    let second_turn_tools = requests[1]
+        .tools
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(first_turn_tools, vec!["first_tool"]);
+    assert_eq!(second_turn_tools, vec!["second_tool"]);
+}
+
+#[tokio::test]
+async fn test_read_only_tool_calls_execute_concurrently_and_preserve_result_order() {
+    let responses = vec![
+        ChatResponse {
+            text: String::new(),
+            tool_calls: vec![
+                ToolCall {
+                    id: "call_1".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({}),
+                },
+                ToolCall {
+                    id: "call_2".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({}),
+                },
+            ],
+            stop_reason: ChatStopReason::ToolUse,
+        },
+        ChatResponse {
+            text: "done".to_string(),
+            tool_calls: vec![],
+            stop_reason: ChatStopReason::Stop,
+        },
+    ];
+    let provider = MockProvider::new(responses);
+    let executor = MockExecutor::allow_all()
+        .with_safety_class(ToolSafetyClass::ReadOnly)
+        .with_delay(std::time::Duration::from_millis(120));
+    let runtime = AgentRuntime::new(provider, executor, RuntimeConfig::default());
+
+    let started = std::time::Instant::now();
+    let (events, _messages) = runtime
+        .run_to_completion("test-model", vec![], "read twice")
+        .await
+        .unwrap();
+
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(220),
+        "read-only tools should run as one concurrent batch"
+    );
+    let result_ids = events
+        .iter()
+        .filter_map(|event| match event {
+            RuntimeEvent::ToolResult { call_id, .. } => Some(call_id.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(result_ids, vec!["call_1", "call_2"]);
+}
+
+#[tokio::test]
+async fn test_mutating_tool_calls_remain_serial() {
+    let responses = vec![
+        ChatResponse {
+            text: String::new(),
+            tool_calls: vec![
+                ToolCall {
+                    id: "call_1".to_string(),
+                    name: "edit_files".to_string(),
+                    arguments: serde_json::json!({}),
+                },
+                ToolCall {
+                    id: "call_2".to_string(),
+                    name: "edit_files".to_string(),
+                    arguments: serde_json::json!({}),
+                },
+            ],
+            stop_reason: ChatStopReason::ToolUse,
+        },
+        ChatResponse {
+            text: "done".to_string(),
+            tool_calls: vec![],
+            stop_reason: ChatStopReason::Stop,
+        },
+    ];
+    let provider = MockProvider::new(responses);
+    let executor = MockExecutor::allow_all()
+        .with_safety_class(ToolSafetyClass::Mutating)
+        .with_delay(std::time::Duration::from_millis(100));
+    let runtime = AgentRuntime::new(provider, executor, RuntimeConfig::default());
+
+    let started = std::time::Instant::now();
+    runtime
+        .run_to_completion("test-model", vec![], "edit twice")
+        .await
+        .unwrap();
+
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(190),
+        "mutating tools should execute serially"
+    );
+}
+
+#[tokio::test]
+async fn test_cancellation_after_tool_calls_emits_paired_cancelled_results() {
+    let provider = MockProvider::new(vec![ChatResponse {
+        text: String::new(),
+        tool_calls: vec![
+            ToolCall {
+                id: "call_1".to_string(),
+                name: "edit_files".to_string(),
+                arguments: serde_json::json!({}),
+            },
+            ToolCall {
+                id: "call_2".to_string(),
+                name: "edit_files".to_string(),
+                arguments: serde_json::json!({}),
+            },
+        ],
+        stop_reason: ChatStopReason::ToolUse,
+    }]);
+    let executor = MockExecutor::allow_all().with_delay(std::time::Duration::from_secs(60));
+    let runtime = AgentRuntime::new(provider, executor, RuntimeConfig::default());
+    let (mut events, cancel) =
+        runtime.run("test-model".to_string(), vec![], "edit twice".to_string());
+
+    let mut collected = Vec::new();
+    while let Some(event) = tokio::time::timeout(std::time::Duration::from_secs(1), events.next())
+        .await
+        .unwrap()
+    {
+        if matches!(event, RuntimeEvent::ToolCallsRequested { .. }) {
+            cancel.cancel();
+        }
+        let finished = matches!(event, RuntimeEvent::Finished { .. });
+        collected.push(event);
+        if finished {
+            break;
+        }
+    }
+
+    let cancelled_results = collected
+        .iter()
+        .filter_map(|event| match event {
+            RuntimeEvent::ToolResult { call_id, result } if result.is_error => {
+                Some((call_id.as_str(), result.content.as_str()))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(cancelled_results.len(), 2);
+    assert_eq!(cancelled_results[0].0, "call_1");
+    assert_eq!(cancelled_results[1].0, "call_2");
+    assert!(cancelled_results
+        .iter()
+        .all(|(_, content)| content.contains("\"code\":\"cancelled\"")));
+    assert!(collected.iter().any(|event| matches!(
+        event,
+        RuntimeEvent::Finished {
+            reason: FinishReason::Cancelled
+        }
+    )));
+}
+
+#[tokio::test]
+async fn test_context_budget_truncates_only_model_facing_tool_results() {
+    let provider = MockProvider::with_tool_call("read_file", serde_json::json!({}), "done");
+    let requests = provider.requests.clone();
+    let executor = MockExecutor {
+        result: ToolCallResult::success("abcdefghijkl"),
+        ..MockExecutor::allow_all().with_safety_class(ToolSafetyClass::ReadOnly)
+    };
+    let mut config = RuntimeConfig::default();
+    config.context_budget.max_tool_result_chars = 5;
+    let runtime = AgentRuntime::new(provider, executor, config);
+
+    let (_events, messages) = runtime
+        .run_to_completion("test-model", vec![], "read")
+        .await
+        .unwrap();
+
+    assert!(messages.iter().any(|message| {
+        matches!(
+            message,
+            Message::ToolResult(result) if result.result.content == "abcdefghijkl"
+        )
+    }));
+
+    let requests = requests.lock().unwrap();
+    let second_turn_tool_result = requests[1]
+        .messages
+        .iter()
+        .find_map(|message| match message {
+            Message::ToolResult(result) => Some(result.result.content.as_str()),
+            _ => None,
+        });
+    let content = second_turn_tool_result.expect("expected tool result in second turn");
+    assert!(content.contains("\"truncated\":true"));
+    assert!(content.contains("\"original_chars\":12"));
+    assert!(content.contains("\"kept_chars\":5"));
+    assert!(content.contains("\"content\":\"abcde\""));
 }

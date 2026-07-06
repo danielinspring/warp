@@ -796,10 +796,7 @@ impl ConversationDetailsPanel {
                             .map(DetailsPanelLocalContinuationInfo::Conversation)
                     }
                     Some(
-                        Harness::Gemini
-                        | Harness::OpenCode
-                        | Harness::Ollama
-                        | Harness::Unknown,
+                        Harness::Gemini | Harness::OpenCode | Harness::Ollama | Harness::Unknown,
                     ) => None,
                 }
             }

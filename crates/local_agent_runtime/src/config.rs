@@ -2,6 +2,22 @@
 
 use std::time::Duration;
 
+/// Model-facing context budget.
+#[derive(Debug, Clone)]
+pub struct ContextBudget {
+    /// Maximum characters to include from one tool result before replacing it with a compact
+    /// metadata wrapper.
+    pub max_tool_result_chars: usize,
+}
+
+impl Default for ContextBudget {
+    fn default() -> Self {
+        Self {
+            max_tool_result_chars: 100_000,
+        }
+    }
+}
+
 /// Configuration for a runtime session.
 #[derive(Debug, Clone)]
 pub struct RuntimeConfig {
@@ -17,6 +33,9 @@ pub struct RuntimeConfig {
     /// Maximum characters to include from a tool result before truncating.
     pub max_tool_result_chars: usize,
 
+    /// Budget applied only to the model-facing copy of the transcript.
+    pub context_budget: ContextBudget,
+
     /// Whether to stop the loop when permission is denied (vs. skip the tool).
     pub stop_on_permission_denied: bool,
 
@@ -31,6 +50,7 @@ impl Default for RuntimeConfig {
             llm_timeout: Duration::from_secs(300),
             tool_timeout: Duration::from_secs(120),
             max_tool_result_chars: 100_000,
+            context_budget: ContextBudget::default(),
             stop_on_permission_denied: false,
             system_prompt: None,
         }

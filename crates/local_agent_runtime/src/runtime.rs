@@ -5,16 +5,17 @@
 
 use std::sync::Arc;
 
+use futures::future::join_all;
 use futures::{channel::mpsc, SinkExt};
 use tokio::sync::watch;
 
 use crate::config::RuntimeConfig;
 use crate::error::RuntimeError;
 use crate::events::{FinishReason, RuntimeEvent, StopReason};
-use crate::messages::normalize::truncate_tool_results;
+use crate::messages::normalize::model_messages;
 use crate::messages::{ConversationHistory, Message};
 use crate::provider::{ChatRequest, ChatResponse, ChatStopReason, ChatStreamEvent, LLMProvider};
-use crate::tools::{PermissionDecision, ToolCallResult, ToolExecutor};
+use crate::tools::{PermissionDecision, ToolCall, ToolCallResult, ToolExecutor, ToolSafetyClass};
 
 /// The local agent runtime.
 ///
@@ -169,7 +170,6 @@ where
     }
     history.push_user(user_input);
 
-    let tools = executor.available_tools();
     let mut turn: u32 = 0;
 
     loop {
@@ -182,7 +182,13 @@ where
         }
 
         turn += 1;
+        tracing::debug!(turn, "local runtime provider turn starting");
         if turn > config.max_turns {
+            tracing::warn!(
+                turn,
+                max_turns = config.max_turns,
+                "local runtime stopped at max turns"
+            );
             sink.send(RuntimeEvent::Finished {
                 reason: FinishReason::MaxTurns,
             })
@@ -192,11 +198,11 @@ where
 
         sink.send(RuntimeEvent::TurnStarted { turn }).await;
 
-        truncate_tool_results(&mut history, config.max_tool_result_chars);
+        let tools = executor.available_tools();
 
         let request = ChatRequest {
             model: model.clone(),
-            messages: history.messages().to_vec(),
+            messages: model_messages(history.messages(), &config.context_budget),
             tools: tools.clone(),
         };
 
@@ -236,6 +242,7 @@ where
                 },
             })
             .await;
+            tracing::debug!(turn, "local runtime provider turn completed");
             sink.send(RuntimeEvent::Finished {
                 reason: FinishReason::Done,
             })
@@ -252,11 +259,14 @@ where
         })
         .await;
 
-        history.push_assistant(response.text, response.tool_calls.clone());
-
+        let response_text = response.text;
+        let calls = response.tool_calls;
+        history.push_assistant(response_text, calls.clone());
         let mut should_stop = false;
-        for call in &response.tool_calls {
+        let mut call_index = 0;
+        while call_index < calls.len() {
             if is_cancelled(&cancel_rx) {
+                synthesize_cancelled_tool_results(&calls[call_index..], &mut history, sink).await;
                 sink.send(RuntimeEvent::Finished {
                     reason: FinishReason::Cancelled,
                 })
@@ -264,12 +274,27 @@ where
                 return Err(RuntimeError::Cancelled);
             }
 
-            let permission =
-                match check_permission_with_cancel(Arc::clone(&executor), call, &mut cancel_rx)
-                    .await
+            if executor.safety_class(&calls[call_index].name) == ToolSafetyClass::ReadOnly {
+                let batch_end = calls[call_index..]
+                    .iter()
+                    .position(|call| executor.safety_class(&call.name) != ToolSafetyClass::ReadOnly)
+                    .map(|offset| call_index + offset)
+                    .unwrap_or(calls.len());
+                let batch = &calls[call_index..batch_end];
+
+                let outcomes = match execute_read_only_batch_with_cancel(
+                    Arc::clone(&executor),
+                    batch,
+                    config.tool_timeout,
+                    config.stop_on_permission_denied,
+                    &mut cancel_rx,
+                )
+                .await
                 {
-                    Some(permission) => permission,
-                    None => {
+                    BatchResult::Completed(outcomes) => outcomes,
+                    BatchResult::Cancelled => {
+                        synthesize_cancelled_tool_results(&calls[call_index..], &mut history, sink)
+                            .await;
                         sink.send(RuntimeEvent::Finished {
                             reason: FinishReason::Cancelled,
                         })
@@ -278,77 +303,50 @@ where
                     }
                 };
 
-            match permission {
-                PermissionDecision::Allow => {
-                    sink.send(RuntimeEvent::ToolExecutionStarted {
-                        call_id: call.id.clone(),
-                        tool_name: call.name.clone(),
-                    })
-                    .await;
-
-                    let result = match execute_tool_with_cancel(
-                        Arc::clone(&executor),
-                        call,
-                        config.tool_timeout,
-                        &mut cancel_rx,
-                    )
-                    .await
-                    {
-                        Some(Ok(result)) => result,
-                        Some(Err(e)) => {
-                            ToolCallResult::error(format!("Tool execution failed: {}", e))
-                        }
-                        None => {
-                            sink.send(RuntimeEvent::Finished {
-                                reason: FinishReason::Cancelled,
-                            })
-                            .await;
-                            return Err(RuntimeError::Cancelled);
-                        }
-                    };
-
-                    sink.send(RuntimeEvent::ToolResult {
-                        call_id: call.id.clone(),
-                        result: result.clone(),
-                    })
-                    .await;
-                    history.push_tool_result(&call.id, result);
-                }
-                PermissionDecision::Ask => {
-                    sink.send(RuntimeEvent::PermissionRequired { call: call.clone() })
-                        .await;
-
-                    let error_result = ToolCallResult::error(
-                        "Permission required — tool execution skipped in non-interactive mode",
-                    );
-                    history.push_tool_result(&call.id, error_result.clone());
-                    sink.send(RuntimeEvent::ToolResult {
-                        call_id: call.id.clone(),
-                        result: error_result,
-                    })
-                    .await;
-
-                    if config.stop_on_permission_denied {
+                for outcome in outcomes {
+                    emit_tool_outcome(&outcome, sink).await;
+                    history.push_tool_result(&outcome.call_id, outcome.result.clone());
+                    if outcome.stop_after {
                         should_stop = true;
-                        break;
                     }
                 }
-                PermissionDecision::Deny { reason } => {
-                    let error_result =
-                        ToolCallResult::error(format!("Permission denied: {}", reason));
-                    history.push_tool_result(&call.id, error_result.clone());
-                    sink.send(RuntimeEvent::ToolResult {
-                        call_id: call.id.clone(),
-                        result: error_result,
-                    })
-                    .await;
 
-                    if config.stop_on_permission_denied {
-                        should_stop = true;
-                        break;
-                    }
+                call_index = batch_end;
+                if should_stop {
+                    break;
                 }
+                continue;
             }
+
+            let call = &calls[call_index];
+            let outcome = match execute_serial_tool_with_cancel(
+                Arc::clone(&executor),
+                call,
+                config.tool_timeout,
+                config.stop_on_permission_denied,
+                &mut cancel_rx,
+            )
+            .await
+            {
+                SerialResult::Completed(outcome) => outcome,
+                SerialResult::Cancelled => {
+                    synthesize_cancelled_tool_results(&calls[call_index..], &mut history, sink)
+                        .await;
+                    sink.send(RuntimeEvent::Finished {
+                        reason: FinishReason::Cancelled,
+                    })
+                    .await;
+                    return Err(RuntimeError::Cancelled);
+                }
+            };
+
+            emit_tool_outcome(&outcome, sink).await;
+            history.push_tool_result(&outcome.call_id, outcome.result.clone());
+            if outcome.stop_after {
+                should_stop = true;
+                break;
+            }
+            call_index += 1;
         }
 
         if should_stop {
@@ -359,6 +357,199 @@ where
             return Ok(history.messages().to_vec());
         }
     }
+}
+
+struct ToolOutcome {
+    call: ToolCall,
+    call_id: String,
+    tool_name: String,
+    permission_required: bool,
+    started: bool,
+    result: ToolCallResult,
+    stop_after: bool,
+}
+
+enum BatchResult {
+    Completed(Vec<ToolOutcome>),
+    Cancelled,
+}
+
+enum SerialResult {
+    Completed(ToolOutcome),
+    Cancelled,
+}
+
+async fn execute_read_only_batch_with_cancel<T>(
+    executor: Arc<T>,
+    calls: &[ToolCall],
+    timeout: std::time::Duration,
+    stop_on_permission_denied: bool,
+    cancel_rx: &mut Option<watch::Receiver<bool>>,
+) -> BatchResult
+where
+    T: ToolExecutor,
+{
+    let execution = join_all(calls.iter().cloned().map(|call| {
+        execute_tool_without_cancel(
+            Arc::clone(&executor),
+            call,
+            timeout,
+            stop_on_permission_denied,
+        )
+    }));
+
+    if let Some(cancel_rx) = cancel_rx.as_mut() {
+        tokio::select! {
+            _ = wait_cancelled(cancel_rx) => BatchResult::Cancelled,
+            outcomes = execution => BatchResult::Completed(outcomes),
+        }
+    } else {
+        BatchResult::Completed(execution.await)
+    }
+}
+
+async fn execute_serial_tool_with_cancel<T>(
+    executor: Arc<T>,
+    call: &ToolCall,
+    timeout: std::time::Duration,
+    stop_on_permission_denied: bool,
+    cancel_rx: &mut Option<watch::Receiver<bool>>,
+) -> SerialResult
+where
+    T: ToolExecutor,
+{
+    let execution = execute_tool_without_cancel(
+        Arc::clone(&executor),
+        call.clone(),
+        timeout,
+        stop_on_permission_denied,
+    );
+
+    if let Some(cancel_rx) = cancel_rx.as_mut() {
+        tokio::select! {
+            _ = wait_cancelled(cancel_rx) => SerialResult::Cancelled,
+            outcome = execution => SerialResult::Completed(outcome),
+        }
+    } else {
+        SerialResult::Completed(execution.await)
+    }
+}
+
+async fn execute_tool_without_cancel<T>(
+    executor: Arc<T>,
+    call: ToolCall,
+    timeout: std::time::Duration,
+    stop_on_permission_denied: bool,
+) -> ToolOutcome
+where
+    T: ToolExecutor,
+{
+    tracing::debug!(
+        tool_call_id = %call.id,
+        tool_name = %call.name,
+        safety_class = ?executor.safety_class(&call.name),
+        "local runtime tool requested"
+    );
+
+    match executor.check_permission(&call).await {
+        PermissionDecision::Allow => {
+            let result = match tokio::time::timeout(timeout, executor.execute(&call)).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(error)) => ToolCallResult::error(format!("Tool execution failed: {error}")),
+                Err(_) => ToolCallResult::error("Tool execution failed: timed out"),
+            };
+
+            ToolOutcome {
+                call_id: call.id.clone(),
+                tool_name: call.name.clone(),
+                call,
+                permission_required: false,
+                started: true,
+                result,
+                stop_after: false,
+            }
+        }
+        PermissionDecision::Ask => ToolOutcome {
+            call_id: call.id.clone(),
+            tool_name: call.name.clone(),
+            call,
+            permission_required: true,
+            started: false,
+            result: ToolCallResult::error(
+                "Permission required - tool execution skipped in non-interactive mode",
+            ),
+            stop_after: stop_on_permission_denied,
+        },
+        PermissionDecision::Deny { reason } => ToolOutcome {
+            call_id: call.id.clone(),
+            tool_name: call.name.clone(),
+            call,
+            permission_required: false,
+            started: false,
+            result: ToolCallResult::error(format!("Permission denied: {reason}")),
+            stop_after: stop_on_permission_denied,
+        },
+    }
+}
+
+async fn emit_tool_outcome<S>(outcome: &ToolOutcome, sink: &mut S)
+where
+    S: RuntimeEventSink + Send,
+{
+    if outcome.permission_required {
+        sink.send(RuntimeEvent::PermissionRequired {
+            call: outcome.call.clone(),
+        })
+        .await;
+    }
+    if outcome.started {
+        sink.send(RuntimeEvent::ToolExecutionStarted {
+            call_id: outcome.call_id.clone(),
+            tool_name: outcome.tool_name.clone(),
+        })
+        .await;
+    }
+    tracing::debug!(
+        tool_call_id = %outcome.call_id,
+        tool_name = %outcome.tool_name,
+        is_error = outcome.result.is_error,
+        "local runtime tool result"
+    );
+    sink.send(RuntimeEvent::ToolResult {
+        call_id: outcome.call_id.clone(),
+        result: outcome.result.clone(),
+    })
+    .await;
+}
+
+async fn synthesize_cancelled_tool_results<S>(
+    calls: &[ToolCall],
+    history: &mut ConversationHistory,
+    sink: &mut S,
+) where
+    S: RuntimeEventSink + Send,
+{
+    for call in calls {
+        let result = cancelled_tool_result();
+        history.push_tool_result(&call.id, result.clone());
+        sink.send(RuntimeEvent::ToolResult {
+            call_id: call.id.clone(),
+            result,
+        })
+        .await;
+    }
+}
+
+fn cancelled_tool_result() -> ToolCallResult {
+    ToolCallResult::error(
+        serde_json::json!({
+            "error": {
+                "code": "cancelled",
+                "message": "Tool execution cancelled"
+            }
+        })
+        .to_string(),
+    )
 }
 
 struct ChatRunResult {
@@ -508,50 +699,6 @@ fn finish_chat_result(
         Err(_) => Err(RuntimeError::Provider(crate::ProviderError::Timeout {
             seconds: timeout.as_secs(),
         })),
-    }
-}
-
-async fn check_permission_with_cancel<T>(
-    executor: Arc<T>,
-    call: &crate::tools::ToolCall,
-    cancel_rx: &mut Option<watch::Receiver<bool>>,
-) -> Option<PermissionDecision>
-where
-    T: ToolExecutor,
-{
-    if let Some(cancel_rx) = cancel_rx.as_mut() {
-        tokio::select! {
-            _ = wait_cancelled(cancel_rx) => None,
-            decision = executor.check_permission(call) => Some(decision),
-        }
-    } else {
-        Some(executor.check_permission(call).await)
-    }
-}
-
-async fn execute_tool_with_cancel<T>(
-    executor: Arc<T>,
-    call: &crate::tools::ToolCall,
-    timeout: std::time::Duration,
-    cancel_rx: &mut Option<watch::Receiver<bool>>,
-) -> Option<Result<ToolCallResult, crate::ToolExecutionError>>
-where
-    T: ToolExecutor,
-{
-    let execution = tokio::time::timeout(timeout, executor.execute(call));
-    if let Some(cancel_rx) = cancel_rx.as_mut() {
-        tokio::select! {
-            _ = wait_cancelled(cancel_rx) => None,
-            result = execution => Some(match result {
-                Ok(result) => result,
-                Err(_) => Err(crate::ToolExecutionError::Timeout),
-            }),
-        }
-    } else {
-        Some(match execution.await {
-            Ok(result) => result,
-            Err(_) => Err(crate::ToolExecutionError::Timeout),
-        })
     }
 }
 
