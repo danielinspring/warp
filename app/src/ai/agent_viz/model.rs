@@ -114,8 +114,9 @@ impl AgentVizModel {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use local_agent_runtime::tools::{ToolCall, ToolCallResult};
+
+    use super::*;
 
     fn run_id() -> &'static str {
         "test-run"

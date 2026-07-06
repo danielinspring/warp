@@ -16,8 +16,8 @@ use warpui::elements::{
 use warpui::platform::Cursor;
 use warpui::ui_components::button::{ButtonVariant, TextAndIcon, TextAndIconAlignment};
 use warpui::ui_components::components::UiComponent as _;
+use warpui::units::{IntoPixels, Pixels};
 use warpui::{
-    units::{IntoPixels, Pixels},
     AppContext, Element, Entity, FocusContext, ModelHandle, SingletonEntity, TypedActionView,
     ViewContext, ViewHandle,
 };
@@ -40,14 +40,14 @@ use crate::search::command_search::projects::{
     os_probably_case_sensitive, ProjectSearchItem, SuggestedProjectsDataSource,
 };
 use crate::search::data_source::QueryResult;
-
 use crate::search::result_renderer::QueryResultRenderer;
 use crate::search::search_bar::{
     SearchBar, SearchBarEvent, SearchBarState, SearchResultOrdering, SelectionUpdate,
 };
 use crate::search::QueryFilter;
 use crate::send_telemetry_from_ctx;
-use crate::server::{ids::SyncId, telemetry::TelemetryEvent};
+use crate::server::ids::SyncId;
+use crate::server::telemetry::TelemetryEvent;
 use crate::settings::AISettings;
 use crate::terminal::History;
 use crate::themes::theme::WarpTheme;

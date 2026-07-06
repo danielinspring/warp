@@ -2,6 +2,7 @@
 // app/src/ai/request_usage_model duplicates much of this logic.
 use std::sync::Arc;
 
+use ::ai::api_keys::ApiKeyManager;
 use anyhow::Result;
 use chrono::{OutOfRangeError, Utc};
 use futures::stream::AbortHandle;
@@ -19,7 +20,6 @@ use crate::server::server_api::ai::AIClient;
 use crate::server::server_api::ServerApi;
 use crate::server::telemetry::{TelemetryEvent, WarpAIRequestResult};
 use crate::workspaces::user_workspaces::UserWorkspaces;
-use ::ai::api_keys::ApiKeyManager;
 
 /// The key for the corresponding entry in UserDefaults.
 /// Not wiring through Settings for now since this data is only needed by the panel view.

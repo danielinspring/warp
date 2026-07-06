@@ -17,11 +17,11 @@ use warpui::r#async::{Spawnable, Timer};
 use warpui::{Entity, EntityId, ModelContext, ModelHandle, SingletonEntity};
 
 use super::{ActionExecution, AnyActionExecution, ExecuteActionInput, PreprocessActionInput};
+use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::agent::{
-    conversation::AIConversationId, AIAgentActionId, AIAgentActionResultType, AIAgentActionType,
-    AIAgentPtyWriteMode, ReadShellCommandOutputResult, RequestCommandOutputResult,
-    ShellCommandDelay, ShellCommandError, TransferShellCommandControlToUserResult,
-    WriteToLongRunningShellCommandResult,
+    AIAgentActionId, AIAgentActionResultType, AIAgentActionType, AIAgentPtyWriteMode,
+    ReadShellCommandOutputResult, RequestCommandOutputResult, ShellCommandDelay, ShellCommandError,
+    TransferShellCommandControlToUserResult, WriteToLongRunningShellCommandResult,
 };
 use crate::ai::blocklist::permissions::CommandExecutionPermission;
 use crate::ai::blocklist::BlocklistAIPermissions;

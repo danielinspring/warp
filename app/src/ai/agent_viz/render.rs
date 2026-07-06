@@ -7,9 +7,10 @@
 //! Below the grid, four collapsed-by-default sections list the agent's
 //! configuration: system prompt, tools, MCP servers, skills.
 
+use local_agent_runtime::ToolSchema;
+
 use super::model::{AgentVizModel, Room};
 use crate::ai::local_runtime_spec::{self, LocalRuntimeAttachment, McpServerInfo, SkillInfo};
-use local_agent_runtime::ToolSchema;
 
 const ROOM_WIDTH: usize = 24;
 const ROOM_HEIGHT: usize = 3;
@@ -205,9 +206,10 @@ fn truncate(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use local_agent_runtime::RuntimeEvent;
+
     use super::*;
     use crate::ai::agent_viz::model::AgentVizModel;
-    use local_agent_runtime::RuntimeEvent;
 
     #[test]
     fn snapshot_contains_room_labels_and_sections() {

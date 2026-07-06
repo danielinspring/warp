@@ -2,15 +2,15 @@
 
 use warpui::{AppContext, ModelHandle, SingletonEntity, View, ViewContext, ViewHandle};
 
+use super::view::PaneView;
+use super::{
+    DetachType, PaneConfiguration, PaneContent, PaneGroup, PaneId, ShareableLink,
+    ShareableLinkError,
+};
 use crate::ai::agent_viz::pane_manager::AgentVizPaneManager;
 use crate::ai::agent_viz::view::{AgentVizView, AgentVizViewEvent};
 use crate::app_state::LeafContents;
 use crate::workspace::PaneViewLocator;
-
-use super::{
-    view::PaneView, DetachType, PaneConfiguration, PaneContent, PaneGroup, PaneId, ShareableLink,
-    ShareableLinkError,
-};
 
 pub struct AgentVizPane {
     view: ViewHandle<PaneView<AgentVizView>>,
