@@ -25,11 +25,10 @@ use futures::stream::StreamExt;
 use uuid::Uuid;
 use warp_multi_agent_api as api;
 
+use super::{ChatMessage, OllamaClient, ToolCallParsed};
 use crate::ai::agent::api::{Event, OllamaConfig, RequestParams, ResponseStream};
 use crate::ai::agent::AIAgentInput;
 use crate::server::server_api::AIApiError;
-
-use super::{ChatMessage, OllamaClient, ToolCallParsed};
 
 /// Build a `ResponseStream` that runs one Ollama turn.
 ///

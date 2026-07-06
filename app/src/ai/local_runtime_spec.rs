@@ -19,7 +19,7 @@ use crate::ai::agent::AIAgentContext;
 use crate::ai::local_runtime_bridge::LocalRuntimeToolRegistry;
 use crate::ai::skills::SkillManager;
 
-pub const SYSTEM_PROMPT: &str = "You are a coding assistant running locally via Ollama, integrated into the Warp terminal. Reply concisely. When you need to take an action (run a command, read a file, etc.), prefer to call the matching tool; otherwise reply with plain text.";
+pub const SYSTEM_PROMPT: &str = "You are a coding assistant running locally via Ollama, integrated into the Warp terminal. Reply concisely. When you need to take an action (run a command, read a file, etc.), prefer to call the matching tool; otherwise reply with plain text.\n\nIMPORTANT FOR EDITS: To change any file contents, you MUST call the 'edit_files' tool (never use shell commands like 'cat >', 'echo', or 'sed' to write files). Use 'edit_files' with an 'edits' array. Each edit is an object with 'type' ('replace', 'create', or 'delete'), 'file', and the relevant fields (search+replace for edits, or content for new files). The user will review the diff in the UI before it is applied. After reading a file, if the task requires a change, call edit_files in your next response instead of describing the change in text. Keep calling tools until the user's full request is satisfied.";
 
 pub fn system_prompt() -> &'static str {
     SYSTEM_PROMPT
@@ -139,6 +139,11 @@ fn format_system_prompt(input: &PromptBuildInput) -> String {
         join_or_none(&input.local_tool_names)
     )
     .ok();
+
+    if input.local_tool_names.iter().any(|n| n == "edit_files") {
+        prompt.push_str("\nTo edit or create files you must use the edit_files tool with the exact schema (edits array of {type, file, ...}). Do not write files with shell commands.");
+        prompt.push_str("\nExample edit_files call (as JSON arguments):\n{\n  \"title\": \"Update greeting\",\n  \"edits\": [ { \"type\": \"replace\", \"file\": \"hello.rs\", \"search\": \"println!(\\\"Hello\\\");\", \"replace\": \"println!(\\\"Hello from the local agent!\\\");\", } ]\n}");
+    }
     writeln!(
         prompt,
         "- Request feature settings, usable only when a matching executable tool is advertised: planning: {}; ask-user-question: {}; web search: {}; computer use: {}; research agent: {}; orchestration: {}",

@@ -5,8 +5,9 @@
 
 use std::sync::Arc;
 
+use futures::channel::mpsc;
 use futures::future::join_all;
-use futures::{channel::mpsc, SinkExt};
+use futures::SinkExt;
 use tokio::sync::watch;
 
 use crate::config::RuntimeConfig;

@@ -9,13 +9,12 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::error::ProviderError;
-use crate::messages::Message;
-use crate::tools::ToolCall;
-
 use super::{
     ChatRequest, ChatResponse, ChatStopReason, ChatStreamEvent, LLMProvider, ProviderCapabilities,
 };
+use crate::error::ProviderError;
+use crate::messages::Message;
+use crate::tools::ToolCall;
 
 /// Configuration for connecting to an Ollama server.
 #[derive(Debug, Clone)]

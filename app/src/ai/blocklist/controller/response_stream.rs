@@ -6,6 +6,7 @@ use std::sync::Arc;
 use anyhow::anyhow;
 use chrono::{DateTime, Local, TimeDelta};
 use futures::channel::oneshot;
+use local_agent_runtime::{ToolCallResult, ToolExecutionError};
 use uuid::Uuid;
 use warp_multi_agent_api::response_event;
 use warpui::{Entity, ModelContext, ModelHandle, SingletonEntity};
@@ -21,7 +22,6 @@ use crate::ai::local_runtime_bridge::{
 use crate::network::NetworkStatus;
 use crate::server::server_api::{AIApiError, ServerApiProvider};
 use crate::{report_error, send_telemetry_from_ctx, BlocklistAIHistoryModel};
-use local_agent_runtime::{ToolCallResult, ToolExecutionError};
 
 /// Maximum number of times a single MAA request is re-sent before the failure is
 /// surfaced.

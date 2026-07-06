@@ -3,9 +3,8 @@
 //! Handles truncation, merging, and other transformations needed
 //! before sending messages to the LLM provider.
 
-use crate::config::ContextBudget;
-
 use super::{ConversationHistory, Message};
+use crate::config::ContextBudget;
 
 /// Build the model-facing view of a transcript without mutating persisted history.
 pub fn model_messages(messages: &[Message], budget: &ContextBudget) -> Vec<Message> {

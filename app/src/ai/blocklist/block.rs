@@ -3154,8 +3154,8 @@ impl AIBlock {
             .action_model
             .as_ref(ctx)
             .request_file_edits_executor(ctx);
-        executor.update(ctx, |executor, _| {
-            executor.register_requested_edits(action_id, &view);
+        executor.update(ctx, |executor, ctx| {
+            executor.register_requested_edits(action_id, &view, ctx);
         });
 
         // If the diff is being viewed in a shared session (read-only mode), populate diffs from the payload.

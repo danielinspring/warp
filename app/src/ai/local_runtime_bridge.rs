@@ -10,21 +10,21 @@
 //! Warp's `ResponseEvent` stream so the existing controller/transcript
 //! pipeline works unchanged.
 
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use ai::agent::action::FileEdit;
+use ai::diff_validation::ParsedDiff;
+use ai::skills::SkillReference;
 use futures::channel::oneshot;
 use local_agent_runtime::tools::schema::{ToolSchema, ToolSchemaBuilder};
 use local_agent_runtime::tools::{PermissionDecision, ToolCall, ToolCallResult, ToolSafetyClass};
 use local_agent_runtime::{ToolExecutionError, ToolExecutor};
 use serde_json::Value;
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Arc;
 use uuid::Uuid;
 use warp_multi_agent_api as api;
 use warp_util::local_or_remote_path::LocalOrRemotePath;
-
-use ai::agent::action::FileEdit;
-use ai::diff_validation::ParsedDiff;
-use ai::skills::SkillReference;
 
 use crate::ai::agent::api::RequestParams;
 use crate::ai::agent::task::TaskId;
@@ -377,7 +377,7 @@ pub fn build_tool_schemas() -> Vec<ToolSchema> {
         .build(),
         ToolSchema {
             name: "edit_files".to_string(),
-            description: "Propose reviewed file edits. Supports replace, create, and delete edits. This opens Warp's review UI and never writes directly to disk.".to_string(),
+            description: "Propose reviewed file edits using Warp's CodeDiff UI (never writes directly to disk). REQUIRED for any file modifications. Call this instead of using shell to write files. Supports 'replace' (with search/replace), 'create' (with content), and 'delete'. Always provide precise 'edits' array.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -387,29 +387,30 @@ pub fn build_tool_schemas() -> Vec<ToolSchema> {
                     },
                     "edits": {
                         "type": "array",
-                        "description": "File edits to propose",
+                        "description": "List of edits to perform. Each item must have 'type' and 'file'. For 'replace' also provide exact 'search' string to find and 'replace' string. For 'create' provide 'content'. Matches must be exact for replace.",
                         "items": {
                             "type": "object",
                             "properties": {
                                 "type": {
                                     "type": "string",
-                                    "enum": ["replace", "create", "delete"]
+                                    "enum": ["replace", "create", "delete"],
+                                    "description": "The kind of edit"
                                 },
                                 "file": {
                                     "type": "string",
-                                    "description": "File path to edit"
+                                    "description": "Absolute or relative path to the target file"
                                 },
                                 "search": {
                                     "type": "string",
-                                    "description": "Existing text for replace edits"
+                                    "description": "The exact existing text to find and replace (for type=replace). Must match precisely."
                                 },
                                 "replace": {
                                     "type": "string",
-                                    "description": "Replacement text for replace edits"
+                                    "description": "The new text to insert in place of search (for type=replace)"
                                 },
                                 "content": {
                                     "type": "string",
-                                    "description": "New file content for create edits"
+                                    "description": "The full new file content (for type=create)"
                                 }
                             },
                             "required": ["type", "file"],

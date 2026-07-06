@@ -22,6 +22,9 @@ use std::sync::Arc;
 use async_channel::Sender;
 use futures::channel::oneshot;
 use futures::StreamExt;
+use local_agent_runtime::messages::{AssistantMessage, ToolResultMessage, UserMessage};
+use local_agent_runtime::provider::ollama::{OllamaProvider, OllamaProviderConfig};
+use local_agent_runtime::{AgentRuntime, Message, RuntimeConfig, ToolCall};
 use uuid::Uuid;
 use warp_multi_agent_api as api;
 
@@ -31,13 +34,8 @@ use crate::ai::local_runtime_bridge::event_mapper::EventMapper;
 use crate::ai::local_runtime_bridge::{
     LocalRuntimeToolRegistry, ToolExecutionRequest, WarpToolExecutor,
 };
-use crate::ai::local_runtime_event_bus;
-use crate::ai::local_runtime_spec;
+use crate::ai::{local_runtime_event_bus, local_runtime_spec};
 use crate::server::server_api::AIApiError;
-
-use local_agent_runtime::messages::{AssistantMessage, ToolResultMessage, UserMessage};
-use local_agent_runtime::provider::ollama::{OllamaProvider, OllamaProviderConfig};
-use local_agent_runtime::{AgentRuntime, Message, RuntimeConfig, ToolCall};
 
 /// Build a `ResponseStream` using the new local agent runtime.
 ///
