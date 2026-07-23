@@ -23,4 +23,5 @@ reqwest = { workspace = true, features = ["json", "stream"] }
 uuid.workspace = true
 
 [dev-dependencies]
+instant.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

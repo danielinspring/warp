@@ -1,6 +1,7 @@
 //! Integration tests for the local agent runtime.
 
 use futures::StreamExt;
+use local_agent_runtime::provider::ollama::{OllamaProvider, OllamaProviderConfig};
 use local_agent_runtime::provider::{ChatRequest, ChatResponse, ChatStopReason, ChatStreamEvent};
 use local_agent_runtime::{
     AgentRuntime, FinishReason, LLMProvider, Message, PermissionDecision, ProviderCapabilities,
@@ -12,6 +13,60 @@ use local_agent_runtime::{
 struct MockProvider {
     responses: std::sync::Arc<std::sync::Mutex<Vec<ChatResponse>>>,
     requests: std::sync::Arc<std::sync::Mutex<Vec<ChatRequest>>>,
+}
+
+struct RecoveringProvider {
+    failures_remaining: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    error_kind: RecoveringError,
+    requests: std::sync::Arc<std::sync::Mutex<Vec<ChatRequest>>>,
+}
+
+#[derive(Clone, Copy)]
+enum RecoveringError {
+    Transient,
+    ContextWindowExceeded,
+}
+
+#[async_trait::async_trait]
+impl LLMProvider for RecoveringProvider {
+    async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ProviderError> {
+        self.requests.lock().unwrap().push(request);
+        if self
+            .failures_remaining
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |remaining| remaining.checked_sub(1),
+            )
+            .is_ok()
+        {
+            return Err(match self.error_kind {
+                RecoveringError::Transient => ProviderError::Transient {
+                    message: "temporary".to_string(),
+                },
+                RecoveringError::ContextWindowExceeded => ProviderError::ContextWindowExceeded {
+                    message: "too many tokens".to_string(),
+                },
+            });
+        }
+        Ok(ChatResponse {
+            text: "recovered".to_string(),
+            tool_calls: vec![],
+            stop_reason: ChatStopReason::Stop,
+        })
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities {
+            streaming: false,
+            tool_calling: true,
+            vision: false,
+        }
+    }
+
+    fn name(&self) -> &str {
+        "recovering"
+    }
 }
 
 impl MockProvider {
@@ -84,6 +139,72 @@ struct MockExecutor {
     calls: std::sync::Arc<std::sync::Mutex<Vec<ToolCall>>>,
     safety_class: ToolSafetyClass,
     delay: std::time::Duration,
+}
+
+struct LiveParityExecutor {
+    calls: std::sync::Arc<std::sync::Mutex<Vec<ToolCall>>>,
+}
+
+#[async_trait::async_trait]
+impl ToolExecutor for LiveParityExecutor {
+    fn available_tools(&self) -> Vec<ToolSchema> {
+        vec![ToolSchema {
+            name: "parity_step".to_string(),
+            description:
+                "Record exactly one numbered parity step. Call steps 1 through 15 in order."
+                    .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "step": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 15,
+                    }
+                },
+                "required": ["step"],
+                "additionalProperties": false,
+            }),
+        }]
+    }
+
+    fn safety_class(&self, _tool_name: &str) -> ToolSafetyClass {
+        ToolSafetyClass::Interactive
+    }
+
+    async fn check_permission(&self, _call: &ToolCall) -> PermissionDecision {
+        PermissionDecision::Allow
+    }
+
+    async fn execute(&self, call: &ToolCall) -> Result<ToolCallResult, ToolExecutionError> {
+        let mut calls = self.calls.lock().unwrap();
+        let expected = calls.len() + 1;
+        let actual = call.arguments["step"].as_u64().unwrap_or_default() as usize;
+        if actual != expected || actual > 15 {
+            return Ok(ToolCallResult::error(format!(
+                "Expected step {expected}, received {actual}"
+            )));
+        }
+        calls.push(call.clone());
+        Ok(ToolCallResult::success(format!(
+            "Step {actual} accepted. {}",
+            if actual == 15 {
+                "All steps are complete; respond with PARITY_DONE and do not call more tools."
+            } else {
+                "Call parity_step with the next step number."
+            }
+        )))
+    }
+
+    async fn on_permission_response(&self, _call: &ToolCall, granted: bool) -> PermissionDecision {
+        if granted {
+            PermissionDecision::Allow
+        } else {
+            PermissionDecision::Deny {
+                reason: "user denied".to_string(),
+            }
+        }
+    }
 }
 
 impl MockExecutor {
@@ -485,8 +606,10 @@ async fn test_permission_denied_stops_when_configured() {
         "Done!",
     );
     let executor = MockExecutor::deny_all("dangerous command");
-    let mut config = RuntimeConfig::default();
-    config.stop_on_permission_denied = true;
+    let config = RuntimeConfig {
+        stop_on_permission_denied: true,
+        ..Default::default()
+    };
 
     let runtime = AgentRuntime::new(provider, executor, config);
     let (events, _messages) = runtime
@@ -524,8 +647,11 @@ async fn test_max_turns_exceeded() {
 
     let provider = MockProvider::new(responses);
     let executor = MockExecutor::allow_all();
-    let mut config = RuntimeConfig::default();
-    config.max_turns = 3;
+    let config = RuntimeConfig {
+        max_turns: 3,
+        max_repeated_tool_cycles: 10,
+        ..Default::default()
+    };
 
     let runtime = AgentRuntime::new(provider, executor, config);
     let (events, _messages) = runtime
@@ -691,7 +817,7 @@ async fn test_read_only_tool_calls_execute_concurrently_and_preserve_result_orde
         .with_delay(std::time::Duration::from_millis(120));
     let runtime = AgentRuntime::new(provider, executor, RuntimeConfig::default());
 
-    let started = std::time::Instant::now();
+    let started = instant::Instant::now();
     let (events, _messages) = runtime
         .run_to_completion("test-model", vec![], "read twice")
         .await
@@ -742,7 +868,7 @@ async fn test_mutating_tool_calls_remain_serial() {
         .with_delay(std::time::Duration::from_millis(100));
     let runtime = AgentRuntime::new(provider, executor, RuntimeConfig::default());
 
-    let started = std::time::Instant::now();
+    let started = instant::Instant::now();
     runtime
         .run_to_completion("test-model", vec![], "edit twice")
         .await
@@ -852,4 +978,240 @@ async fn test_context_budget_truncates_only_model_facing_tool_results() {
     assert!(content.contains("\"original_chars\":12"));
     assert!(content.contains("\"kept_chars\":5"));
     assert!(content.contains("\"content\":\"abcde\""));
+}
+
+#[tokio::test]
+async fn test_transient_provider_failure_retries_with_bounded_backoff() {
+    let requests = Default::default();
+    let provider = RecoveringProvider {
+        failures_remaining: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(1)),
+        error_kind: RecoveringError::Transient,
+        requests: std::sync::Arc::clone(&requests),
+    };
+    let config = RuntimeConfig {
+        provider_retry_initial_backoff: std::time::Duration::ZERO,
+        max_provider_retries: 2,
+        ..Default::default()
+    };
+    let runtime = AgentRuntime::new(provider, MockExecutor::allow_all(), config);
+
+    let (_events, messages) = runtime
+        .run_to_completion("test-model", vec![], "hello")
+        .await
+        .unwrap();
+
+    assert_eq!(requests.lock().unwrap().len(), 2);
+    assert!(matches!(
+        messages.last(),
+        Some(Message::Assistant(message)) if message.content == "recovered"
+    ));
+}
+
+#[tokio::test]
+async fn test_context_overflow_tightens_budget_and_retries_once() {
+    let requests = Default::default();
+    let provider = RecoveringProvider {
+        failures_remaining: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(1)),
+        error_kind: RecoveringError::ContextWindowExceeded,
+        requests: std::sync::Arc::clone(&requests),
+    };
+    let mut config = RuntimeConfig::default();
+    config.context_budget.max_input_tokens = Some(4_096);
+    let runtime = AgentRuntime::new(provider, MockExecutor::allow_all(), config);
+
+    let (_events, _) = runtime
+        .run_to_completion("test-model", vec![], "hello")
+        .await
+        .unwrap();
+
+    assert_eq!(requests.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn test_max_token_responses_continue_without_repeating_completed_text() {
+    let provider = MockProvider::new(vec![
+        ChatResponse {
+            text: "part one".to_string(),
+            tool_calls: vec![],
+            stop_reason: ChatStopReason::MaxTokens,
+        },
+        ChatResponse {
+            text: "part two".to_string(),
+            tool_calls: vec![],
+            stop_reason: ChatStopReason::MaxTokens,
+        },
+        ChatResponse {
+            text: "part three".to_string(),
+            tool_calls: vec![],
+            stop_reason: ChatStopReason::Stop,
+        },
+    ]);
+    let runtime = AgentRuntime::new(
+        provider,
+        MockExecutor::allow_all(),
+        RuntimeConfig::default(),
+    );
+
+    let (events, messages) = runtime
+        .run_to_completion("test-model", vec![], "write")
+        .await
+        .unwrap();
+
+    let completed_text = events
+        .iter()
+        .filter_map(|event| match event {
+            RuntimeEvent::TextCompleted { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(completed_text, vec!["part one", "part two", "part three"]);
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| matches!(message, Message::Assistant(_)))
+            .count(),
+        3
+    );
+}
+
+#[tokio::test]
+async fn test_repeated_tool_call_cycles_stop_with_paired_error_result() {
+    let repeated_response = ChatResponse {
+        text: String::new(),
+        tool_calls: vec![ToolCall {
+            id: "call_1".to_string(),
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({ "path": "a.rs" }),
+        }],
+        stop_reason: ChatStopReason::ToolUse,
+    };
+    let provider = MockProvider::new(vec![
+        repeated_response.clone(),
+        repeated_response.clone(),
+        repeated_response,
+    ]);
+    let executor = MockExecutor::allow_all();
+    let executed_calls = executor.calls.clone();
+    let config = RuntimeConfig {
+        max_repeated_tool_cycles: 3,
+        ..Default::default()
+    };
+    let runtime = AgentRuntime::new(provider, executor, config);
+
+    let error = runtime
+        .run_to_completion("test-model", vec![], "loop")
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        local_agent_runtime::RuntimeError::RepeatedToolCallStall { repeated_cycles: 3 }
+    ));
+    assert_eq!(executed_calls.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn test_fifteen_tool_call_parity_run_preserves_every_pair() {
+    let mut responses = (0..15)
+        .map(|index| ChatResponse {
+            text: String::new(),
+            tool_calls: vec![ToolCall {
+                id: format!("call_{index}"),
+                name: "read_file".to_string(),
+                arguments: serde_json::json!({ "path": format!("{index}.rs") }),
+            }],
+            stop_reason: ChatStopReason::ToolUse,
+        })
+        .collect::<Vec<_>>();
+    responses.push(ChatResponse {
+        text: "done".to_string(),
+        tool_calls: vec![],
+        stop_reason: ChatStopReason::Stop,
+    });
+    let provider = MockProvider::new(responses);
+    let executor = MockExecutor::allow_all().with_safety_class(ToolSafetyClass::ReadOnly);
+    let executed_calls = executor.calls.clone();
+    let runtime = AgentRuntime::new(
+        provider,
+        executor,
+        RuntimeConfig {
+            max_repeated_tool_cycles: 2,
+            ..Default::default()
+        },
+    );
+
+    let (_events, messages) = runtime
+        .run_to_completion("test-model", vec![], "inspect")
+        .await
+        .unwrap();
+
+    assert_eq!(executed_calls.lock().unwrap().len(), 15);
+    let call_ids = messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::Assistant(message) => Some(
+                message
+                    .tool_calls
+                    .iter()
+                    .map(|call| call.id.clone())
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+        .flatten()
+        .collect::<std::collections::HashSet<_>>();
+    let result_ids = messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::ToolResult(message) => Some(message.call_id.clone()),
+            _ => None,
+        })
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(call_ids.len(), 15);
+    assert_eq!(call_ids, result_ids);
+}
+
+#[tokio::test]
+#[ignore = "requires a live Ollama endpoint and model"]
+async fn manual_live_ollama_fifteen_tool_call_parity() {
+    let base_url =
+        std::env::var("OLLAMA_BASE_URL").expect("OLLAMA_BASE_URL must identify the test endpoint");
+    let model = std::env::var("OLLAMA_MODEL").expect("OLLAMA_MODEL must identify the pinned model");
+    let provider = OllamaProvider::new(OllamaProviderConfig {
+        base_url,
+        api_key: None,
+        timeout_secs: 120,
+    });
+    let calls = Default::default();
+    let executor = LiveParityExecutor {
+        calls: std::sync::Arc::clone(&calls),
+    };
+    let runtime = AgentRuntime::new(
+        provider,
+        executor,
+        RuntimeConfig {
+            max_turns: 30,
+            max_repeated_tool_cycles: 3,
+            context_budget: local_agent_runtime::ContextBudget {
+                max_input_tokens: Some(262_144),
+                ..Default::default()
+            },
+            system_prompt: Some(
+                "You are running a tool-loop parity test. Call parity_step sequentially with step 1 through step 15. Call exactly one step at a time. After step 15 succeeds, respond only PARITY_DONE."
+                    .to_string(),
+            ),
+            ..Default::default()
+        },
+    );
+
+    let (_events, messages) = runtime
+        .run_to_completion(&model, vec![], "Begin the parity test now.")
+        .await
+        .unwrap();
+
+    assert_eq!(calls.lock().unwrap().len(), 15);
+    assert!(matches!(
+        messages.last(),
+        Some(Message::Assistant(message)) if message.content.contains("PARITY_DONE")
+    ));
 }

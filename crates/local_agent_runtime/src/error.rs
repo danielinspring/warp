@@ -19,6 +19,27 @@ pub enum ProviderError {
 
     #[error("Provider rate limited")]
     RateLimited,
+
+    #[error("Transient provider failure: {message}")]
+    Transient { message: String },
+
+    #[error("Provider context window exceeded: {message}")]
+    ContextWindowExceeded { message: String },
+}
+
+impl ProviderError {
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            ProviderError::Timeout { .. }
+                | ProviderError::RateLimited
+                | ProviderError::Transient { .. }
+        )
+    }
+
+    pub fn is_context_window_exceeded(&self) -> bool {
+        matches!(self, ProviderError::ContextWindowExceeded { .. })
+    }
 }
 
 /// Errors from tool execution.
@@ -51,6 +72,20 @@ pub enum RuntimeError {
 
     #[error("Max turns exceeded: {max_turns}")]
     MaxTurnsExceeded { max_turns: u32 },
+
+    #[error(
+        "Model context budget exceeded: estimated {estimated_tokens} tokens for a {limit}-token limit"
+    )]
+    ContextBudgetExceeded {
+        estimated_tokens: usize,
+        limit: usize,
+    },
+
+    #[error("Maximum output continuations exceeded: {max_continuations}")]
+    MaxContinuationsExceeded { max_continuations: u32 },
+
+    #[error("Agent stalled after {repeated_cycles} identical tool-call cycles")]
+    RepeatedToolCallStall { repeated_cycles: u32 },
 
     #[error("Runtime cancelled")]
     Cancelled,

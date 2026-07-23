@@ -162,6 +162,7 @@ impl OllamaProvider {
         stream: bool,
     ) -> Result<reqwest::Response, ProviderError> {
         let url = format!("{}/v1/chat/completions", self.base_url());
+        let model = request.model.clone();
 
         let tools: Option<Vec<Value>> = if request.tools.is_empty() {
             None
@@ -190,21 +191,39 @@ impl OllamaProvider {
                 ProviderError::Timeout {
                     seconds: self.config.timeout_secs,
                 }
+            } else if e.is_connect() || e.is_request() {
+                ProviderError::Transient {
+                    message: format!("Ollama request failed: {e}"),
+                }
             } else {
-                ProviderError::RequestFailed(anyhow!("Ollama request failed: {}", e))
+                ProviderError::RequestFailed(anyhow!("Ollama request failed: {e}"))
             }
         })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body_text = resp.text().await.unwrap_or_default();
+            let body_lower = body_text.to_ascii_lowercase();
             if status.as_u16() == 429 {
                 return Err(ProviderError::RateLimited);
             }
+            if status.as_u16() == 404 {
+                return Err(ProviderError::ModelNotFound { model });
+            }
+            if status.as_u16() == 408 || status.is_server_error() {
+                return Err(ProviderError::Transient {
+                    message: format!("Ollama returned {status}: {body_text}"),
+                });
+            }
+            if status.as_u16() == 400
+                && ["context", "token limit", "too many tokens"]
+                    .iter()
+                    .any(|needle| body_lower.contains(needle))
+            {
+                return Err(ProviderError::ContextWindowExceeded { message: body_text });
+            }
             return Err(ProviderError::RequestFailed(anyhow!(
-                "Ollama returned {}: {}",
-                status,
-                body_text
+                "Ollama returned {status}: {body_text}"
             )));
         }
 

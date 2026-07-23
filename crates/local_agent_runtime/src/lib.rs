@@ -56,7 +56,7 @@ pub mod runtime;
 pub mod tools;
 
 // Re-export primary types at crate root for convenience.
-pub use config::RuntimeConfig;
+pub use config::{ContextBudget, RuntimeConfig};
 pub use error::{ProviderError, RuntimeError, ToolExecutionError};
 pub use events::{FinishReason, RunResult, RuntimeEvent, StopReason};
 pub use messages::Message;

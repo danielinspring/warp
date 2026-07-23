@@ -2,12 +2,8 @@
 //! system prompt, tool schemas, and the (display-only) view of MCP servers
 //! and skills.
 //!
-//! Today `system_prompt_for_request()` and `local_tools()` feed the runtime;
-//! MCP and skills are surfaced for the agent visualization but
-//! `local_mcp_servers` and `local_skills` always tag entries with
-//! `LocalRuntimeAttachment::NotConnectedToLocalRuntime`. When MCP/skills are
-//! plumbed into `local_agent_runtime`, those two functions flip the relevant
-//! entries to `Active`.
+//! The request-scoped tool registry feeds both the system prompt and runtime so
+//! advertised capabilities cannot drift from executable tools.
 
 use std::fmt::Write as _;
 
@@ -16,7 +12,7 @@ use warpui::{AppContext, SingletonEntity};
 
 use crate::ai::agent::api::RequestParams;
 use crate::ai::agent::AIAgentContext;
-use crate::ai::local_runtime_bridge::LocalRuntimeToolRegistry;
+use crate::ai::local_runtime_bridge::{LocalRuntimePermissionMode, LocalRuntimeToolRegistry};
 use crate::ai::skills::SkillManager;
 
 pub const SYSTEM_PROMPT: &str = "You are a coding assistant running locally via Ollama, integrated into the Warp terminal. Reply concisely. When you need to take an action (run a command, read a file, etc.), prefer to call the matching tool; otherwise reply with plain text.\n\nIMPORTANT FOR EDITS: To change any file contents, you MUST call the 'edit_files' tool (never use shell commands like 'cat >', 'echo', or 'sed' to write files). Use 'edit_files' with an 'edits' array. Each edit is an object with 'type' ('replace', 'create', or 'delete'), 'file', and the relevant fields (search+replace for edits, or content for new files). The user will review the diff in the UI before it is applied. After reading a file, if the task requires a change, call edit_files in your next response instead of describing the change in text. Keep calling tools until the user's full request is satisfied.";
@@ -25,8 +21,11 @@ pub fn system_prompt() -> &'static str {
     SYSTEM_PROMPT
 }
 
-pub fn system_prompt_for_request(params: &RequestParams) -> String {
-    format_system_prompt(&PromptBuildInput::from_request(params))
+pub fn system_prompt_for_request(
+    params: &RequestParams,
+    registry: &LocalRuntimeToolRegistry,
+) -> String {
+    format_system_prompt(&PromptBuildInput::from_request(params, registry))
 }
 
 pub fn local_tools() -> Vec<ToolSchema> {
@@ -40,12 +39,7 @@ struct PromptBuildInput {
     shell: Option<String>,
     memory_enabled: bool,
     warp_drive_context_enabled: bool,
-    planning_enabled: bool,
-    web_search_enabled: bool,
-    computer_use_enabled: bool,
-    ask_user_question_enabled: bool,
-    research_agent_enabled: bool,
-    orchestration_enabled: bool,
+    permission_mode: Option<String>,
     local_tool_names: Vec<String>,
     mcp_server_count: usize,
     mcp_tool_count: usize,
@@ -54,7 +48,7 @@ struct PromptBuildInput {
 }
 
 impl PromptBuildInput {
-    fn from_request(params: &RequestParams) -> Self {
+    fn from_request(params: &RequestParams, registry: &LocalRuntimeToolRegistry) -> Self {
         let mut input = Self {
             working_directory: params.session_context.current_working_directory().clone(),
             session_type: params
@@ -69,13 +63,15 @@ impl PromptBuildInput {
                 .map(|shell| format!("{shell:?}")),
             memory_enabled: params.is_memory_enabled,
             warp_drive_context_enabled: params.warp_drive_context_enabled,
-            planning_enabled: params.planning_enabled,
-            web_search_enabled: params.web_search_enabled,
-            computer_use_enabled: params.computer_use_enabled,
-            ask_user_question_enabled: params.ask_user_question_enabled,
-            research_agent_enabled: params.research_agent_enabled,
-            orchestration_enabled: params.orchestration_enabled,
-            local_tool_names: LocalRuntimeToolRegistry::from_request(params)
+            permission_mode: Some(
+                match registry.permission_mode() {
+                    LocalRuntimePermissionMode::Default => "default",
+                    LocalRuntimePermissionMode::AcceptEdits => "accept-edits",
+                    LocalRuntimePermissionMode::Plan => "plan",
+                }
+                .to_string(),
+            ),
+            local_tool_names: registry
                 .schemas()
                 .into_iter()
                 .map(|tool| tool.name)
@@ -146,15 +142,13 @@ fn format_system_prompt(input: &PromptBuildInput) -> String {
     }
     writeln!(
         prompt,
-        "- Request feature settings, usable only when a matching executable tool is advertised: planning: {}; ask-user-question: {}; web search: {}; computer use: {}; research agent: {}; orchestration: {}",
-        enabled_label(input.planning_enabled),
-        enabled_label(input.ask_user_question_enabled),
-        enabled_label(input.web_search_enabled),
-        enabled_label(input.computer_use_enabled),
-        enabled_label(input.research_agent_enabled),
-        enabled_label(input.orchestration_enabled)
+        "- Permission mode: {}",
+        input.permission_mode.as_deref().unwrap_or("default")
     )
     .ok();
+    prompt.push_str(
+        "- Capabilities without a matching executable schema are unavailable in this local run. Do not claim or attempt planning, web search, computer use, research, or orchestration unless such a tool appears above.\n",
+    );
     writeln!(
         prompt,
         "- MCP context visible: {} servers, {} tools, {} resources. MCP execution is not connected to this local runtime unless an active local tool schema advertises it.",
@@ -426,9 +420,12 @@ mod tests {
             session_type: Some("Local".to_string()),
             memory_enabled: true,
             warp_drive_context_enabled: true,
-            planning_enabled: true,
-            ask_user_question_enabled: true,
-            local_tool_names: vec!["read_files".to_string(), "grep".to_string()],
+            permission_mode: Some("default".to_string()),
+            local_tool_names: vec![
+                "read_files".to_string(),
+                "grep".to_string(),
+                "ask_user_question".to_string(),
+            ],
             context_lines: vec!["Git: branch=main, head=abc123".to_string()],
             ..Default::default()
         });
@@ -437,8 +434,9 @@ mod tests {
         assert!(prompt.contains("Working directory: /repo/warp"));
         assert!(prompt.contains("Memory: enabled"));
         assert!(prompt.contains("Warp Drive context: enabled"));
-        assert!(prompt.contains("Executable local tools: read_files, grep"));
-        assert!(prompt.contains("ask-user-question: enabled"));
+        assert!(prompt.contains("Executable local tools: read_files, grep, ask_user_question"));
+        assert!(prompt.contains("Permission mode: default"));
+        assert!(prompt.contains("Capabilities without a matching executable schema"));
         assert!(prompt.contains("Git: branch=main, head=abc123"));
     }
 

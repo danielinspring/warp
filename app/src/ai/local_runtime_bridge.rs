@@ -21,6 +21,7 @@ use futures::channel::oneshot;
 use local_agent_runtime::tools::schema::{ToolSchema, ToolSchemaBuilder};
 use local_agent_runtime::tools::{PermissionDecision, ToolCall, ToolCallResult, ToolSafetyClass};
 use local_agent_runtime::{ToolExecutionError, ToolExecutor};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 use warp_multi_agent_api as api;
@@ -30,7 +31,8 @@ use crate::ai::agent::api::RequestParams;
 use crate::ai::agent::task::TaskId;
 use crate::ai::agent::{
     AIAgentAction, AIAgentActionId, AIAgentActionResult, AIAgentActionResultType,
-    AIAgentActionType, AnyFileContent, FileContext, FileGlobV2Result, GrepResult, ReadFilesResult,
+    AIAgentActionType, AIAgentInput, AnyFileContent, AskUserQuestionItem, AskUserQuestionOption,
+    AskUserQuestionType, FileContext, FileGlobV2Result, GrepResult, ReadFilesResult,
     RequestCommandOutputResult, SearchCodebaseResult,
 };
 
@@ -43,10 +45,82 @@ pub struct ToolExecutionRequest {
     pub response_tx: oneshot::Sender<Result<ToolCallResult, ToolExecutionError>>,
 }
 
+const LOCAL_RUNTIME_TRANSCRIPT_VERSION: u8 = 1;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct LocalRuntimeTranscriptData {
+    version: u8,
+    message: LocalRuntimeTranscriptMessage,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum LocalRuntimeTranscriptMessage {
+    ToolCall {
+        call: ToolCall,
+    },
+    ToolResult {
+        call_id: String,
+        result: ToolCallResult,
+    },
+}
+
+pub fn encode_local_runtime_tool_call_data(call: &ToolCall) -> String {
+    serde_json::to_string(&LocalRuntimeTranscriptData {
+        version: LOCAL_RUNTIME_TRANSCRIPT_VERSION,
+        message: LocalRuntimeTranscriptMessage::ToolCall { call: call.clone() },
+    })
+    .unwrap_or_default()
+}
+
+pub fn encode_local_runtime_tool_result_data(
+    call_id: impl Into<String>,
+    result: &ToolCallResult,
+) -> String {
+    serde_json::to_string(&LocalRuntimeTranscriptData {
+        version: LOCAL_RUNTIME_TRANSCRIPT_VERSION,
+        message: LocalRuntimeTranscriptMessage::ToolResult {
+            call_id: call_id.into(),
+            result: result.clone(),
+        },
+    })
+    .unwrap_or_default()
+}
+
+pub fn decode_local_runtime_tool_call_data(data: &str) -> Option<ToolCall> {
+    let data: LocalRuntimeTranscriptData = serde_json::from_str(data).ok()?;
+    if data.version != LOCAL_RUNTIME_TRANSCRIPT_VERSION {
+        return None;
+    }
+    match data.message {
+        LocalRuntimeTranscriptMessage::ToolCall { call } => Some(call),
+        LocalRuntimeTranscriptMessage::ToolResult { .. } => None,
+    }
+}
+
+pub fn decode_local_runtime_tool_result_data(data: &str) -> Option<(String, ToolCallResult)> {
+    let data: LocalRuntimeTranscriptData = serde_json::from_str(data).ok()?;
+    if data.version != LOCAL_RUNTIME_TRANSCRIPT_VERSION {
+        return None;
+    }
+    match data.message {
+        LocalRuntimeTranscriptMessage::ToolResult { call_id, result } => Some((call_id, result)),
+        LocalRuntimeTranscriptMessage::ToolCall { .. } => None,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LocalRuntimeToolRegistry {
     schemas: Vec<ToolSchema>,
     routes: HashMap<String, LocalRuntimeToolRoute>,
+    permission_mode: LocalRuntimePermissionMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalRuntimePermissionMode {
+    Default,
+    AcceptEdits,
+    Plan,
 }
 
 #[derive(Debug, Clone)]
@@ -71,6 +145,7 @@ enum LocalRuntimeToolRouteKind {
 impl LocalRuntimeToolRegistry {
     pub fn from_request(params: &RequestParams) -> Self {
         let mut registry = Self::built_ins();
+        registry.permission_mode = LocalRuntimePermissionMode::from_request(params);
 
         if let Some(context) = &params.mcp_context {
             registry.add_mcp_context(context);
@@ -80,6 +155,12 @@ impl LocalRuntimeToolRegistry {
         if !skills.is_empty() {
             registry.add_read_skill(skills);
         }
+        if params.ask_user_question_enabled {
+            registry.add_ask_user_question();
+        }
+        if registry.permission_mode == LocalRuntimePermissionMode::Plan {
+            registry.retain_plan_tools();
+        }
 
         registry
     }
@@ -88,6 +169,7 @@ impl LocalRuntimeToolRegistry {
         let mut registry = Self {
             schemas: Vec::new(),
             routes: HashMap::new(),
+            permission_mode: LocalRuntimePermissionMode::Default,
         };
 
         for schema in build_tool_schemas() {
@@ -117,6 +199,10 @@ impl LocalRuntimeToolRegistry {
             .get(name)
             .map(|route| route.safety_class)
             .unwrap_or(ToolSafetyClass::Interactive)
+    }
+
+    pub fn permission_mode(&self) -> LocalRuntimePermissionMode {
+        self.permission_mode
     }
 
     fn route(&self, name: &str) -> Option<&LocalRuntimeToolRoute> {
@@ -230,6 +316,14 @@ impl LocalRuntimeToolRegistry {
         );
     }
 
+    fn add_ask_user_question(&mut self) {
+        self.add_tool(
+            ask_user_question_schema(),
+            ToolSafetyClass::Interactive,
+            LocalRuntimeToolRouteKind::BuiltIn,
+        );
+    }
+
     fn add_read_skill(&mut self, skill_lookup: HashMap<String, SkillReference>) {
         self.add_tool(
             ToolSchemaBuilder::new("read_skill", "Read an available Warp skill by reference.")
@@ -241,6 +335,35 @@ impl LocalRuntimeToolRegistry {
             ToolSafetyClass::ReadOnly,
             LocalRuntimeToolRouteKind::ReadSkill { skill_lookup },
         );
+    }
+
+    fn retain_plan_tools(&mut self) {
+        self.routes.retain(|name, route| {
+            route.safety_class == ToolSafetyClass::ReadOnly || name == "ask_user_question"
+        });
+        self.schemas
+            .retain(|schema| self.routes.contains_key(&schema.name));
+    }
+}
+
+impl LocalRuntimePermissionMode {
+    fn from_request(params: &RequestParams) -> Self {
+        let plan_mode = params.input.iter().rev().any(|input| {
+            matches!(
+                input,
+                AIAgentInput::UserQuery {
+                    user_query_mode: crate::ai::agent::UserQueryMode::Plan,
+                    ..
+                }
+            )
+        });
+        if plan_mode {
+            Self::Plan
+        } else if params.autonomy_level == api::AutonomyLevel::Unsupervised {
+            Self::AcceptEdits
+        } else {
+            Self::Default
+        }
     }
 }
 
@@ -279,10 +402,18 @@ impl ToolExecutor for WarpToolExecutor {
     }
 
     async fn check_permission(&self, call: &ToolCall) -> PermissionDecision {
-        if self.registry.contains_tool(&call.name) {
+        if self.registry.permission_mode() == LocalRuntimePermissionMode::Plan
+            && self.registry.safety_class(&call.name) != ToolSafetyClass::ReadOnly
+            && call.name != "ask_user_question"
+        {
+            PermissionDecision::Deny {
+                reason: format!("Tool `{}` is unavailable in plan mode", call.name),
+            }
+        } else if self.registry.contains_tool(&call.name) {
             // Warp's action model owns the real permission/autocomplete decision and may block on
-            // user confirmation. The runtime should still enter `execute` so that existing UI path
-            // can queue and resolve the action.
+            // user confirmation. Default and AcceptEdits both enter `execute`; AcceptEdits only
+            // changes Warp's existing UI behavior and never bypasses protected-path, isolation, or
+            // risky-command policy.
             PermissionDecision::Allow
         } else {
             PermissionDecision::Deny {
@@ -425,6 +556,42 @@ pub fn build_tool_schemas() -> Vec<ToolSchema> {
     ]
 }
 
+fn ask_user_question_schema() -> ToolSchema {
+    ToolSchema {
+        name: "ask_user_question".to_string(),
+        description: "Pause and ask the user one or more multiple-choice clarification questions."
+            .to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "questions": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "question_id": { "type": "string" },
+                            "question": { "type": "string" },
+                            "options": {
+                                "type": "array",
+                                "minItems": 2,
+                                "items": { "type": "string" }
+                            },
+                            "recommended_option_index": { "type": "integer", "minimum": -1 },
+                            "is_multiselect": { "type": "boolean" },
+                            "supports_other": { "type": "boolean" }
+                        },
+                        "required": ["question_id", "question", "options"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["questions"],
+            "additionalProperties": false
+        }),
+    }
+}
+
 #[cfg(test)]
 pub fn is_supported_tool(name: &str) -> bool {
     LocalRuntimeToolRegistry::built_ins().contains_tool(name)
@@ -499,6 +666,9 @@ fn built_in_tool_call_to_ai_action(
     if call.name == "edit_files" {
         return edit_files_tool_call_to_ai_action(call);
     }
+    if call.name == "ask_user_question" {
+        return ask_user_question_tool_call_to_ai_action(call);
+    }
 
     let action: AIAgentActionType = match tool_call_to_proto_tool(call)? {
         api::message::tool_call::Tool::RunShellCommand(tool) => tool.into(),
@@ -514,6 +684,80 @@ fn built_in_tool_call_to_ai_action(
     };
 
     Ok(action)
+}
+
+fn ask_user_question_tool_call_to_ai_action(
+    call: &ToolCall,
+) -> Result<AIAgentActionType, ToolExecutionError> {
+    validate_allowed_arguments(&call.arguments, &["questions"], &call.name)?;
+    let questions = call
+        .arguments
+        .get("questions")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ToolExecutionError::InvalidInput {
+            reason: "Tool `ask_user_question` requires array argument `questions`".to_string(),
+        })?;
+    if questions.is_empty() {
+        return Err(ToolExecutionError::InvalidInput {
+            reason: "Tool `ask_user_question` requires at least one question".to_string(),
+        });
+    }
+
+    let questions = questions
+        .iter()
+        .map(parse_ask_user_question)
+        .collect::<Result<_, _>>()?;
+    Ok(AIAgentActionType::AskUserQuestion { questions })
+}
+
+fn parse_ask_user_question(value: &Value) -> Result<AskUserQuestionItem, ToolExecutionError> {
+    let arguments = Value::Object(
+        value
+            .as_object()
+            .ok_or_else(|| ToolExecutionError::InvalidInput {
+                reason: "`ask_user_question.questions` entries must be objects".to_string(),
+            })?
+            .clone(),
+    );
+    validate_allowed_arguments(
+        &arguments,
+        &[
+            "question_id",
+            "question",
+            "options",
+            "recommended_option_index",
+            "is_multiselect",
+            "supports_other",
+        ],
+        "ask_user_question question",
+    )?;
+    let labels = required_string_array(&arguments, &["options"], "ask_user_question question")?;
+    if labels.len() < 2 {
+        return Err(ToolExecutionError::InvalidInput {
+            reason: "`ask_user_question` requires at least two options per question".to_string(),
+        });
+    }
+    let recommended_index = optional_i64(&arguments, "recommended_option_index")?
+        .and_then(|index| usize::try_from(index).ok())
+        .filter(|index| *index < labels.len());
+    let options = labels
+        .into_iter()
+        .enumerate()
+        .map(|(index, label)| AskUserQuestionOption {
+            label,
+            recommended: recommended_index == Some(index),
+        })
+        .collect();
+
+    Ok(AskUserQuestionItem {
+        question_id: required_string(&arguments, "question_id", "ask_user_question question")?,
+        question: required_string(&arguments, "question", "ask_user_question question")?,
+        question_type: AskUserQuestionType::MultipleChoice {
+            is_multiselect: optional_bool(&arguments, "is_multiselect")?.unwrap_or(false),
+            options,
+            supports_other: optional_bool(&arguments, "supports_other")?.unwrap_or(true),
+        },
+    })
 }
 
 fn edit_files_tool_call_to_ai_action(
@@ -602,6 +846,7 @@ pub fn action_result_to_tool_call_result_client_actions(
     result: &AIAgentActionResult,
     request_id: &str,
 ) -> Option<Vec<api::ClientAction>> {
+    let runtime_result = action_result_to_tool_result(result);
     let proto_result =
         action_result_to_proto_tool_call_result_type(&result.result).or_else(|| {
             result
@@ -615,7 +860,10 @@ pub fn action_result_to_tool_call_result_client_actions(
         task_id: result.task_id.to_string(),
         request_id: request_id.to_string(),
         timestamp: None,
-        server_message_data: String::new(),
+        server_message_data: encode_local_runtime_tool_result_data(
+            result.id.to_string(),
+            &runtime_result,
+        ),
         citations: vec![],
         fetched_memories: vec![],
         message: Some(api::message::Message::ToolCallResult(
@@ -653,6 +901,11 @@ fn action_result_to_proto_tool_call_result_type(
         AIAgentActionResultType::SearchCodebase(result) => result.try_into().ok()?,
         AIAgentActionResultType::Grep(result) => result.try_into().ok()?,
         AIAgentActionResultType::FileGlobV2(result) => result.try_into().ok()?,
+        AIAgentActionResultType::RequestFileEdits(result) => result.try_into().ok()?,
+        AIAgentActionResultType::ReadMCPResource(result) => result.try_into().ok()?,
+        AIAgentActionResultType::CallMCPTool(result) => result.try_into().ok()?,
+        AIAgentActionResultType::ReadSkill(result) => result.try_into().ok()?,
+        AIAgentActionResultType::AskUserQuestion(result) => result.into(),
         _ => return None,
     };
 
@@ -662,6 +915,11 @@ fn action_result_to_proto_tool_call_result_type(
         RequestResult::SearchCodebase(result) => Some(MessageResult::SearchCodebase(result)),
         RequestResult::Grep(result) => Some(MessageResult::Grep(result)),
         RequestResult::FileGlobV2(result) => Some(MessageResult::FileGlobV2(result)),
+        RequestResult::ApplyFileDiffs(result) => Some(MessageResult::ApplyFileDiffs(result)),
+        RequestResult::ReadMcpResource(result) => Some(MessageResult::ReadMcpResource(result)),
+        RequestResult::CallMcpTool(result) => Some(MessageResult::CallMcpTool(result)),
+        RequestResult::ReadSkill(result) => Some(MessageResult::ReadSkill(result)),
+        RequestResult::AskUserQuestion(result) => Some(MessageResult::AskUserQuestion(result)),
         _ => None,
     }
 }
@@ -796,6 +1054,54 @@ fn action_result_to_content(result: &AIAgentActionResultType) -> String {
             })
             .to_string(),
         },
+        AIAgentActionResultType::AskUserQuestion(result) => {
+            use crate::ai::agent::{AskUserQuestionAnswerItem, AskUserQuestionResult};
+
+            match result {
+                AskUserQuestionResult::Success { answers } => {
+                    let answers = answers
+                        .iter()
+                        .map(|answer| match answer {
+                            AskUserQuestionAnswerItem::Answered {
+                                question_id,
+                                selected_options,
+                                other_text,
+                            } => serde_json::json!({
+                                "question_id": question_id,
+                                "status": "answered",
+                                "selected_options": selected_options,
+                                "other_text": other_text,
+                            }),
+                            AskUserQuestionAnswerItem::Skipped { question_id } => {
+                                serde_json::json!({
+                                    "question_id": question_id,
+                                    "status": "skipped",
+                                })
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    serde_json::json!({
+                        "status": "completed",
+                        "answers": answers,
+                    })
+                    .to_string()
+                }
+                AskUserQuestionResult::SkippedByAutoApprove { question_ids } => serde_json::json!({
+                    "status": "skipped",
+                    "question_ids": question_ids,
+                })
+                .to_string(),
+                AskUserQuestionResult::Error(error) => serde_json::json!({
+                    "status": "error",
+                    "error": error,
+                })
+                .to_string(),
+                AskUserQuestionResult::Cancelled => serde_json::json!({
+                    "status": "cancelled",
+                })
+                .to_string(),
+            }
+        }
         _ => result.to_string(),
     }
 }
@@ -912,9 +1218,335 @@ pub fn tool_call_to_proto_tool(
             ))
         }
         "edit_files" => Ok(Tool::ApplyFileDiffs(edit_files_tool_call_to_proto(call)?)),
+        "ask_user_question" => Ok(Tool::AskUserQuestion(ask_user_question_tool_call_to_proto(
+            call,
+        )?)),
         _ => Err(ToolExecutionError::NotFound {
             name: call.name.clone(),
         }),
+    }
+}
+
+fn ask_user_question_tool_call_to_proto(
+    call: &ToolCall,
+) -> Result<api::AskUserQuestion, ToolExecutionError> {
+    use api::ask_user_question::question::QuestionType;
+
+    let AIAgentActionType::AskUserQuestion { questions } =
+        ask_user_question_tool_call_to_ai_action(call)?
+    else {
+        unreachable!("ask-user conversion always returns AskUserQuestion");
+    };
+    Ok(api::AskUserQuestion {
+        questions: questions
+            .into_iter()
+            .map(|question| {
+                let AskUserQuestionType::MultipleChoice {
+                    is_multiselect,
+                    options,
+                    supports_other,
+                } = question.question_type;
+                let recommended_option_index = options
+                    .iter()
+                    .position(|option| option.recommended)
+                    .and_then(|index| i32::try_from(index).ok())
+                    .unwrap_or(-1);
+                api::ask_user_question::Question {
+                    question_id: question.question_id,
+                    question: question.question,
+                    question_type: Some(QuestionType::MultipleChoice(
+                        api::ask_user_question::MultipleChoice {
+                            options: options
+                                .into_iter()
+                                .map(|option| api::ask_user_question::Option {
+                                    label: option.label,
+                                })
+                                .collect(),
+                            recommended_option_index,
+                            is_multiselect,
+                            supports_other,
+                        },
+                    )),
+                }
+            })
+            .collect(),
+    })
+}
+
+pub fn tool_call_to_proto_tool_with_registry(
+    call: &ToolCall,
+    registry: &LocalRuntimeToolRegistry,
+) -> Result<api::message::tool_call::Tool, ToolExecutionError> {
+    use api::message::tool_call::Tool;
+
+    let route = registry
+        .route(&call.name)
+        .ok_or_else(|| ToolExecutionError::NotFound {
+            name: call.name.clone(),
+        })?;
+    match &route.kind {
+        LocalRuntimeToolRouteKind::BuiltIn => tool_call_to_proto_tool(call),
+        LocalRuntimeToolRouteKind::McpTool { server_id, name } => {
+            let arguments = arguments_object(&call.arguments, &call.name)?;
+            Ok(Tool::CallMcpTool(api::message::tool_call::CallMcpTool {
+                server_id: server_id.map(|id| id.to_string()).unwrap_or_default(),
+                name: name.clone(),
+                args: Some(json_object_to_prost_struct(arguments)?),
+            }))
+        }
+        LocalRuntimeToolRouteKind::ReadMcpResource => {
+            validate_allowed_arguments(&call.arguments, &["name", "uri"], &call.name)?;
+            let uri = optional_string(&call.arguments, "uri")?
+                .or(optional_string(&call.arguments, "name")?)
+                .ok_or_else(|| ToolExecutionError::InvalidInput {
+                    reason: "Tool `read_mcp_resource` requires `uri` or `name`".to_string(),
+                })?;
+            Ok(Tool::ReadMcpResource(
+                api::message::tool_call::ReadMcpResource {
+                    server_id: String::new(),
+                    uri,
+                },
+            ))
+        }
+        LocalRuntimeToolRouteKind::ReadSkill { skill_lookup } => {
+            use api::message::tool_call::read_skill::SkillReference as ProtoSkillReference;
+
+            validate_allowed_arguments(&call.arguments, &["skill"], &call.name)?;
+            let skill = required_string(&call.arguments, "skill", &call.name)?;
+            let reference = skill_lookup
+                .get(&skill)
+                .cloned()
+                .unwrap_or_else(|| parse_skill_reference(skill.clone()));
+            let skill_reference = match reference {
+                SkillReference::Path(path) => ProtoSkillReference::SkillPath(path.display_path()),
+                SkillReference::BundledSkillId(id) => ProtoSkillReference::BundledSkillId(id),
+            };
+            Ok(Tool::ReadSkill(api::message::tool_call::ReadSkill {
+                name: skill,
+                skill_reference: Some(skill_reference),
+            }))
+        }
+    }
+}
+
+pub fn proto_tool_call_to_runtime_with_registry(
+    tool_call: &api::message::ToolCall,
+    registry: &LocalRuntimeToolRegistry,
+) -> Option<ToolCall> {
+    use api::message::tool_call::read_skill::SkillReference as ProtoSkillReference;
+    use api::message::tool_call::Tool;
+
+    let tool = tool_call.tool.as_ref()?;
+    let (name, arguments) = match tool {
+        Tool::RunShellCommand(tool) => (
+            "run_shell_command".to_string(),
+            serde_json::json!({
+                "command": tool.command,
+                "is_read_only": tool.is_read_only,
+                "is_risky": tool.is_risky,
+                "uses_pager": tool.uses_pager,
+            }),
+        ),
+        Tool::ReadFiles(tool) => (
+            "read_files".to_string(),
+            serde_json::json!({
+                "paths": tool.files.iter().map(|file| file.name.clone()).collect::<Vec<_>>(),
+            }),
+        ),
+        Tool::Grep(tool) => (
+            "grep".to_string(),
+            serde_json::json!({
+                "queries": tool.queries,
+                "path": tool.path,
+            }),
+        ),
+        Tool::FileGlobV2(tool) => (
+            "file_glob_v2".to_string(),
+            serde_json::json!({
+                "patterns": tool.patterns,
+                "search_dir": tool.search_dir,
+            }),
+        ),
+        Tool::SearchCodebase(tool) => (
+            "search_codebase".to_string(),
+            serde_json::json!({
+                "query": tool.query,
+                "path_filters": tool.path_filters,
+                "codebase_path": tool.codebase_path,
+            }),
+        ),
+        Tool::ApplyFileDiffs(tool) => {
+            let mut edits = Vec::new();
+            edits.extend(tool.diffs.iter().map(|diff| {
+                serde_json::json!({
+                    "type": "replace",
+                    "file": diff.file_path,
+                    "search": diff.search,
+                    "replace": diff.replace,
+                })
+            }));
+            edits.extend(tool.new_files.iter().map(|file| {
+                serde_json::json!({
+                    "type": "create",
+                    "file": file.file_path,
+                    "content": file.content,
+                })
+            }));
+            edits.extend(tool.deleted_files.iter().map(|file| {
+                serde_json::json!({
+                    "type": "delete",
+                    "file": file.file_path,
+                })
+            }));
+            (
+                "edit_files".to_string(),
+                serde_json::json!({
+                    "title": tool.summary,
+                    "edits": edits,
+                }),
+            )
+        }
+        Tool::CallMcpTool(tool) => {
+            let name = registry
+                .routes
+                .iter()
+                .find_map(|(function_name, route)| match &route.kind {
+                    LocalRuntimeToolRouteKind::McpTool { server_id, name }
+                        if name == &tool.name
+                            && server_id.map(|id| id.to_string()).unwrap_or_default()
+                                == tool.server_id =>
+                    {
+                        Some(function_name.clone())
+                    }
+                    LocalRuntimeToolRouteKind::BuiltIn
+                    | LocalRuntimeToolRouteKind::McpTool { .. }
+                    | LocalRuntimeToolRouteKind::ReadMcpResource
+                    | LocalRuntimeToolRouteKind::ReadSkill { .. } => None,
+                })
+                .unwrap_or_else(|| {
+                    format!(
+                        "mcp__restored__{}",
+                        sanitize_function_name(tool.name.as_str())
+                    )
+                });
+            (
+                name,
+                tool.args
+                    .as_ref()
+                    .map(prost_struct_to_json)
+                    .unwrap_or_else(|| serde_json::json!({})),
+            )
+        }
+        Tool::ReadMcpResource(tool) => (
+            "read_mcp_resource".to_string(),
+            serde_json::json!({ "uri": tool.uri }),
+        ),
+        Tool::ReadSkill(tool) => {
+            let skill = match tool.skill_reference.as_ref()? {
+                ProtoSkillReference::SkillPath(path) => path.clone(),
+                ProtoSkillReference::BundledSkillId(id) => format!("@warp-skill:{id}"),
+            };
+            (
+                "read_skill".to_string(),
+                serde_json::json!({ "skill": skill }),
+            )
+        }
+        Tool::AskUserQuestion(tool) => {
+            use api::ask_user_question::question::QuestionType;
+
+            let questions = tool
+                .questions
+                .iter()
+                .filter_map(|question| {
+                    let QuestionType::MultipleChoice(multiple_choice) =
+                        question.question_type.as_ref()?;
+                    Some(serde_json::json!({
+                        "question_id": question.question_id,
+                        "question": question.question,
+                        "options": multiple_choice
+                            .options
+                            .iter()
+                            .map(|option| option.label.clone())
+                            .collect::<Vec<_>>(),
+                        "recommended_option_index": multiple_choice.recommended_option_index,
+                        "is_multiselect": multiple_choice.is_multiselect,
+                        "supports_other": multiple_choice.supports_other,
+                    }))
+                })
+                .collect::<Vec<_>>();
+            (
+                "ask_user_question".to_string(),
+                serde_json::json!({ "questions": questions }),
+            )
+        }
+        _ => return None,
+    };
+
+    Some(ToolCall {
+        id: tool_call.tool_call_id.clone(),
+        name,
+        arguments,
+    })
+}
+
+fn json_object_to_prost_struct(
+    object: &serde_json::Map<String, Value>,
+) -> Result<prost_types::Struct, ToolExecutionError> {
+    object
+        .iter()
+        .map(|(key, value)| Ok((key.clone(), json_to_prost_value(value)?)))
+        .collect::<Result<_, _>>()
+        .map(|fields| prost_types::Struct { fields })
+}
+
+fn json_to_prost_value(value: &Value) -> Result<prost_types::Value, ToolExecutionError> {
+    use prost_types::value::Kind;
+
+    let kind =
+        match value {
+            Value::Null => Kind::NullValue(0),
+            Value::Bool(value) => Kind::BoolValue(*value),
+            Value::Number(value) => Kind::NumberValue(value.as_f64().ok_or_else(|| {
+                ToolExecutionError::InvalidInput {
+                    reason: "MCP numeric argument cannot be represented as f64".to_string(),
+                }
+            })?),
+            Value::String(value) => Kind::StringValue(value.clone()),
+            Value::Array(values) => Kind::ListValue(prost_types::ListValue {
+                values: values
+                    .iter()
+                    .map(json_to_prost_value)
+                    .collect::<Result<_, _>>()?,
+            }),
+            Value::Object(object) => Kind::StructValue(json_object_to_prost_struct(object)?),
+        };
+    Ok(prost_types::Value { kind: Some(kind) })
+}
+
+fn prost_struct_to_json(value: &prost_types::Struct) -> Value {
+    Value::Object(
+        value
+            .fields
+            .iter()
+            .map(|(key, value)| (key.clone(), prost_value_to_json(value)))
+            .collect(),
+    )
+}
+
+fn prost_value_to_json(value: &prost_types::Value) -> Value {
+    use prost_types::value::Kind;
+
+    match value.kind.as_ref() {
+        Some(Kind::NullValue(_)) | None => Value::Null,
+        Some(Kind::BoolValue(value)) => Value::Bool(*value),
+        Some(Kind::NumberValue(value)) => serde_json::Number::from_f64(*value)
+            .map(Value::Number)
+            .unwrap_or(Value::Null),
+        Some(Kind::StringValue(value)) => Value::String(value.clone()),
+        Some(Kind::ListValue(value)) => {
+            Value::Array(value.values.iter().map(prost_value_to_json).collect())
+        }
+        Some(Kind::StructValue(value)) => prost_struct_to_json(value),
     }
 }
 
@@ -1081,6 +1713,18 @@ fn optional_bool(arguments: &Value, name: &str) -> Result<Option<bool>, ToolExec
         .ok_or_else(|| ToolExecutionError::InvalidInput {
             reason: format!("Argument `{name}` must be a boolean"),
         })
+}
+
+fn optional_i64(arguments: &Value, name: &str) -> Result<Option<i64>, ToolExecutionError> {
+    match arguments.get(name) {
+        Some(value) => value
+            .as_i64()
+            .map(Some)
+            .ok_or_else(|| ToolExecutionError::InvalidInput {
+                reason: format!("Argument `{name}` must be an integer"),
+            }),
+        None => Ok(None),
+    }
 }
 
 fn required_string_array(
@@ -1279,6 +1923,248 @@ mod tests {
     }
 
     #[test]
+    fn transcript_envelope_round_trips_exact_tool_data() {
+        let call = ToolCall {
+            id: "mcp_call_1".to_string(),
+            name: "mcp__github__search".to_string(),
+            arguments: serde_json::json!({
+                "query": "local runtime",
+                "nested": { "limit": 3 },
+            }),
+        };
+        let encoded_call = encode_local_runtime_tool_call_data(&call);
+        let decoded_call = decode_local_runtime_tool_call_data(&encoded_call).unwrap();
+        assert_eq!(decoded_call.id, call.id);
+        assert_eq!(decoded_call.name, call.name);
+        assert_eq!(decoded_call.arguments, call.arguments);
+
+        let result = ToolCallResult::error(r#"{"error":"denied"}"#);
+        let encoded_result = encode_local_runtime_tool_result_data(call.id.clone(), &result);
+        let (decoded_call_id, decoded_result) =
+            decode_local_runtime_tool_result_data(&encoded_result).unwrap();
+        assert_eq!(decoded_call_id, call.id);
+        assert_eq!(decoded_result.content, result.content);
+        assert!(decoded_result.is_error);
+    }
+
+    #[test]
+    fn malformed_or_wrong_kind_transcript_envelope_is_ignored() {
+        assert!(decode_local_runtime_tool_call_data("{not json").is_none());
+        let encoded_result =
+            encode_local_runtime_tool_result_data("call_1", &ToolCallResult::success("ok"));
+        assert!(decode_local_runtime_tool_call_data(&encoded_result).is_none());
+    }
+
+    #[test]
+    fn registry_proto_round_trip_preserves_generated_mcp_name_and_arguments() {
+        let server_id = Uuid::new_v4();
+        let function_name = "mcp__github__search_issues";
+        let mut registry = LocalRuntimeToolRegistry::built_ins();
+        registry.add_tool(
+            ToolSchema {
+                name: function_name.to_string(),
+                description: "Search issues".to_string(),
+                parameters: serde_json::json!({ "type": "object" }),
+            },
+            ToolSafetyClass::Interactive,
+            LocalRuntimeToolRouteKind::McpTool {
+                server_id: Some(server_id),
+                name: "search_issues".to_string(),
+            },
+        );
+        let call = ToolCall {
+            id: "call_1".to_string(),
+            name: function_name.to_string(),
+            arguments: serde_json::json!({
+                "query": "is:open",
+                "labels": ["bug", "agent"],
+            }),
+        };
+
+        let proto_tool = tool_call_to_proto_tool_with_registry(&call, &registry).unwrap();
+        let proto_call = api::message::ToolCall {
+            tool_call_id: call.id.clone(),
+            tool: Some(proto_tool),
+        };
+        let restored = proto_tool_call_to_runtime_with_registry(&proto_call, &registry).unwrap();
+
+        assert_eq!(restored.id, call.id);
+        assert_eq!(restored.name, call.name);
+        assert_eq!(restored.arguments, call.arguments);
+    }
+
+    #[test]
+    fn registry_proto_round_trip_preserves_skill_reference() {
+        let skill = "@warp-skill:review".to_string();
+        let mut registry = LocalRuntimeToolRegistry::built_ins();
+        registry.add_read_skill(HashMap::from([(
+            skill.clone(),
+            SkillReference::BundledSkillId("review".to_string()),
+        )]));
+        let call = ToolCall {
+            id: "call_1".to_string(),
+            name: "read_skill".to_string(),
+            arguments: serde_json::json!({ "skill": skill }),
+        };
+
+        let proto_tool = tool_call_to_proto_tool_with_registry(&call, &registry).unwrap();
+        let proto_call = api::message::ToolCall {
+            tool_call_id: call.id.clone(),
+            tool: Some(proto_tool),
+        };
+        let restored = proto_tool_call_to_runtime_with_registry(&proto_call, &registry).unwrap();
+
+        assert_eq!(restored.name, "read_skill");
+        assert_eq!(restored.arguments["skill"], "@warp-skill:review");
+    }
+
+    #[test]
+    fn ask_user_question_maps_to_existing_warp_action_and_proto() {
+        let mut registry = LocalRuntimeToolRegistry::built_ins();
+        registry.add_ask_user_question();
+        let call = ToolCall {
+            id: "call_1".to_string(),
+            name: "ask_user_question".to_string(),
+            arguments: serde_json::json!({
+                "questions": [{
+                    "question_id": "scope",
+                    "question": "Which scope?",
+                    "options": ["Focused", "Broad"],
+                    "recommended_option_index": 0,
+                    "is_multiselect": false,
+                    "supports_other": true,
+                }],
+            }),
+        };
+
+        let action = tool_call_to_ai_action_with_registry(
+            &call,
+            &TaskId::new("task_1".to_string()),
+            &registry,
+        )
+        .unwrap();
+        let AIAgentActionType::AskUserQuestion { questions } = action.action else {
+            panic!("expected ask-user action");
+        };
+        assert_eq!(questions.len(), 1);
+        assert!(questions[0].multiple_choice_options().unwrap()[0].recommended);
+
+        let proto = tool_call_to_proto_tool_with_registry(&call, &registry).unwrap();
+        let restored = proto_tool_call_to_runtime_with_registry(
+            &api::message::ToolCall {
+                tool_call_id: call.id.clone(),
+                tool: Some(proto),
+            },
+            &registry,
+        )
+        .unwrap();
+        assert_eq!(restored.name, call.name);
+        assert_eq!(restored.arguments, call.arguments);
+    }
+
+    #[test]
+    fn ask_user_question_result_preserves_answer_skip_and_cancel_states() {
+        use crate::ai::agent::{AskUserQuestionAnswerItem, AskUserQuestionResult};
+
+        let answered = AIAgentActionResultType::AskUserQuestion(AskUserQuestionResult::Success {
+            answers: vec![
+                AskUserQuestionAnswerItem::Answered {
+                    question_id: "one".to_string(),
+                    selected_options: vec!["A".to_string()],
+                    other_text: String::new(),
+                },
+                AskUserQuestionAnswerItem::Skipped {
+                    question_id: "two".to_string(),
+                },
+            ],
+        });
+        let content = action_result_to_content(&answered);
+        assert!(content.contains("\"status\":\"answered\""));
+        assert!(content.contains("\"status\":\"skipped\""));
+
+        let cancelled = AIAgentActionResultType::AskUserQuestion(AskUserQuestionResult::Cancelled);
+        let content = action_result_to_content(&cancelled);
+        assert_eq!(content, r#"{"status":"cancelled"}"#);
+    }
+
+    #[test]
+    fn request_permission_modes_filter_plan_tools_without_weakening_accept_edits() {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let mut plan_params = RequestParams::new_for_test();
+        plan_params.ask_user_question_enabled = true;
+        plan_params.input = vec![AIAgentInput::UserQuery {
+            query: "Plan this".to_string(),
+            context: Arc::from([]),
+            static_query_type: None,
+            referenced_attachments: HashMap::new(),
+            user_query_mode: crate::ai::agent::UserQueryMode::Plan,
+            running_command: None,
+            intended_agent: None,
+        }];
+        let plan_registry = LocalRuntimeToolRegistry::from_request(&plan_params);
+        assert_eq!(
+            plan_registry.permission_mode(),
+            LocalRuntimePermissionMode::Plan
+        );
+        assert!(plan_registry.contains_tool("read_files"));
+        assert!(plan_registry.contains_tool("ask_user_question"));
+        assert!(!plan_registry.contains_tool("run_shell_command"));
+        assert!(!plan_registry.contains_tool("edit_files"));
+
+        let mut accept_params = RequestParams::new_for_test();
+        accept_params.autonomy_level = api::AutonomyLevel::Unsupervised;
+        let accept_registry = LocalRuntimeToolRegistry::from_request(&accept_params);
+        assert_eq!(
+            accept_registry.permission_mode(),
+            LocalRuntimePermissionMode::AcceptEdits
+        );
+        assert!(accept_registry.contains_tool("edit_files"));
+        assert!(accept_registry.contains_tool("run_shell_command"));
+    }
+
+    #[test]
+    fn extended_action_results_have_typed_persisted_results() {
+        use api::message::tool_call_result::Result as MessageResult;
+
+        use crate::ai::agent::{
+            CallMCPToolResult, ReadMCPResourceResult, ReadSkillResult, RequestFileEditsResult,
+        };
+
+        assert!(matches!(
+            action_result_to_proto_tool_call_result_type(
+                &AIAgentActionResultType::RequestFileEdits(
+                    RequestFileEditsResult::DiffApplicationFailed {
+                        error: "failed".to_string(),
+                    },
+                ),
+            ),
+            Some(MessageResult::ApplyFileDiffs(_))
+        ));
+        assert!(matches!(
+            action_result_to_proto_tool_call_result_type(&AIAgentActionResultType::CallMCPTool(
+                CallMCPToolResult::Error("failed".to_string(),)
+            ),),
+            Some(MessageResult::CallMcpTool(_))
+        ));
+        assert!(matches!(
+            action_result_to_proto_tool_call_result_type(
+                &AIAgentActionResultType::ReadMCPResource(ReadMCPResourceResult::Error(
+                    "failed".to_string(),
+                )),
+            ),
+            Some(MessageResult::ReadMcpResource(_))
+        ));
+        assert!(matches!(
+            action_result_to_proto_tool_call_result_type(&AIAgentActionResultType::ReadSkill(
+                ReadSkillResult::Error("failed".to_string(),)
+            ),),
+            Some(MessageResult::ReadSkill(_))
+        ));
+    }
+
+    #[test]
     fn schemas_advertise_only_supported_v1_tools() {
         let schemas = build_tool_schemas();
         let names = schemas
@@ -1297,7 +2183,7 @@ mod tests {
                 "edit_files"
             ]
         );
-        assert!(!names.iter().any(|name| *name == "create_file"));
+        assert!(!names.contains(&"create_file"));
         assert!(schemas
             .iter()
             .all(|schema| schema.parameters["additionalProperties"] == false));
@@ -1797,11 +2683,16 @@ mod tests {
 /// This is used by the local runtime integration to make the runtime's output
 /// compatible with the existing controller/transcript pipeline.
 pub mod event_mapper {
+    use std::sync::Arc;
+
     use local_agent_runtime::{FinishReason, RuntimeEvent};
     use uuid::Uuid;
     use warp_multi_agent_api as api;
 
-    use super::tool_call_to_proto_tool;
+    use super::{
+        encode_local_runtime_tool_call_data, tool_call_to_proto_tool_with_registry,
+        LocalRuntimeToolRegistry,
+    };
 
     /// State for mapping runtime events to proto ResponseEvents.
     pub struct EventMapper {
@@ -1809,6 +2700,7 @@ pub mod event_mapper {
         pub request_id: String,
         pub run_id: String,
         pub task_id: String,
+        registry: Arc<LocalRuntimeToolRegistry>,
         task_created: bool,
         current_text_message_id: Option<String>,
     }
@@ -1820,12 +2712,14 @@ pub mod event_mapper {
             run_id: String,
             task_id: String,
             task_exists: bool,
+            registry: Arc<LocalRuntimeToolRegistry>,
         ) -> Self {
             Self {
                 conversation_id,
                 request_id,
                 run_id,
                 task_id,
+                registry,
                 task_created: task_exists,
                 current_text_message_id: None,
             }
@@ -1932,9 +2826,12 @@ pub mod event_mapper {
                     }
 
                     for call in calls {
-                        if let Some(action) =
-                            tool_call_to_proto_action(&self.task_id, &self.request_id, call)
-                        {
+                        if let Some(action) = tool_call_to_proto_action(
+                            &self.task_id,
+                            &self.request_id,
+                            call,
+                            &self.registry,
+                        ) {
                             actions.push(action);
                         }
                     }
@@ -1991,8 +2888,9 @@ pub mod event_mapper {
         task_id: &str,
         request_id: &str,
         call: &local_agent_runtime::ToolCall,
+        registry: &LocalRuntimeToolRegistry,
     ) -> Option<api::ClientAction> {
-        let proto_tool = tool_call_to_proto_tool(call).ok()?;
+        let proto_tool = tool_call_to_proto_tool_with_registry(call, registry).ok()?;
 
         let message_id = Uuid::new_v4().to_string();
         let message = api::Message {
@@ -2000,7 +2898,7 @@ pub mod event_mapper {
             task_id: task_id.to_string(),
             request_id: request_id.to_string(),
             timestamp: None,
-            server_message_data: String::new(),
+            server_message_data: encode_local_runtime_tool_call_data(call),
             citations: vec![],
             fetched_memories: vec![],
             message: Some(api::message::Message::ToolCall(api::message::ToolCall {
@@ -2135,6 +3033,7 @@ pub mod event_mapper {
                 "run_1".to_string(),
                 "task_1".to_string(),
                 true,
+                Arc::new(LocalRuntimeToolRegistry::built_ins()),
             );
 
             let first = mapper.map_event(&RuntimeEvent::TextDelta {
@@ -2198,6 +3097,7 @@ pub mod event_mapper {
                 "run_1".to_string(),
                 "task_1".to_string(),
                 true,
+                Arc::new(LocalRuntimeToolRegistry::built_ins()),
             );
 
             let events = mapper.map_event(&RuntimeEvent::ToolCallsRequested {

@@ -24,7 +24,7 @@ use futures::channel::oneshot;
 use futures::StreamExt;
 use local_agent_runtime::messages::{AssistantMessage, ToolResultMessage, UserMessage};
 use local_agent_runtime::provider::ollama::{OllamaProvider, OllamaProviderConfig};
-use local_agent_runtime::{AgentRuntime, Message, RuntimeConfig, ToolCall};
+use local_agent_runtime::{AgentRuntime, ContextBudget, Message, RuntimeConfig};
 use uuid::Uuid;
 use warp_multi_agent_api as api;
 
@@ -32,7 +32,9 @@ use crate::ai::agent::api::{Event, OllamaConfig, RequestParams, ResponseStream};
 use crate::ai::agent::AIAgentInput;
 use crate::ai::local_runtime_bridge::event_mapper::EventMapper;
 use crate::ai::local_runtime_bridge::{
-    LocalRuntimeToolRegistry, ToolExecutionRequest, WarpToolExecutor,
+    decode_local_runtime_tool_call_data, decode_local_runtime_tool_result_data,
+    proto_tool_call_to_runtime_with_registry, LocalRuntimeToolRegistry, ToolExecutionRequest,
+    WarpToolExecutor,
 };
 use crate::ai::{local_runtime_event_bus, local_runtime_spec};
 use crate::server::server_api::AIApiError;
@@ -100,15 +102,20 @@ async fn run_runtime(
     );
 
     let runtime_config = RuntimeConfig {
-        system_prompt: Some(local_runtime_spec::system_prompt_for_request(&params)),
-        max_turns: 10,
+        system_prompt: Some(local_runtime_spec::system_prompt_for_request(
+            &params, &registry,
+        )),
+        context_budget: ContextBudget {
+            max_input_tokens: params.context_window_limit.map(|limit| limit as usize),
+            ..Default::default()
+        },
         ..Default::default()
     };
 
     let runtime = AgentRuntime::new(provider, executor, runtime_config);
 
     // Build initial messages from existing conversation history
-    let initial_messages = build_initial_messages(&params);
+    let initial_messages = build_initial_messages(&params, &registry);
 
     // Extract the user's latest input
     let user_input = extract_user_input(&params).unwrap_or_default();
@@ -119,6 +126,7 @@ async fn run_runtime(
         run_id.clone(),
         task_id,
         task_exists,
+        Arc::clone(&registry),
     );
 
     let (mut runtime_events, cancel_handle) =
@@ -151,21 +159,27 @@ async fn run_runtime(
     Ok(())
 }
 
-fn build_initial_messages(params: &RequestParams) -> Vec<Message> {
+fn build_initial_messages(
+    params: &RequestParams,
+    registry: &LocalRuntimeToolRegistry,
+) -> Vec<Message> {
     let mut messages = Vec::new();
 
     for task in &params.tasks {
         for proto_msg in &task.messages {
-            if let Some(msg) = translate_proto_to_runtime_message(proto_msg) {
+            if let Some(msg) = translate_proto_to_runtime_message(proto_msg, registry) {
                 messages.push(msg);
             }
         }
     }
 
-    messages
+    retain_paired_tool_messages(messages)
 }
 
-fn translate_proto_to_runtime_message(msg: &api::Message) -> Option<Message> {
+fn translate_proto_to_runtime_message(
+    msg: &api::Message,
+    registry: &LocalRuntimeToolRegistry,
+) -> Option<Message> {
     use api::message::Message as M;
     let inner = msg.message.as_ref()?;
     match inner {
@@ -176,72 +190,72 @@ fn translate_proto_to_runtime_message(msg: &api::Message) -> Option<Message> {
             content: out.text.clone(),
             tool_calls: vec![],
         })),
-        M::ToolCall(tool_call) => Some(Message::Assistant(AssistantMessage {
-            content: String::new(),
-            tool_calls: vec![translate_proto_tool_call(tool_call)?],
-        })),
+        M::ToolCall(tool_call) => {
+            let call = decode_local_runtime_tool_call_data(&msg.server_message_data)
+                .or_else(|| proto_tool_call_to_runtime_with_registry(tool_call, registry))?;
+            Some(Message::Assistant(AssistantMessage {
+                content: String::new(),
+                tool_calls: vec![call],
+            }))
+        }
         M::ToolCallResult(result) => {
-            let content = format!("{:?}", result.result);
+            let (call_id, runtime_result) = decode_local_runtime_tool_result_data(
+                &msg.server_message_data,
+            )
+            .unwrap_or_else(|| {
+                (
+                    result.tool_call_id.clone(),
+                    local_agent_runtime::ToolCallResult {
+                        content: format!("{:?}", result.result),
+                        is_error: false,
+                    },
+                )
+            });
             Some(Message::ToolResult(ToolResultMessage {
-                call_id: result.tool_call_id.clone(),
-                result: local_agent_runtime::ToolCallResult {
-                    content,
-                    is_error: false,
-                },
+                call_id,
+                result: runtime_result,
             }))
         }
         _ => None,
     }
 }
 
-fn translate_proto_tool_call(tool_call: &api::message::ToolCall) -> Option<ToolCall> {
-    let tool = tool_call.tool.as_ref()?;
-    let (name, arguments) = match tool {
-        api::message::tool_call::Tool::RunShellCommand(tool) => (
-            "run_shell_command",
-            serde_json::json!({
-                "command": tool.command.clone(),
-                "is_read_only": tool.is_read_only,
-                "is_risky": tool.is_risky,
-                "uses_pager": tool.uses_pager,
-            }),
-        ),
-        api::message::tool_call::Tool::ReadFiles(tool) => (
-            "read_files",
-            serde_json::json!({
-                "paths": tool.files.iter().map(|file| file.name.clone()).collect::<Vec<_>>(),
-            }),
-        ),
-        api::message::tool_call::Tool::Grep(tool) => (
-            "grep",
-            serde_json::json!({
-                "queries": tool.queries.clone(),
-                "path": tool.path.clone(),
-            }),
-        ),
-        api::message::tool_call::Tool::FileGlobV2(tool) => (
-            "file_glob_v2",
-            serde_json::json!({
-                "patterns": tool.patterns.clone(),
-                "search_dir": tool.search_dir.clone(),
-            }),
-        ),
-        api::message::tool_call::Tool::SearchCodebase(tool) => (
-            "search_codebase",
-            serde_json::json!({
-                "query": tool.query.clone(),
-                "path_filters": tool.path_filters.clone(),
-                "codebase_path": tool.codebase_path.clone(),
-            }),
-        ),
-        _ => return None,
-    };
+fn retain_paired_tool_messages(messages: Vec<Message>) -> Vec<Message> {
+    use std::collections::HashSet;
 
-    Some(ToolCall {
-        id: tool_call.tool_call_id.clone(),
-        name: name.to_string(),
-        arguments,
-    })
+    let call_ids = messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::Assistant(message) => Some(message.tool_calls.iter().map(|call| &call.id)),
+            Message::System(_) | Message::User(_) | Message::ToolResult(_) => None,
+        })
+        .flatten()
+        .cloned()
+        .collect::<HashSet<_>>();
+    let result_ids = messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::ToolResult(message) => Some(message.call_id.clone()),
+            Message::System(_) | Message::User(_) | Message::Assistant(_) => None,
+        })
+        .collect::<HashSet<_>>();
+
+    messages
+        .into_iter()
+        .filter_map(|message| match message {
+            Message::Assistant(mut assistant) => {
+                assistant
+                    .tool_calls
+                    .retain(|call| result_ids.contains(&call.id));
+                (!assistant.content.is_empty() || !assistant.tool_calls.is_empty())
+                    .then_some(Message::Assistant(assistant))
+            }
+            Message::ToolResult(result) => call_ids
+                .contains(&result.call_id)
+                .then_some(Message::ToolResult(result)),
+            Message::System(_) | Message::User(_) => Some(message),
+        })
+        .collect()
 }
 
 fn extract_user_input(params: &RequestParams) -> Option<String> {
@@ -253,3 +267,7 @@ fn extract_user_input(params: &RequestParams) -> Option<String> {
     }
     None
 }
+
+#[cfg(test)]
+#[path = "local_runtime_integration_tests.rs"]
+mod tests;

@@ -69,9 +69,11 @@ impl<P: LLMProvider, T: ToolExecutor> AgentRuntime<P, T> {
                 provider,
                 executor,
                 config,
-                model,
-                initial_messages,
-                user_input,
+                RunRequest {
+                    model,
+                    initial_messages,
+                    user_input,
+                },
                 Some(cancel_rx),
                 &mut sink,
             )
@@ -105,9 +107,11 @@ impl<P: LLMProvider, T: ToolExecutor> AgentRuntime<P, T> {
             Arc::clone(&self.provider),
             Arc::clone(&self.executor),
             self.config.clone(),
-            model.to_string(),
-            initial_messages,
-            user_input.to_string(),
+            RunRequest {
+                model: model.to_string(),
+                initial_messages,
+                user_input: user_input.to_string(),
+            },
             None,
             &mut sink,
         )
@@ -145,13 +149,17 @@ impl RuntimeEventSink for ChannelEventSink {
     }
 }
 
+struct RunRequest {
+    model: String,
+    initial_messages: Vec<Message>,
+    user_input: String,
+}
+
 async fn run_loop<P, T, S>(
     provider: Arc<P>,
     executor: Arc<T>,
     config: RuntimeConfig,
-    model: String,
-    initial_messages: Vec<Message>,
-    user_input: String,
+    request: RunRequest,
     mut cancel_rx: Option<watch::Receiver<bool>>,
     sink: &mut S,
 ) -> Result<Vec<Message>, RuntimeError>
@@ -160,6 +168,11 @@ where
     T: ToolExecutor,
     S: RuntimeEventSink + Send,
 {
+    let RunRequest {
+        model,
+        initial_messages,
+        user_input,
+    } = request;
     let mut history = if let Some(ref prompt) = config.system_prompt {
         ConversationHistory::with_system_prompt(prompt.clone())
     } else {
@@ -172,6 +185,10 @@ where
     history.push_user(user_input);
 
     let mut turn: u32 = 0;
+    let mut continuation_count = 0;
+    let mut previous_tool_fingerprint = None;
+    let mut repeated_tool_cycles = 0;
+    let mut context_budget = config.context_budget.clone();
 
     loop {
         if is_cancelled(&cancel_rx) {
@@ -201,21 +218,32 @@ where
 
         let tools = executor.available_tools();
 
-        let request = ChatRequest {
-            model: model.clone(),
-            messages: model_messages(history.messages(), &config.context_budget),
-            tools: tools.clone(),
+        let mut retried_context_overflow = false;
+        let chat_result = loop {
+            let request = ChatRequest {
+                model: model.clone(),
+                messages: model_messages(history.messages(), &tools, &context_budget)?,
+                tools: tools.clone(),
+            };
+            match chat_with_provider_retries(
+                Arc::clone(&provider),
+                request,
+                &config,
+                &mut cancel_rx,
+                sink,
+            )
+            .await
+            {
+                Err(RuntimeError::Provider(error))
+                    if error.is_context_window_exceeded() && !retried_context_overflow =>
+                {
+                    retried_context_overflow = true;
+                    tighten_context_budget(&mut context_budget);
+                }
+                result => break result?,
+            }
         };
-
-        let chat_result = match chat_with_cancel(
-            Arc::clone(&provider),
-            request,
-            config.llm_timeout,
-            &mut cancel_rx,
-            sink,
-        )
-        .await?
-        {
+        let chat_result = match chat_result {
             Some(response) => response,
             None => {
                 sink.send(RuntimeEvent::Finished {
@@ -236,11 +264,24 @@ where
 
         if response.tool_calls.is_empty() {
             history.push_assistant(response.text, vec![]);
+            if response.stop_reason == ChatStopReason::MaxTokens {
+                continuation_count += 1;
+                sink.send(RuntimeEvent::TurnCompleted {
+                    reason: StopReason::MaxTokens,
+                })
+                .await;
+                if continuation_count > config.max_continuations {
+                    return Err(RuntimeError::MaxContinuationsExceeded {
+                        max_continuations: config.max_continuations,
+                    });
+                }
+                history.push_user(
+                    "Continue exactly where the previous response stopped. Do not repeat text.",
+                );
+                continue;
+            }
             sink.send(RuntimeEvent::TurnCompleted {
-                reason: match response.stop_reason {
-                    ChatStopReason::MaxTokens => StopReason::MaxTokens,
-                    _ => StopReason::EndTurn,
-                },
+                reason: StopReason::EndTurn,
             })
             .await;
             tracing::debug!(turn, "local runtime provider turn completed");
@@ -249,6 +290,44 @@ where
             })
             .await;
             return Ok(history.messages().to_vec());
+        }
+
+        continuation_count = 0;
+        let tool_fingerprint = serde_json::to_string(
+            &response
+                .tool_calls
+                .iter()
+                .map(|call| (&call.name, &call.arguments))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap_or_default();
+        if previous_tool_fingerprint.as_deref() == Some(tool_fingerprint.as_str()) {
+            repeated_tool_cycles += 1;
+        } else {
+            previous_tool_fingerprint = Some(tool_fingerprint);
+            repeated_tool_cycles = 1;
+        }
+        if repeated_tool_cycles >= config.max_repeated_tool_cycles.max(1) {
+            sink.send(RuntimeEvent::ToolCallsRequested {
+                calls: response.tool_calls.clone(),
+            })
+            .await;
+            sink.send(RuntimeEvent::TurnCompleted {
+                reason: StopReason::ToolUse,
+            })
+            .await;
+            history.push_assistant(response.text, response.tool_calls.clone());
+            synthesize_tool_error_results(
+                &response.tool_calls,
+                "repeated_tool_call_stall",
+                "Tool execution stopped because the model repeated the same tool calls",
+                &mut history,
+                sink,
+            )
+            .await;
+            return Err(RuntimeError::RepeatedToolCallStall {
+                repeated_cycles: repeated_tool_cycles,
+            });
         }
 
         sink.send(RuntimeEvent::ToolCallsRequested {
@@ -541,6 +620,34 @@ async fn synthesize_cancelled_tool_results<S>(
     }
 }
 
+async fn synthesize_tool_error_results<S>(
+    calls: &[ToolCall],
+    code: &str,
+    message: &str,
+    history: &mut ConversationHistory,
+    sink: &mut S,
+) where
+    S: RuntimeEventSink + Send,
+{
+    for call in calls {
+        let result = ToolCallResult::error(
+            serde_json::json!({
+                "error": {
+                    "code": code,
+                    "message": message,
+                }
+            })
+            .to_string(),
+        );
+        history.push_tool_result(&call.id, result.clone());
+        sink.send(RuntimeEvent::ToolResult {
+            call_id: call.id.clone(),
+            result,
+        })
+        .await;
+    }
+}
+
 fn cancelled_tool_result() -> ToolCallResult {
     ToolCallResult::error(
         serde_json::json!({
@@ -556,6 +663,74 @@ fn cancelled_tool_result() -> ToolCallResult {
 struct ChatRunResult {
     response: ChatResponse,
     streamed_text: bool,
+}
+
+async fn chat_with_provider_retries<P>(
+    provider: Arc<P>,
+    request: ChatRequest,
+    config: &RuntimeConfig,
+    cancel_rx: &mut Option<watch::Receiver<bool>>,
+    sink: &mut (impl RuntimeEventSink + Send),
+) -> Result<Option<ChatRunResult>, RuntimeError>
+where
+    P: LLMProvider,
+{
+    let mut retries = 0;
+    let mut backoff = config.provider_retry_initial_backoff;
+    loop {
+        match chat_with_cancel(
+            Arc::clone(&provider),
+            request.clone(),
+            config.llm_timeout,
+            cancel_rx,
+            sink,
+        )
+        .await
+        {
+            Err(RuntimeError::Provider(error))
+                if error.is_retryable() && retries < config.max_provider_retries =>
+            {
+                retries += 1;
+                tracing::warn!(
+                    retries,
+                    max_retries = config.max_provider_retries,
+                    error = %error,
+                    "retrying transient local runtime provider failure"
+                );
+                if sleep_with_cancel(backoff, cancel_rx).await {
+                    return Ok(None);
+                }
+                backoff = backoff.saturating_mul(2);
+            }
+            result => return result,
+        }
+    }
+}
+
+async fn sleep_with_cancel(
+    duration: std::time::Duration,
+    cancel_rx: &mut Option<watch::Receiver<bool>>,
+) -> bool {
+    if let Some(cancel_rx) = cancel_rx.as_mut() {
+        tokio::select! {
+            _ = wait_cancelled(cancel_rx) => true,
+            _ = tokio::time::sleep(duration) => false,
+        }
+    } else {
+        tokio::time::sleep(duration).await;
+        false
+    }
+}
+
+fn tighten_context_budget(budget: &mut crate::config::ContextBudget) {
+    let minimum = budget.reserved_output_tokens.saturating_add(256);
+    budget.max_input_tokens = Some(
+        budget
+            .max_input_tokens
+            .map(|current| current.saturating_mul(3) / 4)
+            .unwrap_or(8_192)
+            .max(minimum),
+    );
 }
 
 async fn chat_with_cancel<P>(

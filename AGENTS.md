@@ -192,3 +192,60 @@ if FeatureFlag::YourNewFeature.is_enabled() {
 ### Exhaustive Matching
 
 When adding/editing match statements, avoid using the wildcard _ when at all possible. Exhaustive matching is helpful for ensuring that all variants are handled, especially when adding new variants to enums in the future.
+
+## Startup Workflow
+
+Before writing code:
+
+1. Read `feature_list.json` and select the single feature whose status is `in-progress`.
+2. Read `progress.md` and `session-handoff.md` for current state, decisions, blockers, changed files, and the recommended next step.
+3. Run `./init.sh` to verify the focused local-agent baseline.
+4. Inspect the active feature's dependencies, acceptance criteria, and verification commands.
+
+If the active feature is `blocked`, resolve or report that blocker before selecting more work. Otherwise, if no feature is `in-progress`, choose one unblocked `not-started` feature, change only that feature to `in-progress`, and update the active feature in `progress.md`. Keep this workflow restartable: another agent must be able to resume from repository state without relying on chat history.
+
+## Harness State
+
+- `feature_list.json` is the source of truth for roadmap status, dependencies, acceptance criteria, verification, and evidence.
+- `progress.md` records the active implementation state and verification evidence.
+- `session-handoff.md` contains the compact next-session handoff.
+- Allowed feature statuses are `not-started`, `in-progress`, `blocked`, and `done`.
+- Keep exactly one feature `in-progress` unless explicit multi-agent ownership boundaries are recorded.
+- A feature cannot be marked `done` without non-empty verification evidence.
+
+## Working Rules
+
+### One feature at a time
+
+- Stay in scope: implement only the active feature and changes required by its declared dependencies.
+- Record newly discovered adjacent work as a new feature instead of silently expanding scope.
+- Do not modify unrelated user changes or untracked files.
+- Do not create commits unless the user explicitly requests one.
+
+### Verification Commands
+
+- Focused startup verification: `./init.sh`
+- Rust formatting check: `./script/format --check`
+- Local runtime tests: `cargo test -p local_agent_runtime`
+- Local runtime bridge tests: `cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use`
+- PR/review gate: `./script/format` followed by the clippy and presubmit commands required above.
+
+## Definition of Done
+
+A feature is done only when:
+
+1. Its acceptance criteria are satisfied without unresolved TODO behavior.
+2. Focused tests and formatting checks pass.
+3. Relevant clippy checks pass, or a concrete blocker is recorded.
+4. `feature_list.json` contains the command and output summary as evidence.
+5. `progress.md` and `session-handoff.md` identify the resulting state and recommended next step.
+
+## End of Session
+
+Before ending:
+
+1. Re-run verification appropriate to the active feature.
+2. Update its status and evidence in `feature_list.json`.
+3. Update `progress.md` with completed work, current work, blockers, decisions, changed files, and verification evidence.
+4. Rewrite `session-handoff.md` with the current objective and exactly one recommended next step.
+5. Ensure the worktree is left in a cleanly restartable state; do not claim success when required checks have not passed.
