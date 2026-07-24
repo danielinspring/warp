@@ -309,7 +309,9 @@ impl RequestParams {
             let keys = api_key_manager.keys();
             keys.has_ollama_configured()
                 .then(|| OllamaConfig {
-                    base_url: keys.ollama_base_url.clone().unwrap_or_default(),
+                    base_url: crate::ai::ollama::normalize_base_url(
+                        keys.ollama_base_url.as_deref().unwrap_or_default(),
+                    ),
                     model: keys.ollama_model.clone().unwrap_or_default(),
                     api_key: keys.ollama_api_key.clone(),
                 })

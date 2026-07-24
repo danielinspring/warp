@@ -263,6 +263,16 @@ impl ShellCommandExecutor {
                     } else {
                         command.clone()
                     };
+                // Local Ollama runtime has no long-running-command poll tools. When the flag is
+                // on and the tool asked to wait, block until completion (capped) instead of the
+                // default 2s snapshot path used by cloud agents.
+                let delay = if *wait_until_completion
+                    && warp_core::features::FeatureFlag::LocalOllamaRuntimeToolUse.is_enabled()
+                {
+                    Some(ShellCommandDelay::OnCompletion)
+                } else {
+                    None
+                };
                 ctx.emit(ShellCommandExecutorEvent::ExecuteCommand {
                     action_id: action_id.clone(),
                     conversation_id: input.conversation_id,
@@ -274,7 +284,7 @@ impl ShellCommandExecutor {
                 drop(model);
 
                 ActionExecution::new_async(
-                    self.action_result_future(block_selector.clone(), None),
+                    self.action_result_future(block_selector.clone(), delay),
                     move |result, ctx| {
                         // Remove the senders from the maps.
                         if let Some(handle) = handle.upgrade(ctx) {

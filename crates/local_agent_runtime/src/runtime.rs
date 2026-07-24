@@ -354,10 +354,12 @@ where
                 return Err(RuntimeError::Cancelled);
             }
 
-            if executor.safety_class(&calls[call_index].name) == ToolSafetyClass::ReadOnly {
+            if executor.safety_class_for_call(&calls[call_index]) == ToolSafetyClass::ReadOnly {
                 let batch_end = calls[call_index..]
                     .iter()
-                    .position(|call| executor.safety_class(&call.name) != ToolSafetyClass::ReadOnly)
+                    .position(|call| {
+                        executor.safety_class_for_call(call) != ToolSafetyClass::ReadOnly
+                    })
                     .map(|offset| call_index + offset)
                     .unwrap_or(calls.len());
                 let batch = &calls[call_index..batch_end];
@@ -527,7 +529,7 @@ where
     tracing::debug!(
         tool_call_id = %call.id,
         tool_name = %call.name,
-        safety_class = ?executor.safety_class(&call.name),
+        safety_class = ?executor.safety_class_for_call(&call),
         "local runtime tool requested"
     );
 

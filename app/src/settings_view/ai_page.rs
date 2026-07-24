@@ -3627,6 +3627,7 @@ pub enum AISettingsPageAction {
     ToggleAwsBedrockCredentialsEnabled,
     RefreshAwsBedrockCredentials,
     TestOllamaConnection,
+    SetOllamaModel(String),
     ToggleCloudAgentComputerUse,
     ToggleFileBasedMcp,
     ToggleIncludeAgentCommandsInHistory,
@@ -4371,12 +4372,22 @@ impl TypedActionView for AISettingsPageView {
                 });
                 ctx.notify();
             }
+            AISettingsPageAction::SetOllamaModel(model) => {
+                let model = model.trim();
+                let model = (!model.is_empty()).then(|| model.to_string());
+                ApiKeyManager::handle(ctx).update(ctx, |manager, ctx| {
+                    manager.set_ollama_model(model, ctx);
+                });
+                ctx.notify();
+            }
             AISettingsPageAction::TestOllamaConnection => {
                 let keys = ApiKeyManager::as_ref(ctx).keys().clone();
-                let base_url = keys
-                    .ollama_base_url
-                    .filter(|url| !url.trim().is_empty())
-                    .unwrap_or_else(|| "http://localhost:11434".to_string());
+                let base_url = crate::ai::ollama::normalize_base_url(
+                    &keys
+                        .ollama_base_url
+                        .filter(|url| !url.trim().is_empty())
+                        .unwrap_or_else(|| "http://localhost:11434".to_string()),
+                );
                 let selected_model = keys
                     .ollama_model
                     .map(|model| model.trim().to_string())
@@ -9450,20 +9461,31 @@ impl SettingsWidget for AwsBedrockWidget {
 
 struct OllamaWidget {
     base_url_editor: ViewHandle<EditorView>,
-    model_editor: ViewHandle<EditorView>,
+    model_dropdown: ViewHandle<FilterableDropdown<AISettingsPageAction>>,
     api_key_editor: ViewHandle<EditorView>,
     test_button: ViewHandle<ActionButton>,
 }
 
 impl OllamaWidget {
+    const MODEL_DROPDOWN_WIDTH: f32 = 480.;
+
     fn new(ctx: &mut ViewContext<<Self as SettingsWidget>::View>) -> Self {
         let keys = ApiKeyManager::as_ref(ctx).keys().clone();
         let current_url = keys
             .ollama_base_url
             .clone()
             .unwrap_or_else(|| "http://localhost:11434".to_string());
-        let current_model = keys.ollama_model.clone().unwrap_or_default();
         let current_api_key = keys.ollama_api_key.clone().unwrap_or_default();
+        // Keep the last successful model list across Untested resets (e.g. URL edits),
+        // so the picker stays usable without forcing another Test first.
+        let last_known_models = std::rc::Rc::new(std::cell::RefCell::new(
+            match ApiKeyManager::as_ref(ctx).ollama_connection_state() {
+                OllamaConnectionState::Connected { models } => models.clone(),
+                OllamaConnectionState::Untested
+                | OllamaConnectionState::Testing
+                | OllamaConnectionState::Failed { .. } => Vec::new(),
+            },
+        ));
 
         let base_url_editor = ctx.add_typed_action_view(move |ctx| {
             let appearance = Appearance::as_ref(ctx);
@@ -9482,52 +9504,39 @@ impl OllamaWidget {
                 ..Default::default()
             };
             let mut editor = EditorView::single_line(options, ctx);
-            editor.set_placeholder_text("http://localhost:11434", ctx);
+            editor.set_placeholder_text("http://localhost:11434 or http://host:4000/v1", ctx);
             editor.set_buffer_text(&current_url, ctx);
             editor
         });
         ctx.subscribe_to_view(&base_url_editor, |_, editor, event, ctx| {
             if matches!(event, EditorEvent::Blurred | EditorEvent::Enter) {
                 let text = editor.as_ref(ctx).buffer_text(ctx);
-                let url = (!text.trim().is_empty()).then_some(text);
+                let normalized = (!text.trim().is_empty())
+                    .then(|| crate::ai::ollama::normalize_base_url(&text))
+                    .filter(|u| !u.is_empty());
+                if let Some(normalized) = normalized.as_ref() {
+                    if normalized != &text {
+                        editor.update(ctx, |editor, ctx| {
+                            editor.set_buffer_text(normalized, ctx);
+                        });
+                    }
+                }
                 ApiKeyManager::handle(ctx).update(ctx, |mgr, ctx| {
-                    mgr.set_ollama_base_url(url, ctx);
+                    mgr.set_ollama_base_url(normalized, ctx);
                 });
             }
         });
 
-        let model_editor = ctx.add_typed_action_view(move |ctx| {
-            let appearance = Appearance::as_ref(ctx);
-            let options = SingleLineEditorOptions {
-                is_password: false,
-                text: TextOptions {
-                    font_size_override: Some(appearance.ui_font_size()),
-                    font_family_override: Some(appearance.monospace_font_family()),
-                    text_colors_override: Some(TextColors {
-                        default_color: appearance.theme().active_ui_text_color(),
-                        disabled_color: appearance.theme().disabled_ui_text_color(),
-                        hint_color: appearance.theme().disabled_ui_text_color(),
-                    }),
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-            let mut editor = EditorView::single_line(options, ctx);
-            editor.set_placeholder_text("llama3.2", ctx);
-            if !current_model.is_empty() {
-                editor.set_buffer_text(&current_model, ctx);
-            }
-            editor
+        let model_dropdown = ctx.add_typed_action_view(|ctx| {
+            let mut dropdown = FilterableDropdown::new(ctx);
+            dropdown.set_top_bar_max_width(Self::MODEL_DROPDOWN_WIDTH);
+            dropdown.set_menu_width(Self::MODEL_DROPDOWN_WIDTH, ctx);
+            // Do not use set_menu_header_to_static here — that forces the closed
+            // top bar to always show the static label and hides the selection.
+            dropdown.set_placeholder("Select a model", ctx);
+            dropdown
         });
-        ctx.subscribe_to_view(&model_editor, |_, editor, event, ctx| {
-            if matches!(event, EditorEvent::Blurred | EditorEvent::Enter) {
-                let text = editor.as_ref(ctx).buffer_text(ctx);
-                let model = (!text.trim().is_empty()).then_some(text);
-                ApiKeyManager::handle(ctx).update(ctx, |mgr, ctx| {
-                    mgr.set_ollama_model(model, ctx);
-                });
-            }
-        });
+        Self::refresh_model_dropdown(&model_dropdown, &last_known_models, ctx);
 
         let api_key_editor = ctx.add_typed_action_view(move |ctx| {
             let appearance = Appearance::as_ref(ctx);
@@ -9573,33 +9582,74 @@ impl OllamaWidget {
             button
         });
 
-        let model_editor_clone = model_editor.clone();
+        let model_dropdown_clone = model_dropdown.clone();
         let test_button_clone = test_button.clone();
-        ctx.subscribe_to_model(
-            &ApiKeyManager::handle(ctx),
-            move |_, manager, event, ctx| {
-                if matches!(event, ApiKeyManagerEvent::KeysUpdated) {
-                    if let Some(model) = manager.as_ref(ctx).keys().ollama_model.clone() {
-                        model_editor_clone.update(ctx, |editor, ctx| {
-                            if editor.buffer_text(ctx).trim().is_empty() {
-                                editor.set_buffer_text(&model, ctx);
-                            }
-                        });
-                    }
-                    test_button_clone.update(ctx, |button, ctx| {
-                        Self::update_test_button(button, ctx);
-                    });
+        let last_known_models_for_sub = last_known_models.clone();
+        ctx.subscribe_to_model(&ApiKeyManager::handle(ctx), move |_, _, event, ctx| {
+            if matches!(event, ApiKeyManagerEvent::KeysUpdated) {
+                test_button_clone.update(ctx, |button, ctx| {
+                    Self::update_test_button(button, ctx);
+                });
+                // Defer dropdown refresh: selecting a FilterableDropdown item
+                // dispatches while that view is mid-update, and refreshing here
+                // synchronously causes a circular view update that drops the
+                // selection.
+                let dropdown = model_dropdown_clone.clone();
+                let last_known_models = last_known_models_for_sub.clone();
+                ctx.spawn(async {}, move |_, _, ctx| {
+                    Self::refresh_model_dropdown(&dropdown, &last_known_models, ctx);
                     ctx.notify();
-                }
-            },
-        );
+                });
+            }
+        });
 
         Self {
             base_url_editor,
-            model_editor,
+            model_dropdown,
             api_key_editor,
             test_button,
         }
+    }
+
+    fn refresh_model_dropdown(
+        dropdown: &ViewHandle<FilterableDropdown<AISettingsPageAction>>,
+        last_known_models: &std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+        ctx: &mut ViewContext<<Self as SettingsWidget>::View>,
+    ) {
+        let manager = ApiKeyManager::as_ref(ctx);
+        let selected = manager.keys().ollama_model.clone();
+        let mut models = match manager.ollama_connection_state() {
+            OllamaConnectionState::Connected { models } => {
+                *last_known_models.borrow_mut() = models.clone();
+                models.clone()
+            }
+            OllamaConnectionState::Untested
+            | OllamaConnectionState::Testing
+            | OllamaConnectionState::Failed { .. } => last_known_models.borrow().clone(),
+        };
+
+        if let Some(selected) = selected.as_ref() {
+            if !models.iter().any(|model| model == selected) {
+                models.push(selected.clone());
+            }
+        }
+        models.sort();
+
+        let items = models
+            .into_iter()
+            .map(|model| {
+                DropdownItem::new(model.clone(), AISettingsPageAction::SetOllamaModel(model))
+            })
+            .collect::<Vec<_>>();
+
+        dropdown.update(ctx, |dropdown, ctx| {
+            dropdown.set_items(items, ctx);
+            if let Some(model) = selected {
+                dropdown.set_selected_by_name(model, ctx);
+            } else {
+                dropdown.reset_selection(ctx);
+            }
+        });
     }
 
     fn update_test_button(button: &mut ActionButton, ctx: &mut ViewContext<ActionButton>) {
@@ -9655,19 +9705,19 @@ impl OllamaWidget {
             let (title, detail, icon, title_color) = match state {
                 OllamaConnectionState::Untested => (
                     "Connection not tested".to_string(),
-                    "Test the server to fetch available Ollama models.".to_string(),
+                    "Click Test to fetch models, then choose one from the Model list (click or Enter).".to_string(),
                     Icon::Info,
                     styles::header_font_color(true, app),
                 ),
                 OllamaConnectionState::Testing => (
-                    "Testing Ollama connection".to_string(),
+                    "Testing connection".to_string(),
                     "Fetching models from the configured server.".to_string(),
                     Icon::Loading,
                     styles::header_font_color(true, app),
                 ),
                 OllamaConnectionState::Connected { models } => {
                     let detail = if models.is_empty() {
-                        "Connected, but no Ollama models were returned.".to_string()
+                        "Connected, but no models were returned.".to_string()
                     } else {
                         let preview = models.iter().take(4).join(", ");
                         let remaining = models.len().saturating_sub(4);
@@ -9681,14 +9731,14 @@ impl OllamaWidget {
                         }
                     };
                     (
-                        "Connected to Ollama".to_string(),
+                        "Connected".to_string(),
                         detail,
                         Icon::CheckCircleBroken,
                         theme.ansi_fg_green().into(),
                     )
                 }
                 OllamaConnectionState::Failed { message } => (
-                    "Could not connect to Ollama".to_string(),
+                    "Could not connect".to_string(),
                     message.clone(),
                     Icon::AlertTriangle,
                     theme.ansi_fg_red().into(),
@@ -9751,22 +9801,27 @@ impl OllamaWidget {
         Flex::column()
             .with_spacing(16.)
             .with_child(render_ai_setting_description(
-                "Run AI dialogue against an Ollama server — local (http://localhost:11434) or a remote deployment. Requests go directly to Ollama, so no Warp credits are used. Provide an API key if your remote server requires bearer-token auth.",
+                "Run AI dialogue against an Ollama server or an OpenAI-compatible proxy such as LiteLLM — local (http://localhost:11434) or remote (e.g. http://host:4000 or http://host:4000/v1). Requests go directly to the server, so no Warp credits are used. Provide an API key if your remote server requires bearer-token auth. Agent Mode requires a model that supports tool calling (for example qwen3-coder); models without tools will return a provider error.",
                 true,
                 app,
             ))
             .with_child(render_input(
                 appearance,
-                "Ollama Base URL",
+                "Base URL",
                 self.base_url_editor.clone(),
                 app,
             ))
-            .with_child(render_input(
-                appearance,
-                "Model",
-                self.model_editor.clone(),
-                app,
-            ))
+            .with_child({
+                let label =
+                    Text::new_inline("Model", appearance.ui_font_family(), CONTENT_FONT_SIZE)
+                        .with_color(styles::header_font_color(true, app).into())
+                        .finish();
+                Flex::column()
+                    .with_spacing(8.)
+                    .with_child(label)
+                    .with_child(ChildView::new(&self.model_dropdown).finish())
+                    .finish()
+            })
             .with_child(render_input(
                 appearance,
                 "API Key (optional)",
@@ -9786,7 +9841,7 @@ impl SettingsWidget for OllamaWidget {
     type View = AISettingsPageView;
 
     fn search_terms(&self) -> &str {
-        "ollama local model llm inference"
+        "ollama litellm openai compatible local model llm inference"
     }
 
     fn render(
@@ -9802,7 +9857,7 @@ impl SettingsWidget for OllamaWidget {
             .with_child(
                 build_sub_header(
                     appearance,
-                    "Ollama (Local Models)",
+                    "Ollama / LiteLLM (Local Models)",
                     Some(styles::header_font_color(is_any_ai_enabled, app)),
                 )
                 .with_padding_bottom(HEADER_PADDING)

@@ -4,6 +4,7 @@
 //! Each provider (Ollama, OpenAI-compatible, etc.) implements this trait.
 
 pub mod ollama;
+pub mod text_tool_calls;
 
 use crate::error::ProviderError;
 use crate::messages::Message;

@@ -4,6 +4,18 @@ use serde_json::Value;
 
 pub mod agent_loop;
 
+/// Normalize a user-entered Ollama / LiteLLM / OpenAI-compatible base URL.
+///
+/// Strips trailing slashes and a trailing `/v1` so callers can always append
+/// `/v1/chat/completions` or `/v1/models` without doubling the prefix.
+pub fn normalize_base_url(url: &str) -> String {
+    let trimmed = url.trim().trim_end_matches('/');
+    match trimmed.strip_suffix("/v1") {
+        Some(without_v1) => without_v1.trim_end_matches('/').to_string(),
+        None => trimmed.to_string(),
+    }
+}
+
 pub struct OllamaClient {
     base_url: String,
     api_key: Option<String>,
@@ -141,17 +153,45 @@ pub struct OllamaModel {
     pub name: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct OpenAiModelsResponse {
+    data: Vec<OpenAiModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiModel {
+    id: String,
+}
+
 impl OllamaClient {
     pub fn new(base_url: String, api_key: Option<String>) -> Self {
         Self {
-            base_url: base_url.trim_end_matches('/').to_string(),
+            base_url: normalize_base_url(&base_url),
             api_key: api_key.filter(|k| !k.is_empty()),
             client: reqwest::Client::new(),
         }
     }
 
-    /// Fetch the list of locally-installed Ollama models.
+    /// Fetch available models from an Ollama or OpenAI-compatible server
+    /// (including LiteLLM).
+    ///
+    /// Tries Ollama's native `/api/tags` first, then falls back to the
+    /// OpenAI-compatible `/v1/models` endpoint used by LiteLLM and similar
+    /// proxies.
     pub async fn list_models(&self) -> Result<Vec<String>> {
+        match self.list_models_via_ollama_tags().await {
+            Ok(models) => Ok(models),
+            Err(ollama_err) => match self.list_models_via_openai().await {
+                Ok(models) => Ok(models),
+                Err(openai_err) => Err(anyhow!(
+                    "Could not list models from {} via /api/tags ({ollama_err}) or /v1/models ({openai_err})",
+                    self.base_url
+                )),
+            },
+        }
+    }
+
+    async fn list_models_via_ollama_tags(&self) -> Result<Vec<String>> {
         let url = format!("{}/api/tags", self.base_url);
         let mut req = self
             .client
@@ -163,14 +203,36 @@ impl OllamaClient {
         let resp = req
             .send()
             .await
-            .map_err(|e| anyhow!("Could not reach Ollama at {}: {}", self.base_url, e))?;
+            .map_err(|e| anyhow!("Could not reach server at {}: {}", self.base_url, e))?;
 
         if !resp.status().is_success() {
-            return Err(anyhow!("Ollama returned status {}", resp.status()));
+            return Err(anyhow!("server returned status {}", resp.status()));
         }
 
         let tags: TagsResponse = resp.json().await?;
         Ok(tags.models.into_iter().map(|m| m.name).collect())
+    }
+
+    async fn list_models_via_openai(&self) -> Result<Vec<String>> {
+        let url = format!("{}/v1/models", self.base_url);
+        let mut req = self
+            .client
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(5));
+        if let Some(key) = &self.api_key {
+            req = req.bearer_auth(key);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| anyhow!("Could not reach server at {}: {}", self.base_url, e))?;
+
+        if !resp.status().is_success() {
+            return Err(anyhow!("server returned status {}", resp.status()));
+        }
+
+        let models: OpenAiModelsResponse = resp.json().await?;
+        Ok(models.data.into_iter().map(|m| m.id).collect())
     }
 
     /// Send a chat completion request and return the full response text.
@@ -208,12 +270,12 @@ impl OllamaClient {
         let resp = req
             .send()
             .await
-            .map_err(|e| anyhow!("Ollama request failed: {}", e))?;
+            .map_err(|e| anyhow!("OpenAI-compatible request failed: {}", e))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("Ollama returned {}: {}", status, body));
+            return Err(anyhow!("Server returned {}: {}", status, body));
         }
 
         let chat_resp: ChatResponse = resp.json().await?;
@@ -221,9 +283,13 @@ impl OllamaClient {
             .choices
             .into_iter()
             .next()
-            .ok_or_else(|| anyhow!("Ollama returned no choices"))?;
+            .ok_or_else(|| anyhow!("Server returned no choices"))?;
         let text = choice.message.content.unwrap_or_default();
         let tool_calls = choice.message.tool_calls.unwrap_or_default();
         Ok(ChatCompletion { text, tool_calls })
     }
 }
+
+#[cfg(test)]
+#[path = "mod_test.rs"]
+mod tests;

@@ -2,7 +2,7 @@
   "roadmap": {
     "name": "Local Ollama Agent Runtime",
     "source": "dan_docs/reports/local_agent_runtime_competitive_gap_report.md",
-    "active_feature": "feat-008",
+    "active_feature": "feat-012",
     "status_values": [
       "not-started",
       "in-progress",
@@ -192,6 +192,89 @@
         "cargo run -p warp --bin warp-oss --features local_ollama_runtime_tool_use"
       ],
       "evidence": "2026-07-23: Phase A gate passed: harness 100/100, format and git diff checks, local_agent_runtime 29 automated tests, focused Warp local_runtime 32 tests, and local_agent_runtime clippy with -D warnings. Live parity passed over SSH to bcl-2 using Ollama 0.20.2, qwen3-coder:latest, and its 262144-token context: 15 sequential real model tool calls completed in 9.64s with exact pairing. Full Warp clippy remains independently blocked by two pre-existing warpui_core unnecessary_unwrap findings; cold macOS builds still require the Xcode Metal Toolchain."
+    },
+    {
+      "id": "feat-009",
+      "name": "LiteLLM / OpenAI-compatible local provider discovery",
+      "description": "Allow the existing Ollama local-runtime settings and provider path to talk to LiteLLM and other OpenAI-compatible proxies by normalizing /v1 base URLs and falling back from /api/tags to /v1/models.",
+      "phase": "Phase C",
+      "dependencies": [
+        "feat-008"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "Base URLs with a trailing /v1 are normalized before /v1/chat/completions and /v1/models are appended.",
+        "Settings Test Connection lists models from Ollama /api/tags or LiteLLM /v1/models.",
+        "Settings copy documents LiteLLM / OpenAI-compatible proxy support.",
+        "Focused provider unit tests cover URL normalization and OpenAI models JSON parsing."
+      ],
+      "verification": [
+        "cargo test -p local_agent_runtime",
+        "cargo clippy -p local_agent_runtime --all-targets --tests -- -D warnings",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-24: Extended OllamaClient and OllamaProvider list_models to fall back from /api/tags to /v1/models; normalize_base_url strips trailing /v1. Settings UI renamed to Ollama / LiteLLM and documents host:4000(/v1). Live probe against http://100.95.111.65:4000 returned /api/tags 404 and /v1/models 200 with 20 models. local_agent_runtime tests passed (9 unit + 22 integration, 1 ignored live). Clippy -D warnings and format --check passed for the crate."
+    },
+    {
+      "id": "feat-010",
+      "name": "Ollama/LiteLLM model picker dropdown",
+      "description": "Replace the free-text Ollama model field with a searchable dropdown populated from the connected model list.",
+      "phase": "Phase C",
+      "dependencies": [
+        "feat-009"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "Settings Model control is a FilterableDropdown filled from Connected models.",
+        "Selecting a model persists via ApiKeyManager.set_ollama_model.",
+        "Saved selection remains visible before Test Connection refreshes the full list."
+      ],
+      "verification": [
+        "./script/format --check",
+        "./script/run"
+      ],
+      "evidence": "2026-07-24: Replaced Ollama model text field with FilterableDropdown populated from Connected model list; SetOllamaModel persists selection. Settings copy notes tool-calling requirement. App rebuilt and launched via ./script/run."
+    },
+    {
+      "id": "feat-011",
+      "name": "Recover Qwen-style text tool calls from LiteLLM/Ollama",
+      "description": "When a local model emits <function=...> XML in assistant text instead of OpenAI tool_calls, parse those calls and continue the agent tool loop.",
+      "phase": "Phase C",
+      "dependencies": [
+        "feat-009"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "Qwen-style <function=name><parameter=...> XML in assistant text is parsed into ToolCall values.",
+        "Recovered calls set stop_reason to ToolUse so the runtime executes tools.",
+        "Unit tests cover file_glob_v2, shell command, and multi-call cases."
+      ],
+      "verification": [
+        "cargo test -p local_agent_runtime",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-24: Confirmed qwen3-coder via LiteLLM returns finish_reason=stop with tool_calls=null and Qwen XML in content. Added extract_qwen_style_tool_calls recovery in OllamaProvider chat/chat_stream. Unit tests 4/4; local_agent_runtime suite passed; clippy -D warnings passed."
+    },
+    {
+      "id": "feat-012",
+      "name": "Local agent read-only shell auto-run and search guidance",
+      "description": "Infer is_read_only for find/ls-style shell commands, withhold Qwen tool XML from streamed text, and document that file_glob_v2 is project-scoped while home directory searches should use read-only shell.",
+      "phase": "Phase C",
+      "dependencies": [
+        "feat-011"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "find/ls-style shell commands without an explicit is_read_only flag are treated as read-only for scheduling and Warp auto-execute.",
+        "Streamed assistant text withholds Qwen <function=...> markup from TextDelta events.",
+        "Tool schemas and local system prompt guide folder searches under ~ via read-only shell."
+      ],
+      "verification": [
+        "cargo test -p local_agent_runtime",
+        "cargo test -p warp infer_shell_command --lib --features local_ollama_runtime_tool_use",
+        "cargo clippy -p local_agent_runtime --all-targets --tests -- -D warnings"
+      ],
+      "evidence": "2026-07-24: Added infer_shell_command_is_read_only (+ /dev/null redirect allowance), safety_class_for_call ReadOnly path, stream markup withholding, and prompt/schema search guidance. local_agent_runtime and focused Warp infer tests passed."
     }
   ],
   "future_phases": [
@@ -211,7 +294,7 @@
       "scope": [
         "local web search and fetch",
         "durable plan and todo state",
-        "generic OpenAI-compatible providers",
+        "remaining generic OpenAI-compatible provider polish",
         "model-specific prompt packs",
         "multimodal provider support",
         "Git workflow helpers"

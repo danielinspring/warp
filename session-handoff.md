@@ -2,15 +2,15 @@
 
 ## Current Objective
 
-Review the completed Local Ollama Agent Phase A implementation and decide the next delivery step.
+Verify the LiteLLM Settings Test Connection path in a bundled OSS build, then choose the next Phase B/C feature.
 
 ## Last Updated
 
-2026-07-23
+2026-07-24
 
 ## Active Feature
 
-`feat-008` — Phase A reliability gate (`done`)
+`feat-009` — LiteLLM / OpenAI-compatible local provider discovery (`done`)
 
 ## Branch and Commit
 
@@ -20,36 +20,31 @@ Review the completed Local Ollama Agent Phase A implementation and decide the ne
 ## Current State
 
 - Existing Warp project rules remain in `AGENTS.md`.
-- Harness startup, scope, verification, definition-of-done, and end-of-session procedures were added.
-- `feature_list.json` tracks the Phase A dependency graph.
-- Structural validation passed at 100/100.
-- Phase A transcript, context, recovery, ask-user, permissions, and prompt work is implemented.
-- Formatting, local runtime tests/clippy, and focused Warp tests passed.
-- Live 15-tool-call parity passed over SSH against `bcl-2` with `qwen3-coder:latest`.
+- Phase A local Ollama runtime work is complete.
+- LiteLLM support reuses the Ollama settings/provider path:
+  - base URL trailing `/v1` is normalized
+  - model discovery falls back from `/api/tags` to `/v1/models`
+  - Settings UI documents Ollama / LiteLLM
+- Live probe against `http://100.95.111.65:4000` confirmed `/v1/models` works and `/api/tags` returns 404.
 
 ## Files Changed
 
-- `AGENTS.md`
 - `feature_list.json`
 - `progress.md`
-- `init.sh`
 - `session-handoff.md`
-- `app/src/ai/local_runtime_bridge.rs`
-- `app/src/ai/local_runtime_integration.rs`
-- `app/src/ai/local_runtime_integration_tests.rs`
-- `app/src/ai/local_runtime_spec.rs`
-- `crates/local_agent_runtime/`
+- `app/src/ai/agent/api.rs`
+- `app/src/ai/ollama/mod.rs`
+- `app/src/ai/ollama/mod_test.rs`
+- `app/src/settings_view/ai_page.rs`
+- `crates/local_agent_runtime/src/provider/ollama.rs`
+- `dan_docs/notes.md`
 
 ## Verification Evidence
 
-- Harness validator: 100/100; all five subsystems passed at 5/5.
+- `cargo test -p local_agent_runtime`: passed (9 unit + 22 integration; live/doc ignored).
+- `cargo clippy -p local_agent_runtime --all-targets --tests -- -D warnings`: passed.
 - `./script/format --check`: passed.
-- `git diff --check`: passed.
-- `cargo test -p local_agent_runtime`: passed (29 tests plus 1 ignored doc test).
-- Focused Warp local runtime tests: passed (32 tests).
-- Local runtime clippy with `-D warnings`: passed.
-- Live parity: passed with Ollama 0.20.2, `qwen3-coder:latest`, context 262,144; 15 tool calls in 9.64 seconds.
-- Warp clippy: blocked by pre-existing `warpui_core` lint failures.
+- Live LiteLLM: `/api/tags` 404, `/v1/models` 200 with 20 models.
 
 ## Blockers
 
@@ -59,11 +54,11 @@ Review the completed Local Ollama Agent Phase A implementation and decide the ne
 ## Next Session Startup
 
 1. Read `AGENTS.md`.
-2. Confirm all Phase A features are `done` in `feature_list.json`.
+2. Confirm `feat-009` is `done` in `feature_list.json`.
 3. Read `progress.md`.
-4. Review the implementation diff and verification evidence.
-5. Choose PR preparation or Phase B planning.
+4. Bundle/rebuild and Test Connection against LiteLLM.
+5. Choose the next Phase B/C feature after explicit approval.
 
 ## Recommended Next Step
 
-Review the Phase A diff and decide whether to prepare a PR.
+Rebuild the OSS app and confirm Settings → Ollama / LiteLLM → Test succeeds for `http://100.95.111.65:4000` (with or without `/v1`).

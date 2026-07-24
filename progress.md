@@ -2,8 +2,8 @@
 
 ## Current State
 
-**Last Updated:** 2026-07-23  
-**Active Feature:** `feat-008` — Phase A reliability gate  
+**Last Updated:** 2026-07-24  
+**Active Feature:** `feat-009` — LiteLLM / OpenAI-compatible local provider discovery  
 **Status:** Done
 
 ## What's Done
@@ -19,6 +19,7 @@
 - Added resumable ask-user bridging, request permission modes, and registry-derived truthful prompts.
 - Passed `./script/format --check`, 29 local runtime tests, 32 focused Warp tests, and local runtime clippy.
 - Passed the live 15-tool-call parity run against `bcl-2` with `qwen3-coder:latest` and a 262,144-token context window.
+- Extended the Ollama settings/provider path for LiteLLM and other OpenAI-compatible proxies: normalize trailing `/v1`, fall back from `/api/tags` to `/v1/models`, and update Settings copy.
 
 ## What's In Progress
 
@@ -26,9 +27,9 @@
 
 ## Next
 
-1. Review the Phase A diff.
+1. Rebuild/bundle the OSS app and verify Settings → Test against `http://100.95.111.65:4000` or `.../v1`.
 2. Decide whether to fix the unrelated repository-wide clippy findings before PR preparation.
-3. Select the first Phase B feature only after explicit approval.
+3. Select the next Phase B/C feature only after explicit approval.
 
 ## Blockers
 
@@ -44,6 +45,7 @@
 - Preserve Warp's existing action UI as the permission confirmation floor.
 - Never mutate persisted history for context compaction; compact only provider-facing copies.
 - Use a versioned `server_message_data` envelope to preserve exact local tool aliases and results.
+- Reuse the existing Ollama local path for LiteLLM instead of adding a separate settings provider, because chat already uses OpenAI-compatible `/v1/chat/completions`.
 
 ## Files Changed
 
@@ -52,10 +54,14 @@
 - `progress.md`
 - `init.sh`
 - `session-handoff.md`
+- `app/src/ai/agent/api.rs`
 - `app/src/ai/local_runtime_bridge.rs`
 - `app/src/ai/local_runtime_integration.rs`
 - `app/src/ai/local_runtime_integration_tests.rs`
 - `app/src/ai/local_runtime_spec.rs`
+- `app/src/ai/ollama/mod.rs`
+- `app/src/ai/ollama/mod_test.rs`
+- `app/src/settings_view/ai_page.rs`
 - `crates/local_agent_runtime/Cargo.toml`
 - `crates/local_agent_runtime/src/config.rs`
 - `crates/local_agent_runtime/src/error.rs`
@@ -65,18 +71,20 @@
 - `crates/local_agent_runtime/src/provider/ollama.rs`
 - `crates/local_agent_runtime/src/runtime.rs`
 - `crates/local_agent_runtime/tests/runtime_tests.rs`
+- `dan_docs/notes.md`
 
 ## Verification Evidence
 
 - `validate-harness.mjs --json`: passed, 100/100; instructions/state/verification/scope/lifecycle each 5/5.
 - `./script/format --check`: passed.
 - `git diff --check`: passed.
-- `cargo test -p local_agent_runtime`: passed (7 unit tests, 22 integration tests, 1 ignored doc test).
-- `cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use`: passed (32 focused tests).
+- `cargo test -p local_agent_runtime`: passed (9 unit tests, 22 integration tests, 1 ignored live test, 1 ignored doc test).
+- `cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use`: passed (32 focused tests) — Phase A evidence.
 - `cargo clippy -p local_agent_runtime --all-targets --tests -- -D warnings`: passed.
 - Live SSH parity: passed against `bcl-2`, Ollama 0.20.2, `qwen3-coder:latest`, context 262,144; 15 sequential tool calls completed in 9.64 seconds.
+- Live LiteLLM probe: `http://100.95.111.65:4000/api/tags` → 404; `/v1/models` → 200 with 20 models.
 - Warp clippy: blocked by two existing `warpui_core/src/elements/gui/hoverable.rs` `unnecessary_unwrap` failures.
 
 ## Recommended Next Step
 
-Review the Phase A implementation and choose whether to prepare it for a PR or begin Phase B planning.
+Rebuild the OSS bundle and confirm Settings Test Connection succeeds against the LiteLLM URL, then pick the next Phase B/C feature.

@@ -78,6 +78,15 @@ pub trait ToolExecutor: Send + Sync {
         ToolSafetyClass::Interactive
     }
 
+    /// Return the safety class for a concrete tool call.
+    ///
+    /// Defaults to [`Self::safety_class`] using the tool name. Implementors may
+    /// inspect arguments (for example `run_shell_command.is_read_only`) to
+    /// downgrade Interactive tools to ReadOnly when safe.
+    fn safety_class_for_call(&self, call: &ToolCall) -> ToolSafetyClass {
+        self.safety_class(&call.name)
+    }
+
     /// Check if a tool call can auto-execute (permission check).
     async fn check_permission(&self, call: &ToolCall) -> PermissionDecision;
 

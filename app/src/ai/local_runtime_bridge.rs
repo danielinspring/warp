@@ -401,6 +401,14 @@ impl ToolExecutor for WarpToolExecutor {
         self.registry.safety_class(tool_name)
     }
 
+    fn safety_class_for_call(&self, call: &ToolCall) -> ToolSafetyClass {
+        if call.name == "run_shell_command" && shell_command_is_read_only(&call.arguments) {
+            ToolSafetyClass::ReadOnly
+        } else {
+            self.safety_class(&call.name)
+        }
+    }
+
     async fn check_permission(&self, call: &ToolCall) -> PermissionDecision {
         if self.registry.permission_mode() == LocalRuntimePermissionMode::Plan
             && self.registry.safety_class(&call.name) != ToolSafetyClass::ReadOnly
@@ -465,10 +473,10 @@ pub fn build_tool_schemas() -> Vec<ToolSchema> {
     vec![
         ToolSchemaBuilder::new(
             "run_shell_command",
-            "Run a shell command in the user's terminal. Use this for any system operation.",
+            "Run a shell command in the user's terminal. Use this for any system operation. For read-only lookups (find, ls, pwd, cat, mdfind, grep, etc.) set is_read_only=true so the command can auto-run. To locate a directory by name outside the project, prefer a FAST scoped search that finishes quickly — on macOS: mdfind 'kMDItemFSName == \"folder-name\"c' | head -20; or find ~/codish -maxdepth 5 -type d -name 'folder-name' 2>/dev/null. Avoid unbounded find ~ without -maxdepth (it is slow and may block the terminal).",
         )
         .required_string("command", "The shell command to execute")
-        .optional_bool("is_read_only", "Whether the command is expected to avoid side effects")
+        .optional_bool("is_read_only", "Set true for commands with no side effects (find, ls, pwd, cat, mdfind, grep). Defaults to an automatic read-only heuristic when omitted.")
         .optional_bool("is_risky", "Whether the command should require user confirmation")
         .optional_bool("uses_pager", "Whether the command may open a pager")
         .build(),
@@ -490,13 +498,16 @@ pub fn build_tool_schemas() -> Vec<ToolSchema> {
         .build(),
         ToolSchemaBuilder::new(
             "file_glob_v2",
-            "Find files matching one or more glob patterns.",
+            "Find files matching glob patterns under search_dir (defaults to the current project/working directory). This is project-scoped and lists files, not an arbitrary filesystem folder search. To find a directory by name under the home folder, use run_shell_command with is_read_only=true (prefer mdfind or find with -maxdepth under a known path like ~/codish), not file_glob_v2.",
         )
         .required_string_array(
             "patterns",
             "Glob patterns such as '**/*.rs' or 'src/**/*.ts'",
         )
-        .optional_string("search_dir", "Base directory to search from")
+        .optional_string(
+            "search_dir",
+            "Base directory to search from (defaults to the current working directory)",
+        )
         .build(),
         ToolSchemaBuilder::new(
             "search_codebase",
@@ -957,6 +968,36 @@ fn action_result_to_content(result: &AIAgentActionResultType) -> String {
             "output": output,
         })
         .to_string(),
+        AIAgentActionResultType::RequestCommandOutput(
+            RequestCommandOutputResult::LongRunningCommandSnapshot {
+                command,
+                grid_contents,
+                block_id,
+                ..
+            },
+        ) => serde_json::json!({
+            "status": "long_running",
+            "command": command,
+            "block_id": block_id.to_string(),
+            "output": grid_contents,
+            "note": "Command is still running. Do not start another shell command until it finishes; use the partial output if sufficient, or wait and re-check with a shorter command.",
+        })
+        .to_string(),
+        AIAgentActionResultType::RequestCommandOutput(
+            RequestCommandOutputResult::CancelledBeforeExecution,
+        ) => serde_json::json!({
+            "status": "cancelled",
+            "error": "Shell command was cancelled before execution. A previous command may still be running in the terminal, or the user dismissed approval. Wait for the active command to finish, then retry with a single scoped read-only command.",
+        })
+        .to_string(),
+        AIAgentActionResultType::RequestCommandOutput(RequestCommandOutputResult::Denylisted {
+            command,
+        }) => serde_json::json!({
+            "status": "denied",
+            "command": command,
+            "error": "Command is on the denylist and cannot be executed.",
+        })
+        .to_string(),
         AIAgentActionResultType::ReadFiles(ReadFilesResult::Success { files }) => {
             file_contexts_to_json(files)
         }
@@ -1142,10 +1183,14 @@ pub fn tool_call_to_proto_tool(
                 &["command", "is_read_only", "is_risky", "uses_pager"],
                 &call.name,
             )?;
+            let command = required_string(&call.arguments, "command", &call.name)?;
+            let explicit_read_only = optional_bool(&call.arguments, "is_read_only")?;
+            let is_read_only =
+                explicit_read_only.unwrap_or_else(|| infer_shell_command_is_read_only(&command));
             Ok(Tool::RunShellCommand(
                 api::message::tool_call::RunShellCommand {
-                    command: required_string(&call.arguments, "command", &call.name)?,
-                    is_read_only: optional_bool(&call.arguments, "is_read_only")?.unwrap_or(false),
+                    command,
+                    is_read_only,
                     is_risky: optional_bool(&call.arguments, "is_risky")?.unwrap_or(false),
                     uses_pager: optional_bool(&call.arguments, "uses_pager")?.unwrap_or(false),
                     ..Default::default()
@@ -1627,6 +1672,115 @@ fn has_any_argument(arguments: &Value, names: &[&str]) -> bool {
     names.iter().any(|name| arguments.get(name).is_some())
 }
 
+/// Whether a `run_shell_command` call should be treated as read-only for scheduling
+/// and Warp auto-execute. Prefers an explicit `is_read_only` argument, otherwise
+/// applies a conservative command heuristic.
+fn shell_command_is_read_only(arguments: &Value) -> bool {
+    if let Some(Value::Bool(is_read_only)) = arguments.get("is_read_only") {
+        return *is_read_only;
+    }
+    arguments
+        .get("command")
+        .and_then(Value::as_str)
+        .is_some_and(infer_shell_command_is_read_only)
+}
+
+fn infer_shell_command_is_read_only(command: &str) -> bool {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let lowered = trimmed.to_ascii_lowercase();
+    const UNSAFE_MARKERS: &[&str] = &[
+        " rm ",
+        "rm ",
+        "sudo ",
+        " chmod ",
+        " chown ",
+        " mv ",
+        " cp ",
+        " dd ",
+        " mkfs",
+        " shutdown",
+        " reboot",
+        " kill ",
+        " pkill ",
+        " curl ",
+        " wget ",
+        "| sh",
+        "|bash",
+        "tee ",
+        "sed -i",
+        "truncate ",
+        "git commit",
+        "git push",
+        "git reset",
+        "git checkout",
+        "git switch",
+        "npm install",
+        "pip install",
+        "cargo install",
+    ];
+    let padded = format!(" {lowered} ");
+    if UNSAFE_MARKERS.iter().any(|marker| padded.contains(marker)) {
+        return false;
+    }
+    // Allow discarding stdout/stderr to /dev/null; treat other redirects as writes.
+    let without_null_redirects = lowered
+        .replace("2>/dev/null", "")
+        .replace("2> /dev/null", "")
+        .replace(">/dev/null", "")
+        .replace("> /dev/null", "");
+    if without_null_redirects.contains('>') {
+        return false;
+    }
+
+    // Strip common wrappers like `cd ... && find ...` and inspect each segment.
+    let segments = lowered
+        .split(['&', ';', '|', '\n'])
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty());
+    for segment in segments {
+        let first = segment
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .trim_start_matches("./");
+        const READ_ONLY_COMMANDS: &[&str] = &[
+            "ls", "find", "pwd", "cat", "head", "tail", "wc", "which", "type", "echo", "printf",
+            "rg", "grep", "egrep", "fgrep", "fd", "tree", "stat", "file", "du", "df", "date",
+            "whoami", "id", "env", "printenv", "uname", "hostname", "basename", "dirname",
+            "realpath", "readlink", "git", "cd", "true", "false", "test", "[", "mdfind", "locate",
+        ];
+        if !READ_ONLY_COMMANDS.contains(&first) {
+            return false;
+        }
+        if first == "git" {
+            let sub = segment.split_whitespace().nth(1).unwrap_or_default();
+            const READ_ONLY_GIT: &[&str] = &[
+                "status",
+                "log",
+                "diff",
+                "show",
+                "branch",
+                "tag",
+                "remote",
+                "ls-files",
+                "rev-parse",
+                "describe",
+                "blame",
+                "grep",
+                "shortlog",
+            ];
+            if !READ_ONLY_GIT.contains(&sub) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 fn validate_allowed_arguments(
     arguments: &Value,
     allowed: &[&str],
@@ -1907,6 +2061,59 @@ mod tests {
             name: name.to_string(),
             arguments,
         }
+    }
+
+    #[test]
+    fn infer_shell_command_is_read_only_for_find_and_ls() {
+        assert!(infer_shell_command_is_read_only(
+            r#"find ~ -type d -name "learn-harness-engineering" 2>/dev/null"#
+        ));
+        assert!(infer_shell_command_is_read_only(
+            r#"mdfind 'kMDItemFSName == "learn-harness-engineering"c' | head -20"#
+        ));
+        assert!(infer_shell_command_is_read_only(
+            "cd ~ && ls -la | grep -i learn"
+        ));
+        assert!(!infer_shell_command_is_read_only("rm -rf /tmp/foo"));
+        assert!(!infer_shell_command_is_read_only("echo hi > out.txt"));
+    }
+
+    #[test]
+    fn shell_action_results_serialize_long_running_and_cancelled_for_model() {
+        use crate::ai::agent::RequestCommandOutputResult;
+        use crate::terminal::model::block::BlockId;
+
+        let long_running = AIAgentActionResultType::RequestCommandOutput(
+            RequestCommandOutputResult::LongRunningCommandSnapshot {
+                block_id: BlockId::from("blk_1".to_string()),
+                command: "find ~ -type d -name foo".to_string(),
+                grid_contents: "/Users/me/foo\n".to_string(),
+                cursor: String::new(),
+                is_alt_screen_active: false,
+            },
+        );
+        let content = action_result_to_content(&long_running);
+        assert!(content.contains("\"status\":\"long_running\""));
+        assert!(content.contains("/Users/me/foo"));
+        assert!(content.contains("still running"));
+
+        let cancelled = AIAgentActionResultType::RequestCommandOutput(
+            RequestCommandOutputResult::CancelledBeforeExecution,
+        );
+        let content = action_result_to_content(&cancelled);
+        assert!(content.contains("\"status\":\"cancelled\""));
+        assert!(content.contains("previous command"));
+    }
+
+    #[test]
+    fn shell_command_is_read_only_respects_explicit_flag() {
+        assert!(!shell_command_is_read_only(&serde_json::json!({
+            "command": "find ~ -type d -name foo",
+            "is_read_only": false,
+        })));
+        assert!(shell_command_is_read_only(&serde_json::json!({
+            "command": "find ~ -type d -name foo",
+        })));
     }
 
     fn assert_invalid_input(call: ToolCall, expected_reason: &str) {

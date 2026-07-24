@@ -27,6 +27,23 @@ use crate::settings::{
 use crate::workspaces::user_workspaces::UserWorkspaces;
 use crate::workspaces::workspace::AiAutonomySettings;
 
+/// Whether every `>` / `>>` redirect in `command` targets `/dev/null` (or is absent).
+///
+/// Used so read-only searches like `find ... 2>/dev/null` can still auto-execute.
+fn command_only_null_redirects(command: &str) -> bool {
+    let lowered = command.to_ascii_lowercase();
+    let without_null = lowered
+        .replace("2>/dev/null", "")
+        .replace("2> /dev/null", "")
+        .replace(">>/dev/null", "")
+        .replace(">> /dev/null", "")
+        .replace(">/dev/null", "")
+        .replace("> /dev/null", "")
+        .replace("1>/dev/null", "")
+        .replace("1> /dev/null", "");
+    !without_null.contains('>')
+}
+
 /// Whether or not a command can be auto-executed, along with a detailed reason.
 #[derive(Copy, Clone, Debug, Deserialize, Serialize)]
 pub enum CommandExecutionPermission {
@@ -921,7 +938,9 @@ impl BlocklistAIPermissions {
                     );
                 }
 
-                if contains_redirection {
+                // Discarding stdout/stderr to /dev/null is common on read-only find/ls
+                // searches and is not a file write. Only treat other redirects as blocking.
+                if contains_redirection && !command_only_null_redirects(&normalized_command) {
                     return CommandExecutionPermission::Denied(
                         CommandExecutionPermissionDeniedReason::ContainsRedirection,
                     );

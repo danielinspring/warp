@@ -1,6 +1,8 @@
-//! Ollama LLM provider implementation.
+//! Ollama / LiteLLM / OpenAI-compatible LLM provider implementation.
 //!
-//! Talks to Ollama's OpenAI-compatible `/v1/chat/completions` endpoint.
+//! Talks to the OpenAI-compatible `/v1/chat/completions` endpoint.
+//! Model discovery tries Ollama's native `/api/tags` first, then falls back to
+//! `/v1/models` for LiteLLM and other OpenAI-compatible proxies.
 
 use std::collections::BTreeMap;
 
@@ -9,6 +11,7 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::text_tool_calls::extract_qwen_style_tool_calls;
 use super::{
     ChatRequest, ChatResponse, ChatStopReason, ChatStreamEvent, LLMProvider, ProviderCapabilities,
 };
@@ -16,10 +19,24 @@ use crate::error::ProviderError;
 use crate::messages::Message;
 use crate::tools::ToolCall;
 
-/// Configuration for connecting to an Ollama server.
+/// Normalize a user-entered Ollama / LiteLLM / OpenAI-compatible base URL.
+///
+/// Strips trailing slashes and a trailing `/v1` so callers can always append
+/// `/v1/chat/completions` or `/v1/models` without doubling the prefix.
+pub fn normalize_base_url(url: &str) -> String {
+    let trimmed = url.trim().trim_end_matches('/');
+    match trimmed.strip_suffix("/v1") {
+        Some(without_v1) => without_v1.trim_end_matches('/').to_string(),
+        None => trimmed.to_string(),
+    }
+}
+
+/// Configuration for connecting to an Ollama or OpenAI-compatible server.
 #[derive(Debug, Clone)]
 pub struct OllamaProviderConfig {
-    /// Base URL of the Ollama server (e.g., "http://localhost:11434").
+    /// Base URL of the server (e.g., "http://localhost:11434" or a LiteLLM
+    /// proxy such as "http://host:4000"). Trailing `/v1` is accepted and
+    /// normalized away.
     pub base_url: String,
     /// Optional API key for authentication.
     pub api_key: Option<String>,
@@ -37,7 +54,7 @@ impl Default for OllamaProviderConfig {
     }
 }
 
-/// Ollama LLM provider.
+/// Ollama / OpenAI-compatible LLM provider.
 pub struct OllamaProvider {
     config: OllamaProviderConfig,
     client: reqwest::Client,
@@ -46,13 +63,33 @@ pub struct OllamaProvider {
 impl OllamaProvider {
     pub fn new(config: OllamaProviderConfig) -> Self {
         Self {
-            config,
+            config: OllamaProviderConfig {
+                base_url: normalize_base_url(&config.base_url),
+                ..config
+            },
             client: reqwest::Client::new(),
         }
     }
 
-    /// Fetch the list of locally-installed models.
+    /// Fetch available models from an Ollama or OpenAI-compatible server.
+    ///
+    /// Tries Ollama's native `/api/tags` first, then falls back to the
+    /// OpenAI-compatible `/v1/models` endpoint used by LiteLLM and similar
+    /// proxies.
     pub async fn list_models(&self) -> Result<Vec<String>, ProviderError> {
+        match self.list_models_via_ollama_tags().await {
+            Ok(models) => Ok(models),
+            Err(ollama_err) => match self.list_models_via_openai().await {
+                Ok(models) => Ok(models),
+                Err(openai_err) => Err(ProviderError::RequestFailed(anyhow!(
+                    "Could not list models from {} via /api/tags ({ollama_err}) or /v1/models ({openai_err})",
+                    self.base_url()
+                ))),
+            },
+        }
+    }
+
+    async fn list_models_via_ollama_tags(&self) -> Result<Vec<String>, ProviderError> {
         let url = format!("{}/api/tags", self.base_url());
         let mut req = self
             .client
@@ -64,11 +101,11 @@ impl OllamaProvider {
         let resp = req
             .send()
             .await
-            .map_err(|e| ProviderError::RequestFailed(anyhow!("Could not reach Ollama: {}", e)))?;
+            .map_err(|e| ProviderError::RequestFailed(anyhow!("Could not reach server: {}", e)))?;
 
         if !resp.status().is_success() {
             return Err(ProviderError::RequestFailed(anyhow!(
-                "Ollama returned status {}",
+                "server returned status {}",
                 resp.status()
             )));
         }
@@ -80,8 +117,52 @@ impl OllamaProvider {
         Ok(tags.models.into_iter().map(|m| m.name).collect())
     }
 
+    async fn list_models_via_openai(&self) -> Result<Vec<String>, ProviderError> {
+        let url = format!("{}/v1/models", self.base_url());
+        let mut req = self
+            .client
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(5));
+        if let Some(key) = &self.config.api_key {
+            req = req.bearer_auth(key);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| ProviderError::RequestFailed(anyhow!("Could not reach server: {}", e)))?;
+
+        if !resp.status().is_success() {
+            return Err(ProviderError::RequestFailed(anyhow!(
+                "server returned status {}",
+                resp.status()
+            )));
+        }
+
+        let models: OpenAiModelsResponse = resp
+            .json()
+            .await
+            .map_err(|e| ProviderError::RequestFailed(e.into()))?;
+        Ok(models.data.into_iter().map(|m| m.id).collect())
+    }
+
     fn base_url(&self) -> &str {
         self.config.base_url.trim_end_matches('/')
+    }
+
+    /// Prefer structured `tool_calls` from the API; fall back to Qwen-style XML
+    /// embedded in the assistant text (common with some Ollama/LiteLLM models).
+    fn recover_tool_calls_from_text(mut response: ChatResponse) -> ChatResponse {
+        if !response.tool_calls.is_empty() {
+            return response;
+        }
+        let (cleaned_text, calls) = extract_qwen_style_tool_calls(&response.text);
+        if calls.is_empty() {
+            return response;
+        }
+        response.text = cleaned_text;
+        response.tool_calls = calls;
+        response.stop_reason = ChatStopReason::ToolUse;
+        response
     }
 
     fn translate_messages(messages: &[Message]) -> Vec<OllamaChatMessage> {
@@ -258,9 +339,11 @@ impl OllamaProvider {
             if let Some(content) = choice.delta.content {
                 if !content.is_empty() {
                     assembly.text.push_str(&content);
-                    let _ = event_tx
-                        .send(ChatStreamEvent::TextDelta { text: content })
-                        .await;
+                    if let Some(safe) = assembly.drain_streamable_text_prefix() {
+                        let _ = event_tx
+                            .send(ChatStreamEvent::TextDelta { text: safe })
+                            .await;
+                    }
                 }
             }
 
@@ -305,11 +388,11 @@ impl LLMProvider for OllamaProvider {
             }
         };
 
-        Ok(ChatResponse {
+        Ok(Self::recover_tool_calls_from_text(ChatResponse {
             text,
             tool_calls,
             stop_reason,
-        })
+        }))
     }
 
     async fn chat_stream(
@@ -336,7 +419,12 @@ impl LLMProvider for OllamaProvider {
                 buffer.drain(..=newline_index);
 
                 if Self::process_stream_line(&line, &mut assembly, &event_tx).await? {
-                    return Ok(assembly.into_response());
+                    if let Some(safe) = assembly.flush_streamable_text_prefix() {
+                        let _ = event_tx
+                            .send(ChatStreamEvent::TextDelta { text: safe })
+                            .await;
+                    }
+                    return Ok(Self::recover_tool_calls_from_text(assembly.into_response()));
                 }
             }
         }
@@ -345,7 +433,13 @@ impl LLMProvider for OllamaProvider {
             let _ = Self::process_stream_line(&buffer, &mut assembly, &event_tx).await?;
         }
 
-        Ok(assembly.into_response())
+        if let Some(safe) = assembly.flush_streamable_text_prefix() {
+            let _ = event_tx
+                .send(ChatStreamEvent::TextDelta { text: safe })
+                .await;
+        }
+
+        Ok(Self::recover_tool_calls_from_text(assembly.into_response()))
     }
 
     fn capabilities(&self) -> ProviderCapabilities {
@@ -506,11 +600,63 @@ impl RawArguments {
 #[derive(Debug, Default)]
 struct StreamAssembly {
     text: String,
+    /// How much of `text` has already been emitted as streamable (non-tool) text.
+    streamed_text_len: usize,
     tool_calls: BTreeMap<usize, StreamToolCallAssembly>,
     finish_reason: Option<String>,
 }
 
 impl StreamAssembly {
+    /// Emit only assistant prose that cannot still become Qwen-style tool markup.
+    ///
+    /// Once `<function=` / `<tool_call>` appears, withhold the remainder so the
+    /// UI does not show raw tool XML while we recover structured tool calls.
+    fn drain_streamable_text_prefix(&mut self) -> Option<String> {
+        self.drain_streamable_text_prefix_inner(true)
+    }
+
+    /// Flush any remaining withheld prose at end-of-stream (no partial-marker holdback).
+    fn flush_streamable_text_prefix(&mut self) -> Option<String> {
+        self.drain_streamable_text_prefix_inner(false)
+    }
+
+    fn drain_streamable_text_prefix_inner(&mut self, hold_partial_marker: bool) -> Option<String> {
+        let pending = &self.text[self.streamed_text_len..];
+        if pending.is_empty() {
+            return None;
+        }
+
+        let markup_rel = ["<function=", "<tool_call>"]
+            .iter()
+            .filter_map(|marker| pending.find(marker))
+            .min();
+
+        let emit_len = match markup_rel {
+            Some(0) => {
+                // Already inside tool markup — withhold everything.
+                return None;
+            }
+            Some(index) => index,
+            None if hold_partial_marker => {
+                // Hold back a short suffix that could be the start of a marker.
+                const HOLD: usize = "<tool_call>".len().saturating_sub(1);
+                if pending.len() <= HOLD {
+                    return None;
+                }
+                pending.len() - HOLD
+            }
+            None => pending.len(),
+        };
+
+        if emit_len == 0 {
+            return None;
+        }
+
+        let emit = pending[..emit_len].to_string();
+        self.streamed_text_len += emit_len;
+        Some(emit)
+    }
+
     fn apply_tool_call_deltas(&mut self, tool_calls: Vec<RawStreamToolCall>) {
         for call in tool_calls {
             let assembled = self.tool_calls.entry(call.index).or_default();
@@ -591,9 +737,42 @@ struct OllamaModelInfo {
     name: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct OpenAiModelsResponse {
+    data: Vec<OpenAiModelInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiModelInfo {
+    id: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_base_url_strips_trailing_slash_and_v1() {
+        assert_eq!(
+            normalize_base_url("http://localhost:11434/"),
+            "http://localhost:11434"
+        );
+        assert_eq!(
+            normalize_base_url("http://100.95.111.65:4000/v1"),
+            "http://100.95.111.65:4000"
+        );
+        assert_eq!(
+            normalize_base_url("http://100.95.111.65:4000/v1/"),
+            "http://100.95.111.65:4000"
+        );
+    }
+
+    #[test]
+    fn parses_openai_models_response() {
+        let raw = r#"{"data":[{"id":"qwen3-coder:latest","object":"model"}],"object":"list"}"#;
+        let parsed: OpenAiModelsResponse = serde_json::from_str(raw).unwrap();
+        assert_eq!(parsed.data[0].id, "qwen3-coder:latest");
+    }
 
     #[test]
     fn parses_tool_call_arguments_from_json_string() {
@@ -667,7 +846,7 @@ mod tests {
         let mut assembly = StreamAssembly::default();
 
         let done = OllamaProvider::process_stream_line(
-            r#"data: {"choices":[{"delta":{"content":"hel"},"finish_reason":null}]}"#,
+            r#"data: {"choices":[{"delta":{"content":"hello there friend"},"finish_reason":null}]}"#,
             &mut assembly,
             &tx,
         )
@@ -675,12 +854,26 @@ mod tests {
         .unwrap();
 
         assert!(!done);
-        assert_eq!(assembly.text, "hel");
-        assert_eq!(
-            rx.recv().await.unwrap(),
-            ChatStreamEvent::TextDelta {
-                text: "hel".to_string()
-            }
-        );
+        assert_eq!(assembly.text, "hello there friend");
+        // Partial marker holdback keeps a short suffix until flush/end.
+        let first = rx.recv().await.unwrap();
+        let ChatStreamEvent::TextDelta { text: first_text } = first;
+        assert!(assembly.text.starts_with(&first_text));
+        assert!(first_text.len() < assembly.text.len());
+
+        let flushed = assembly.flush_streamable_text_prefix().unwrap();
+        assert_eq!(format!("{first_text}{flushed}"), "hello there friend");
+    }
+
+    #[test]
+    fn stream_assembly_withholds_qwen_tool_markup_from_deltas() {
+        let mut assembly = StreamAssembly::default();
+        assembly
+            .text
+            .push_str("Looking.\n\n<function=file_glob_v2>\n");
+        let safe = assembly.drain_streamable_text_prefix().unwrap();
+        assert_eq!(safe, "Looking.\n\n");
+        assert!(assembly.drain_streamable_text_prefix().is_none());
+        assert!(assembly.flush_streamable_text_prefix().is_none());
     }
 }
