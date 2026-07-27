@@ -473,10 +473,10 @@ pub fn build_tool_schemas() -> Vec<ToolSchema> {
     vec![
         ToolSchemaBuilder::new(
             "run_shell_command",
-            "Run a shell command in the user's terminal. Use this for any system operation. For read-only lookups (find, ls, pwd, cat, mdfind, grep, etc.) set is_read_only=true so the command can auto-run. To locate a directory by name outside the project, prefer a FAST scoped search that finishes quickly — on macOS: mdfind 'kMDItemFSName == \"folder-name\"c' | head -20; or find ~/codish -maxdepth 5 -type d -name 'folder-name' 2>/dev/null. Avoid unbounded find ~ without -maxdepth (it is slow and may block the terminal).",
+            "Run a shell command in the user's terminal. Use this for any system operation. For read-only lookups (find, ls, pwd, cat, mdfind, grep, python3 -c, etc.) set is_read_only=true so the command can auto-run. On macOS prefer python3 (not python). For quick math/scripts use: python3 -c 'print(sum(range(1, 101)))'. To locate a directory by name outside the project, prefer a FAST scoped search — on macOS: mdfind 'kMDItemFSName == \"folder-name\"c' | head -20; or find ~/codish -maxdepth 5 -type d -name 'folder-name' 2>/dev/null. Avoid unbounded find ~ without -maxdepth.",
         )
         .required_string("command", "The shell command to execute")
-        .optional_bool("is_read_only", "Set true for commands with no side effects (find, ls, pwd, cat, mdfind, grep). Defaults to an automatic read-only heuristic when omitted.")
+        .optional_bool("is_read_only", "Set true for commands with no side effects (find, ls, pwd, cat, mdfind, grep, python3 -c). Defaults to an automatic read-only heuristic when omitted.")
         .optional_bool("is_risky", "Whether the command should require user confirmation")
         .optional_bool("uses_pager", "Whether the command may open a pager")
         .build(),
@@ -962,12 +962,26 @@ fn action_result_to_content(result: &AIAgentActionResultType) -> String {
             output,
             exit_code,
             ..
-        }) => serde_json::json!({
-            "command": command,
-            "exit_code": exit_code.value(),
-            "output": output,
-        })
-        .to_string(),
+        }) => {
+            let status = if exit_code.was_successful() {
+                "completed"
+            } else {
+                "failed"
+            };
+            // Put stdout first so weak models see the answer before metadata.
+            serde_json::json!({
+                "status": status,
+                "exit_code": exit_code.value(),
+                "stdout": output,
+                "command": command,
+                "instruction": if exit_code.was_successful() {
+                    "Command finished successfully. Answer the user using stdout. Do not invent timeouts or claim failure."
+                } else {
+                    "Command failed. Report exit_code and stdout/stderr to the user."
+                },
+            })
+            .to_string()
+        }
         AIAgentActionResultType::RequestCommandOutput(
             RequestCommandOutputResult::LongRunningCommandSnapshot {
                 command,
@@ -977,10 +991,10 @@ fn action_result_to_content(result: &AIAgentActionResultType) -> String {
             },
         ) => serde_json::json!({
             "status": "long_running",
+            "stdout": grid_contents,
             "command": command,
             "block_id": block_id.to_string(),
-            "output": grid_contents,
-            "note": "Command is still running. Do not start another shell command until it finishes; use the partial output if sufficient, or wait and re-check with a shorter command.",
+            "instruction": "Partial output only. If stdout already answers the user, report that answer immediately. Do not invent a timeout failure. Do not start another shell command until this one finishes.",
         })
         .to_string(),
         AIAgentActionResultType::RequestCommandOutput(
@@ -1193,6 +1207,13 @@ pub fn tool_call_to_proto_tool(
                     is_read_only,
                     is_risky: optional_bool(&call.arguments, "is_risky")?.unwrap_or(false),
                     uses_pager: optional_bool(&call.arguments, "uses_pager")?.unwrap_or(false),
+                    // Local runtime has no long-running-command poll tools; always wait
+                    // for completion (capped by ShellCommandExecutor::MAX_AGENT_DELAY_DURATION).
+                    wait_until_complete_value: Some(
+                        api::message::tool_call::run_shell_command::WaitUntilCompleteValue::WaitUntilComplete(
+                            true,
+                        ),
+                    ),
                     ..Default::default()
                 },
             ))
@@ -1752,9 +1773,22 @@ fn infer_shell_command_is_read_only(command: &str) -> bool {
             "rg", "grep", "egrep", "fgrep", "fd", "tree", "stat", "file", "du", "df", "date",
             "whoami", "id", "env", "printenv", "uname", "hostname", "basename", "dirname",
             "realpath", "readlink", "git", "cd", "true", "false", "test", "[", "mdfind", "locate",
+            // Interpreter one-liners are handled below (require -c/-e).
+            "python", "python3", "node", "nodejs", "ruby", "perl",
         ];
         if !READ_ONLY_COMMANDS.contains(&first) {
             return false;
+        }
+        if matches!(
+            first,
+            "python" | "python3" | "node" | "nodejs" | "ruby" | "perl"
+        ) {
+            // Only treat pure -c/-e eval one-liners as read-only compute.
+            let has_eval_flag = segment.split_whitespace().any(|t| t == "-c" || t == "-e");
+            if !has_eval_flag {
+                return false;
+            }
+            continue;
         }
         if first == "git" {
             let sub = segment.split_whitespace().nth(1).unwrap_or_default();
@@ -2074,6 +2108,13 @@ mod tests {
         assert!(infer_shell_command_is_read_only(
             "cd ~ && ls -la | grep -i learn"
         ));
+        assert!(infer_shell_command_is_read_only(
+            r#"python3 -c "print(sum(range(1, 101)))""#
+        ));
+        assert!(infer_shell_command_is_read_only(
+            r#"python -c "print(100*101//2)""#
+        ));
+        assert!(!infer_shell_command_is_read_only("python3 script.py"));
         assert!(!infer_shell_command_is_read_only("rm -rf /tmp/foo"));
         assert!(!infer_shell_command_is_read_only("echo hi > out.txt"));
     }
@@ -2095,7 +2136,7 @@ mod tests {
         let content = action_result_to_content(&long_running);
         assert!(content.contains("\"status\":\"long_running\""));
         assert!(content.contains("/Users/me/foo"));
-        assert!(content.contains("still running"));
+        assert!(content.contains("Partial output") || content.contains("stdout"));
 
         let cancelled = AIAgentActionResultType::RequestCommandOutput(
             RequestCommandOutputResult::CancelledBeforeExecution,
@@ -2103,6 +2144,29 @@ mod tests {
         let content = action_result_to_content(&cancelled);
         assert!(content.contains("\"status\":\"cancelled\""));
         assert!(content.contains("previous command"));
+    }
+
+    #[test]
+    fn completed_shell_result_puts_stdout_and_forbids_invented_timeout() {
+        use crate::ai::agent::RequestCommandOutputResult;
+        use crate::terminal::model::block::BlockId;
+        use warp_core::command::ExitCode;
+
+        let completed = AIAgentActionResultType::RequestCommandOutput(
+            RequestCommandOutputResult::Completed {
+                block_id: BlockId::from("blk_1".to_string()),
+                command: r#"python3 -c "print(sum(range(1, 101)))""#.to_string(),
+                output: "5050\n".to_string(),
+                exit_code: ExitCode::from(0),
+                start_ts: None,
+                completed_ts: None,
+            },
+        );
+        let content = action_result_to_content(&completed);
+        assert!(content.contains("\"status\":\"completed\""));
+        assert!(content.contains("5050"));
+        assert!(content.contains("\"stdout\""));
+        assert!(content.contains("Do not invent timeouts"));
     }
 
     #[test]

@@ -344,6 +344,8 @@ where
         history.push_assistant(response_text, calls.clone());
         let mut should_stop = false;
         let mut call_index = 0;
+        let mut any_tool_error = false;
+        let mut executed_any_tool = false;
         while call_index < calls.len() {
             if is_cancelled(&cancel_rx) {
                 synthesize_cancelled_tool_results(&calls[call_index..], &mut history, sink).await;
@@ -386,6 +388,10 @@ where
                 };
 
                 for outcome in outcomes {
+                    executed_any_tool = true;
+                    if outcome.result.is_error {
+                        any_tool_error = true;
+                    }
                     emit_tool_outcome(&outcome, sink).await;
                     history.push_tool_result(&outcome.call_id, outcome.result.clone());
                     if outcome.stop_after {
@@ -422,6 +428,10 @@ where
                 }
             };
 
+            executed_any_tool = true;
+            if outcome.result.is_error {
+                any_tool_error = true;
+            }
             emit_tool_outcome(&outcome, sink).await;
             history.push_tool_result(&outcome.call_id, outcome.result.clone());
             if outcome.stop_after {
@@ -429,6 +439,20 @@ where
                 break;
             }
             call_index += 1;
+        }
+
+        // Weak local models often ignore successful tool results and invent timeouts.
+        // A short grounding cue before the next LLM turn keeps them on the tool output.
+        if executed_any_tool && !should_stop {
+            if any_tool_error {
+                history.push_user(
+                    "Tool results are above (some failed). Answer from those results only. Do not invent different errors or timeouts.",
+                );
+            } else {
+                history.push_user(
+                    "Tool results are above and succeeded. Answer the user now using only those results (e.g. command output). Do not apologize, do not invent timeouts, and do not re-run the same command unless the user asks.",
+                );
+            }
         }
 
         if should_stop {

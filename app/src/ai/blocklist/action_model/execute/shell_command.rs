@@ -263,12 +263,11 @@ impl ShellCommandExecutor {
                     } else {
                         command.clone()
                     };
-                // Local Ollama runtime has no long-running-command poll tools. When the flag is
-                // on and the tool asked to wait, block until completion (capped) instead of the
-                // default 2s snapshot path used by cloud agents.
-                let delay = if *wait_until_completion
-                    && warp_core::features::FeatureFlag::LocalOllamaRuntimeToolUse.is_enabled()
-                {
+                // Honor wait_until_completion (proto default when unset is "wait").
+                // Local Ollama has no LRC poll tools, so waiting is required for tool
+                // results. Cloud agents that want the 2s snapshot path set
+                // wait_until_complete=false explicitly.
+                let delay = if *wait_until_completion {
                     Some(ShellCommandDelay::OnCompletion)
                 } else {
                     None

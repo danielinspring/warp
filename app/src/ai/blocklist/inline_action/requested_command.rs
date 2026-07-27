@@ -1302,6 +1302,75 @@ impl RequestedCommandView {
         }
     }
 
+    /// Text shown inside the expanded toggle for a finished shell command.
+    fn finished_command_result_text(&self, app: &AppContext) -> String {
+        let command = self.command_text().to_string();
+        let terminal_model = self.terminal_model.lock();
+        if let Some(block) = terminal_model
+            .block_list()
+            .block_for_ai_action_id(&self.action_id)
+        {
+            let output = block.output_with_secrets_unobfuscated();
+            let exit = block.exit_code();
+            let output = output.trim_end();
+            return if output.is_empty() {
+                format!("{command}\n\n(exit {})", exit.value())
+            } else {
+                format!("{command}\n\n{output}")
+            };
+        }
+        drop(terminal_model);
+
+        let Some(status) = self
+            .action_model
+            .as_ref(app)
+            .get_action_status(&self.action_id)
+        else {
+            return command;
+        };
+        let Some(finished) = status.finished_result() else {
+            return command;
+        };
+        match &finished.result {
+            AIAgentActionResultType::RequestCommandOutput(
+                RequestCommandOutputResult::Completed {
+                    command,
+                    output,
+                    exit_code,
+                    ..
+                },
+            ) => {
+                let output = output.trim_end();
+                if output.is_empty() {
+                    format!("{command}\n\n(exit {})", exit_code.value())
+                } else {
+                    format!("{command}\n\n{output}")
+                }
+            }
+            AIAgentActionResultType::RequestCommandOutput(
+                RequestCommandOutputResult::LongRunningCommandSnapshot {
+                    command,
+                    grid_contents,
+                    ..
+                },
+            ) => {
+                let output = grid_contents.trim_end();
+                if output.is_empty() {
+                    format!("{command}\n\n(still running or no output captured)")
+                } else {
+                    format!("{command}\n\n{output}")
+                }
+            }
+            AIAgentActionResultType::RequestCommandOutput(
+                RequestCommandOutputResult::CancelledBeforeExecution,
+            ) => format!("{command}\n\n(cancelled before execution)"),
+            AIAgentActionResultType::RequestCommandOutput(
+                RequestCommandOutputResult::Denylisted { command },
+            ) => format!("{command}\n\n(blocked by denylist)"),
+            _ => command,
+        }
+    }
+
     fn get_expansion_config(
         &self,
         requested_command_block: Option<&Block>,
@@ -1379,17 +1448,15 @@ impl View for RequestedCommandView {
         let is_input_pinned_to_top =
             *InputModeSettings::as_ref(app).input_mode.value() == InputMode::PinnedToTop;
 
-        // When expanded details are rendered using a regular block, having a non-zero horizontal
-        // margin while toggled expanded will cause the body to look wider than the header.
-        // The expanded details should also appear connected to the header, so we remove bottom margin in this case.
+        // When expanded details are rendered using a regular live terminal block
+        // (running commands only), connect the header to the block below.
+        // Finished commands render their output inline inside this toggle box instead.
         let is_rendered_above_expanded_command_block = {
             let terminal_model = self.terminal_model.lock();
 
             is_last_output_message_in_output
                 && self.action_type.is_requested_command()
-                && action_status.as_ref().is_some_and(|status| {
-                    status.is_running() || (status.is_success() || status.is_failed())
-                })
+                && action_status.as_ref().is_some_and(|status| status.is_running())
                 && !is_input_pinned_to_top
                 && self.is_header_expanded
                 && terminal_model
@@ -1415,11 +1482,19 @@ impl View for RequestedCommandView {
             && self.action_type.is_mcp_tool()
             && !self.command_text.is_empty();
 
+        // Finished shell commands: show command + stdout inside the toggle box
+        // (instead of only revealing a separate terminal block beneath the header).
+        let should_render_command_result = self.is_header_expanded
+            && self.action_type.is_requested_command()
+            && action_status.as_ref().is_some_and(|status| status.is_done())
+            && !should_render_editor;
+
         let has_citations_footer =
             !self.derived_from_citations.is_empty() && !self.block_model.status(app).is_streaming();
         let header_element = self.render_header(
             !should_render_editor
                 && !should_render_mcp_content
+                && !should_render_command_result
                 && !is_rendered_above_expanded_command_block
                 && !has_citations_footer,
             app,
@@ -1500,6 +1575,46 @@ impl View for RequestedCommandView {
                     .with_background(theme.background())
                     .with_corner_radius(CornerRadius::with_bottom(Radius::Pixels(8.)))
                     .finish(),
+            );
+        }
+
+        if should_render_command_result {
+            let content_text = self.finished_command_result_text(app);
+            let text_element = Text::new(
+                content_text,
+                appearance.monospace_font_family(),
+                appearance.monospace_font_size(),
+            )
+            .with_color(blended_colors::text_main(theme, theme.background()))
+            .with_selectable(true)
+            .finish();
+
+            // Reuse MCP selection handle storage for finished shell output.
+            let selected_text = self.mcp_content_selected_text.clone();
+            let selectable_text = SelectableArea::new(
+                self.mcp_content_selection_handle.clone(),
+                #[allow(clippy::unwrap_used)]
+                move |selection_args, _, _| {
+                    *selected_text.write().unwrap() = selection_args.selection;
+                },
+                text_element,
+            )
+            .on_selection_updated(|ctx, _| {
+                ctx.dispatch_typed_action(RequestedCommandViewAction::SelectText);
+            })
+            .finish();
+
+            content.add_child(
+                ConstrainedBox::new(
+                    Container::new(selectable_text)
+                        .with_horizontal_padding(INLINE_ACTION_HORIZONTAL_PADDING)
+                        .with_vertical_padding(REQUESTED_COMMAND_BODY_VERTICAL_PADDING)
+                        .with_background(theme.background())
+                        .with_corner_radius(CornerRadius::with_bottom(Radius::Pixels(8.)))
+                        .finish(),
+                )
+                .with_max_height(MAX_EDITOR_HEIGHT)
+                .finish(),
             );
         }
 

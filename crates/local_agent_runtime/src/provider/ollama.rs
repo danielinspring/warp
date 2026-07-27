@@ -152,13 +152,28 @@ impl OllamaProvider {
     /// Prefer structured `tool_calls` from the API; fall back to Qwen-style XML
     /// embedded in the assistant text (common with some Ollama/LiteLLM models).
     fn recover_tool_calls_from_text(mut response: ChatResponse) -> ChatResponse {
+        // Drop empty-name structured calls so text recovery is not blocked by junk.
+        response.tool_calls.retain(|call| !call.name.is_empty());
+
         if !response.tool_calls.is_empty() {
+            // Still strip raw markup from prose so the UI never shows the XML
+            // next to a real structured tool card.
+            if super::text_tool_calls::contains_tool_markup(&response.text) {
+                let (cleaned_text, _) = extract_qwen_style_tool_calls(&response.text);
+                response.text = cleaned_text;
+            }
             return response;
         }
+
         let (cleaned_text, calls) = extract_qwen_style_tool_calls(&response.text);
         if calls.is_empty() {
             return response;
         }
+        tracing::info!(
+            recovered_tool_count = calls.len(),
+            tools = %calls.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(","),
+            "recovered Qwen-style tool calls from assistant text"
+        );
         response.text = cleaned_text;
         response.tool_calls = calls;
         response.stop_reason = ChatStopReason::ToolUse;
@@ -193,7 +208,8 @@ impl OllamaProvider {
                                     r#type: "function".to_string(),
                                     function: OllamaFunction {
                                         name: tc.name.clone(),
-                                        arguments: tc.arguments.to_string(),
+                                        arguments: serde_json::to_string(&tc.arguments)
+                                            .unwrap_or_else(|_| "{}".to_string()),
                                     },
                                 })
                                 .collect(),
@@ -212,7 +228,9 @@ impl OllamaProvider {
                 }
                 Message::ToolResult(t) => OllamaChatMessage {
                     role: "tool".to_string(),
-                    content: Some(t.result.content.clone()),
+                    // Prefix makes success/failure hard for weak models to ignore when
+                    // they would otherwise invent timeouts after a green shell card.
+                    content: Some(format_tool_result_content(&t.result)),
                     tool_call_id: Some(t.call_id.clone()),
                     tool_calls: None,
                 },
@@ -455,6 +473,20 @@ impl LLMProvider for OllamaProvider {
     }
 }
 
+fn format_tool_result_content(result: &crate::tools::ToolCallResult) -> String {
+    if result.is_error {
+        format!(
+            "TOOL_ERROR\n{}\n\nReport this error to the user. Do not invent a different failure reason.",
+            result.content
+        )
+    } else {
+        format!(
+            "TOOL_SUCCESS (authoritative)\n{}\n\nAnswer the user from this result now. Do not invent timeouts, environment failures, or claim the tool failed.",
+            result.content
+        )
+    }
+}
+
 // --- Wire types for Ollama's OpenAI-compatible API ---
 
 #[derive(Debug, Serialize)]
@@ -626,7 +658,7 @@ impl StreamAssembly {
             return None;
         }
 
-        let markup_rel = ["<function=", "<tool_call>"]
+        let markup_rel = ["<function=", "<function name=", "<tool_call>"]
             .iter()
             .filter_map(|marker| pending.find(marker))
             .min();
@@ -639,15 +671,20 @@ impl StreamAssembly {
             Some(index) => index,
             None if hold_partial_marker => {
                 // Hold back a short suffix that could be the start of a marker.
-                const HOLD: usize = "<tool_call>".len().saturating_sub(1);
+                const HOLD: usize = "<function name=".len().saturating_sub(1);
                 if pending.len() <= HOLD {
                     return None;
                 }
-                pending.len() - HOLD
+                floor_char_boundary(pending, pending.len() - HOLD)
             }
             None => pending.len(),
         };
 
+        if emit_len == 0 {
+            return None;
+        }
+
+        let emit_len = floor_char_boundary(pending, emit_len);
         if emit_len == 0 {
             return None;
         }
@@ -698,6 +735,18 @@ impl StreamAssembly {
             stop_reason,
         }
     }
+}
+
+/// Largest byte index ≤ `index` that sits on a UTF-8 char boundary.
+fn floor_char_boundary(s: &str, index: usize) -> usize {
+    if index >= s.len() {
+        return s.len();
+    }
+    let mut i = index;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
 }
 
 #[derive(Debug, Default)]

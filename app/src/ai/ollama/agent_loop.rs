@@ -78,8 +78,14 @@ async fn run_turn(
     let messages = build_messages(&params);
 
     let client = OllamaClient::new(cfg.base_url.clone(), cfg.api_key.clone());
+    // Advertise built-in tools so models that honor OpenAI tool calling can use
+    // them. Qwen-style XML in content is still recovered inside `chat_with_tools`.
+    let tools = crate::ai::local_runtime_bridge::build_tool_schemas()
+        .into_iter()
+        .map(|schema| schema.to_openai_tool())
+        .collect::<Vec<_>>();
     let completion = client
-        .chat_with_tools(&cfg.model, messages, None)
+        .chat_with_tools(&cfg.model, messages, Some(tools))
         .await
         .map_err(AIApiError::Other)?;
 
@@ -327,10 +333,16 @@ fn tool_call_to_action(
 
     let proto_tool = match tc.function.name.as_str() {
         "run_shell_command" => {
-            let args: serde_json::Value = serde_json::from_str(&tc.function.arguments).ok()?;
+            let args: serde_json::Value = serde_json::from_str(&tc.function.arguments)
+                .unwrap_or_else(|_| serde_json::json!({ "command": tc.function.arguments }));
             let command = args.get("command")?.as_str()?.to_string();
+            let is_read_only = args
+                .get("is_read_only")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             Tool::RunShellCommand(api::message::tool_call::RunShellCommand {
                 command,
+                is_read_only,
                 ..Default::default()
             })
         }

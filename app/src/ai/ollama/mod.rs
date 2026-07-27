@@ -285,7 +285,45 @@ impl OllamaClient {
             .next()
             .ok_or_else(|| anyhow!("Server returned no choices"))?;
         let text = choice.message.content.unwrap_or_default();
-        let tool_calls = choice.message.tool_calls.unwrap_or_default();
+        let mut tool_calls = choice.message.tool_calls.unwrap_or_default();
+        tool_calls.retain(|tc| !tc.function.name.is_empty());
+
+        // Some models (esp. Qwen via LiteLLM/Ollama) ignore structured tool_calls
+        // and emit XML like <function=run_shell_command>… in content instead.
+        if tool_calls.is_empty() {
+            let (cleaned, recovered) =
+                local_agent_runtime::provider::text_tool_calls::extract_qwen_style_tool_calls(
+                    &text,
+                );
+            if !recovered.is_empty() {
+                let tool_calls = recovered
+                    .into_iter()
+                    .map(|call| ToolCallParsed {
+                        id: call.id,
+                        kind: "function".to_string(),
+                        function: ToolCallFunctionParsed {
+                            name: call.name,
+                            arguments: serde_json::to_string(&call.arguments)
+                                .unwrap_or_else(|_| "{}".to_string()),
+                        },
+                    })
+                    .collect();
+                return Ok(ChatCompletion {
+                    text: cleaned,
+                    tool_calls,
+                });
+            }
+        } else if local_agent_runtime::provider::text_tool_calls::contains_tool_markup(&text) {
+            let (cleaned, _) =
+                local_agent_runtime::provider::text_tool_calls::extract_qwen_style_tool_calls(
+                    &text,
+                );
+            return Ok(ChatCompletion {
+                text: cleaned,
+                tool_calls,
+            });
+        }
+
         Ok(ChatCompletion { text, tool_calls })
     }
 }

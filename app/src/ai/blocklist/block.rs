@@ -3501,9 +3501,13 @@ impl AIBlock {
                     self.requested_commands_to_auto_collapse.remove(action_id);
                 }
 
+                // Finished commands render stdout inside the toggle box; keep the
+                // linked terminal block hidden so output isn't duplicated below.
+                // Live/running commands still surface the real terminal block when expanded.
+                let is_visible = *is_expanded && !has_finished_command_block;
                 ctx.emit(AIBlockEvent::UpdateInlineActionVisibility {
                     action_id: action_id.clone(),
-                    is_visible: *is_expanded,
+                    is_visible,
                 });
                 ctx.notify();
             }
