@@ -2,37 +2,27 @@
 
 ## Current State
 
-**Last Updated:** 2026-07-27  
-**Active Feature:** `feat-014` — Background shell and process lifecycle  
+**Last Updated:** 2026-07-28  
+**Active Feature:** `feat-015` — Model-gated computer and document actions  
 **Status:** Done  
 
 ## What's Done
 
-- Harness + Phase A (feat-001–008)
-- Phase C early (feat-009–012): LiteLLM, Qwen tools, read-only shell
-- **feat-013:** Bounded local `run_agents` (orchestration_enabled, no parent, max 4, Local-only)
-- **feat-014:** Background shell lifecycle — optional `wait_until_complete`, LRC read/write tools, result JSON + proto
+- Phase A, early Phase C, feat-013/014 (run_agents + background shell).
+- **feat-015:** Local bridge for `read_documents` / `edit_documents` / `create_documents`; `request_computer_use` / `use_computer` when `computer_use_enabled`; plan-mode gating; JSON results with screenshot metadata only.
 
 ## What's In Progress
 
 - None
 
-## Next (sequential)
+## Next (sequential Phase B → C)
 
-1. model-gated computer and document actions → feat-015  
-2. skill discovery and bundled resources  
-3. trusted lifecycle hooks  
-4. local-runtime telemetry  
-5. Remaining Phase C: web search/fetch, plan/todo, provider polish, prompt packs, multimodal, Git helpers  
-
-## Decisions
-
-- Sequential Phase B before remaining Phase C
-- Bridge existing Warp actions rather than inventing parallel subsystems
-- Local run_agents depth bound via `parent_agent_id.is_none()`
-- Shell defaults to wait=true for weak models; LRC tools enable intentional background work
+1. skill discovery and bundled resources  
+2. trusted lifecycle hooks  
+3. local-runtime telemetry  
+4. Phase C remainder: web search/fetch, plan/todo, provider polish, prompt packs, multimodal, Git helpers  
 
 ## Verification Evidence
 
-- local_runtime tests: **40 passed**
+- local_runtime tests: **41 passed**
 - format --check: **passed**

@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use ai::agent::action::FileEdit;
 use ai::diff_validation::ParsedDiff;
+use ai::document::AIDocumentId;
 use ai::skills::SkillReference;
 use futures::channel::oneshot;
 use local_agent_runtime::tools::schema::{ToolSchema, ToolSchemaBuilder};
@@ -32,11 +33,14 @@ use crate::ai::agent::task::TaskId;
 use crate::ai::agent::{
     AIAgentAction, AIAgentActionId, AIAgentActionResult, AIAgentActionResultType,
     AIAgentActionType, AIAgentInput, AIAgentPtyWriteMode, AnyFileContent, AskUserQuestionItem,
-    AskUserQuestionOption, AskUserQuestionType, FileContext, FileGlobV2Result, GrepResult,
-    ReadFilesResult, ReadShellCommandOutputResult, RequestCommandOutputResult,
-    RunAgentsAgentOutcomeKind, RunAgentsAgentRunConfig, RunAgentsExecutionMode,
-    RunAgentsLaunchedExecutionMode, RunAgentsRequest, RunAgentsResult, SearchCodebaseResult,
-    ShellCommandDelay, WriteToLongRunningShellCommandResult,
+    AskUserQuestionOption, AskUserQuestionType, CreateDocumentsRequest, CreateDocumentsResult,
+    DocumentDiff, DocumentToCreate, EditDocumentsRequest, EditDocumentsResult, FileContext,
+    FileGlobV2Result, GrepResult, ReadDocumentsRequest, ReadDocumentsResult, ReadFilesResult,
+    ReadShellCommandOutputResult, RequestCommandOutputResult, RequestComputerUseRequest,
+    RequestComputerUseResult, RunAgentsAgentOutcomeKind, RunAgentsAgentRunConfig,
+    RunAgentsExecutionMode, RunAgentsLaunchedExecutionMode, RunAgentsRequest, RunAgentsResult,
+    SearchCodebaseResult, ShellCommandDelay, UseComputerRequest, UseComputerResult,
+    WriteToLongRunningShellCommandResult,
 };
 use crate::terminal::model::block::BlockId;
 
@@ -170,6 +174,12 @@ impl LocalRuntimeToolRegistry {
         // cannot recursively fan out further local orchestration.
         if params.orchestration_enabled && params.parent_agent_id.is_none() {
             registry.add_run_agents();
+        }
+        // AI documents are client-executed; always bridge for local agents.
+        registry.add_document_tools();
+        // Computer use is gated to the same request flag as cloud/Oz agent mode.
+        if params.computer_use_enabled {
+            registry.add_computer_use_tools();
         }
         if registry.permission_mode == LocalRuntimePermissionMode::Plan {
             registry.retain_plan_tools();
@@ -344,6 +354,37 @@ impl LocalRuntimeToolRegistry {
     fn add_run_agents(&mut self) {
         self.add_tool(
             run_agents_schema(),
+            ToolSafetyClass::Interactive,
+            LocalRuntimeToolRouteKind::BuiltIn,
+        );
+    }
+
+    fn add_document_tools(&mut self) {
+        self.add_tool(
+            read_documents_schema(),
+            ToolSafetyClass::ReadOnly,
+            LocalRuntimeToolRouteKind::BuiltIn,
+        );
+        self.add_tool(
+            edit_documents_schema(),
+            ToolSafetyClass::Interactive,
+            LocalRuntimeToolRouteKind::BuiltIn,
+        );
+        self.add_tool(
+            create_documents_schema(),
+            ToolSafetyClass::Interactive,
+            LocalRuntimeToolRouteKind::BuiltIn,
+        );
+    }
+
+    fn add_computer_use_tools(&mut self) {
+        self.add_tool(
+            request_computer_use_schema(),
+            ToolSafetyClass::Interactive,
+            LocalRuntimeToolRouteKind::BuiltIn,
+        );
+        self.add_tool(
+            use_computer_schema(),
             ToolSafetyClass::Interactive,
             LocalRuntimeToolRouteKind::BuiltIn,
         );
@@ -708,6 +749,114 @@ fn run_agents_schema() -> ToolSchema {
     }
 }
 
+fn read_documents_schema() -> ToolSchema {
+    ToolSchemaBuilder::new(
+        "read_documents",
+        "Read Warp AI documents by UUID. Use document IDs from conversation context or prior create/edit results.",
+    )
+    .required_string_array(
+        "document_ids",
+        "One or more AI document UUIDs to read",
+    )
+    .build()
+}
+
+fn edit_documents_schema() -> ToolSchema {
+    ToolSchema {
+        name: "edit_documents".to_string(),
+        description: "Apply search/replace edits to existing Warp AI documents by UUID."
+            .to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "diffs": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "document_id": { "type": "string", "description": "AI document UUID" },
+                            "search": { "type": "string" },
+                            "replace": { "type": "string" }
+                        },
+                        "required": ["document_id", "search", "replace"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["diffs"],
+            "additionalProperties": false
+        }),
+    }
+}
+
+fn create_documents_schema() -> ToolSchema {
+    ToolSchema {
+        name: "create_documents".to_string(),
+        description: "Create one or more new Warp AI documents with title and content.".to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "documents": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": { "type": "string" },
+                            "content": { "type": "string" }
+                        },
+                        "required": ["title", "content"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["documents"],
+            "additionalProperties": false
+        }),
+    }
+}
+
+fn request_computer_use_schema() -> ToolSchema {
+    ToolSchemaBuilder::new(
+        "request_computer_use",
+        "Request user approval to control the computer (mouse/keyboard/screenshots). Call before use_computer when permission is required.",
+    )
+    .required_string(
+        "task_summary",
+        "Short summary of the computer-use task for the user approval UI",
+    )
+    .build()
+}
+
+fn use_computer_schema() -> ToolSchema {
+    ToolSchema {
+        name: "use_computer".to_string(),
+        description: "Perform local computer-use actions (type text, move/click mouse, wait, keys). Prefer after request_computer_use is approved. Action objects follow Warp computer_use Action JSON (type_text, wait, mouse_move, mouse_down, mouse_up, etc.).".to_string(),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action_summary": {
+                    "type": "string",
+                    "description": "Short summary of this action batch"
+                },
+                "actions": {
+                    "type": "array",
+                    "minItems": 1,
+                    "description": "Ordered computer_use::Action values as JSON objects",
+                    "items": { "type": "object" }
+                },
+                "take_screenshot": {
+                    "type": "boolean",
+                    "description": "When true, capture a screenshot after actions (metadata returned; image not embedded for local models)"
+                }
+            },
+            "required": ["action_summary", "actions"],
+            "additionalProperties": false
+        }),
+    }
+}
+
 #[cfg(test)]
 pub fn is_supported_tool(name: &str) -> bool {
     LocalRuntimeToolRegistry::built_ins().contains_tool(name)
@@ -793,6 +942,21 @@ fn built_in_tool_call_to_ai_action(
     }
     if call.name == "write_to_long_running_shell_command" {
         return write_to_long_running_shell_command_tool_call_to_ai_action(call);
+    }
+    if call.name == "read_documents" {
+        return read_documents_tool_call_to_ai_action(call);
+    }
+    if call.name == "edit_documents" {
+        return edit_documents_tool_call_to_ai_action(call);
+    }
+    if call.name == "create_documents" {
+        return create_documents_tool_call_to_ai_action(call);
+    }
+    if call.name == "request_computer_use" {
+        return request_computer_use_tool_call_to_ai_action(call);
+    }
+    if call.name == "use_computer" {
+        return use_computer_tool_call_to_ai_action(call);
     }
 
     let action: AIAgentActionType = match tool_call_to_proto_tool(call)? {
@@ -883,6 +1047,175 @@ fn required_string_any(
     Err(ToolExecutionError::InvalidInput {
         reason: format!("Tool `{tool_name}` requires one of: {}", keys.join(" or ")),
     })
+}
+
+fn read_documents_tool_call_to_ai_action(
+    call: &ToolCall,
+) -> Result<AIAgentActionType, ToolExecutionError> {
+    validate_allowed_arguments(&call.arguments, &["document_ids"], &call.name)?;
+    let ids = required_string_array(&call.arguments, &["document_ids"], &call.name)?;
+    if ids.is_empty() {
+        return Err(ToolExecutionError::InvalidInput {
+            reason: "Tool `read_documents` requires at least one document_id".to_string(),
+        });
+    }
+    let document_ids = ids
+        .into_iter()
+        .map(|id| {
+            AIDocumentId::try_from(id.as_str()).map_err(|_| ToolExecutionError::InvalidInput {
+                reason: format!("Invalid document_id UUID: {id}"),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(AIAgentActionType::ReadDocuments(ReadDocumentsRequest {
+        document_ids,
+    }))
+}
+
+fn edit_documents_tool_call_to_ai_action(
+    call: &ToolCall,
+) -> Result<AIAgentActionType, ToolExecutionError> {
+    validate_allowed_arguments(&call.arguments, &["diffs"], &call.name)?;
+    let diffs = call
+        .arguments
+        .get("diffs")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ToolExecutionError::InvalidInput {
+            reason: "Tool `edit_documents` requires array argument `diffs`".to_string(),
+        })?;
+    if diffs.is_empty() {
+        return Err(ToolExecutionError::InvalidInput {
+            reason: "Tool `edit_documents` requires at least one diff".to_string(),
+        });
+    }
+    let diffs = diffs
+        .iter()
+        .map(|diff| {
+            let obj = Value::Object(
+                diff.as_object()
+                    .ok_or_else(|| ToolExecutionError::InvalidInput {
+                        reason: "`edit_documents.diffs` entries must be objects".to_string(),
+                    })?
+                    .clone(),
+            );
+            validate_allowed_arguments(
+                &obj,
+                &["document_id", "search", "replace"],
+                "edit_documents diff",
+            )?;
+            let document_id = required_string(&obj, "document_id", "edit_documents diff")?;
+            let document_id = AIDocumentId::try_from(document_id.as_str()).map_err(|_| {
+                ToolExecutionError::InvalidInput {
+                    reason: format!("Invalid document_id UUID: {document_id}"),
+                }
+            })?;
+            Ok(DocumentDiff {
+                document_id,
+                search: required_string(&obj, "search", "edit_documents diff")?,
+                replace: required_string(&obj, "replace", "edit_documents diff")?,
+            })
+        })
+        .collect::<Result<Vec<_>, ToolExecutionError>>()?;
+    Ok(AIAgentActionType::EditDocuments(EditDocumentsRequest {
+        diffs,
+    }))
+}
+
+fn create_documents_tool_call_to_ai_action(
+    call: &ToolCall,
+) -> Result<AIAgentActionType, ToolExecutionError> {
+    validate_allowed_arguments(&call.arguments, &["documents"], &call.name)?;
+    let documents = call
+        .arguments
+        .get("documents")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ToolExecutionError::InvalidInput {
+            reason: "Tool `create_documents` requires array argument `documents`".to_string(),
+        })?;
+    if documents.is_empty() {
+        return Err(ToolExecutionError::InvalidInput {
+            reason: "Tool `create_documents` requires at least one document".to_string(),
+        });
+    }
+    let documents = documents
+        .iter()
+        .map(|doc| {
+            let obj = Value::Object(
+                doc.as_object()
+                    .ok_or_else(|| ToolExecutionError::InvalidInput {
+                        reason: "`create_documents.documents` entries must be objects".to_string(),
+                    })?
+                    .clone(),
+            );
+            validate_allowed_arguments(&obj, &["title", "content"], "create_documents document")?;
+            Ok(DocumentToCreate {
+                title: required_string(&obj, "title", "create_documents document")?,
+                content: required_string(&obj, "content", "create_documents document")?,
+            })
+        })
+        .collect::<Result<Vec<_>, ToolExecutionError>>()?;
+    Ok(AIAgentActionType::CreateDocuments(CreateDocumentsRequest {
+        documents,
+    }))
+}
+
+fn request_computer_use_tool_call_to_ai_action(
+    call: &ToolCall,
+) -> Result<AIAgentActionType, ToolExecutionError> {
+    validate_allowed_arguments(&call.arguments, &["task_summary"], &call.name)?;
+    let task_summary = required_string(&call.arguments, "task_summary", &call.name)?;
+    if task_summary.trim().is_empty() {
+        return Err(ToolExecutionError::InvalidInput {
+            reason: "Tool `request_computer_use` requires a non-empty task_summary".to_string(),
+        });
+    }
+    Ok(AIAgentActionType::RequestComputerUse(
+        RequestComputerUseRequest {
+            task_summary,
+            screenshot_params: Some(computer_use::ScreenshotParams {
+                max_long_edge_px: None,
+                max_total_px: None,
+                region: None,
+            }),
+        },
+    ))
+}
+
+fn use_computer_tool_call_to_ai_action(
+    call: &ToolCall,
+) -> Result<AIAgentActionType, ToolExecutionError> {
+    validate_allowed_arguments(
+        &call.arguments,
+        &["action_summary", "actions", "take_screenshot"],
+        &call.name,
+    )?;
+    let action_summary = required_string(&call.arguments, "action_summary", &call.name)?;
+    let actions_value =
+        call.arguments
+            .get("actions")
+            .ok_or_else(|| ToolExecutionError::InvalidInput {
+                reason: "Tool `use_computer` requires array argument `actions`".to_string(),
+            })?;
+    let actions: Vec<computer_use::Action> = serde_json::from_value(actions_value.clone())
+        .map_err(|err| ToolExecutionError::InvalidInput {
+            reason: format!("Tool `use_computer` actions JSON is invalid: {err}"),
+        })?;
+    if actions.is_empty() {
+        return Err(ToolExecutionError::InvalidInput {
+            reason: "Tool `use_computer` requires at least one action".to_string(),
+        });
+    }
+    let take_screenshot = optional_bool(&call.arguments, "take_screenshot")?.unwrap_or(false);
+    let screenshot_params = take_screenshot.then_some(computer_use::ScreenshotParams {
+        max_long_edge_px: None,
+        max_total_px: None,
+        region: None,
+    });
+    Ok(AIAgentActionType::UseComputer(UseComputerRequest {
+        action_summary,
+        actions,
+        screenshot_params,
+    }))
 }
 
 fn ask_user_question_tool_call_to_ai_action(
@@ -1590,8 +1923,113 @@ fn action_result_to_content(result: &AIAgentActionResultType) -> String {
             })
             .to_string(),
         },
+        AIAgentActionResultType::ReadDocuments(result) => match result {
+            ReadDocumentsResult::Success { documents } => {
+                document_contexts_to_json("completed", documents)
+            }
+            ReadDocumentsResult::Error(error) => serde_json::json!({
+                "status": "error",
+                "error": error,
+            })
+            .to_string(),
+            ReadDocumentsResult::Cancelled => serde_json::json!({ "status": "cancelled" }).to_string(),
+        },
+        AIAgentActionResultType::EditDocuments(result) => match result {
+            EditDocumentsResult::Success { updated_documents } => {
+                document_contexts_to_json("accepted", updated_documents)
+            }
+            EditDocumentsResult::Error(error) => serde_json::json!({
+                "status": "error",
+                "error": error,
+            })
+            .to_string(),
+            EditDocumentsResult::Cancelled => serde_json::json!({ "status": "cancelled" }).to_string(),
+        },
+        AIAgentActionResultType::CreateDocuments(result) => match result {
+            CreateDocumentsResult::Success { created_documents } => {
+                document_contexts_to_json("created", created_documents)
+            }
+            CreateDocumentsResult::Error(error) => serde_json::json!({
+                "status": "error",
+                "error": error,
+            })
+            .to_string(),
+            CreateDocumentsResult::Cancelled => {
+                serde_json::json!({ "status": "cancelled" }).to_string()
+            }
+        },
+        AIAgentActionResultType::RequestComputerUse(result) => match result {
+            RequestComputerUseResult::Approved {
+                screenshot,
+                platform,
+            } => serde_json::json!({
+                "status": "approved",
+                "platform": format!("{platform:?}"),
+                "screenshot": {
+                    "width": screenshot.original_width,
+                    "height": screenshot.original_height,
+                },
+                "instruction": "Computer use approved. Proceed with use_computer actions. Screenshot image bytes are not embedded; use dimensions for coordinate planning.",
+            })
+            .to_string(),
+            RequestComputerUseResult::Error(error) => serde_json::json!({
+                "status": "error",
+                "error": error,
+            })
+            .to_string(),
+            RequestComputerUseResult::Cancelled => {
+                serde_json::json!({ "status": "cancelled" }).to_string()
+            }
+        },
+        AIAgentActionResultType::UseComputer(result) => match result {
+            UseComputerResult::Success(action_result) => {
+                let screenshot = action_result.screenshot.as_ref().map(|shot| {
+                    serde_json::json!({
+                        "width": shot.original_width,
+                        "height": shot.original_height,
+                    })
+                });
+                let cursor = action_result.cursor_position.map(|pos| {
+                    serde_json::json!({ "x": pos.x(), "y": pos.y() })
+                });
+                serde_json::json!({
+                    "status": "completed",
+                    "screenshot": screenshot,
+                    "cursor_position": cursor,
+                    "instruction": "Computer actions finished. Screenshot pixels are not embedded for local models.",
+                })
+                .to_string()
+            }
+            UseComputerResult::Error(error) => serde_json::json!({
+                "status": "error",
+                "error": error,
+            })
+            .to_string(),
+            UseComputerResult::Cancelled => serde_json::json!({ "status": "cancelled" }).to_string(),
+        },
         _ => result.to_string(),
     }
+}
+
+fn document_contexts_to_json(
+    status: &str,
+    documents: &[crate::ai::agent::DocumentContext],
+) -> String {
+    let documents = documents
+        .iter()
+        .map(|doc| {
+            serde_json::json!({
+                "document_id": doc.document_id.to_string(),
+                "document_version": doc.document_version.to_string(),
+                "content": doc.content,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "status": status,
+        "documents": documents,
+    })
+    .to_string()
 }
 
 fn file_contexts_to_json(files: &[FileContext]) -> String {
@@ -3030,6 +3468,117 @@ mod tests {
     }
 
     #[test]
+    fn document_and_computer_use_tools_are_gated_and_map() {
+        let base = LocalRuntimeToolRegistry::from_request(&RequestParams::new_for_test());
+        assert!(base.contains_tool("read_documents"));
+        assert!(base.contains_tool("edit_documents"));
+        assert!(base.contains_tool("create_documents"));
+        assert!(!base.contains_tool("request_computer_use"));
+        assert!(!base.contains_tool("use_computer"));
+
+        let mut cu_params = RequestParams::new_for_test();
+        cu_params.computer_use_enabled = true;
+        let with_cu = LocalRuntimeToolRegistry::from_request(&cu_params);
+        assert!(with_cu.contains_tool("request_computer_use"));
+        assert!(with_cu.contains_tool("use_computer"));
+
+        let doc_id = uuid::Uuid::new_v4().to_string();
+        let create = ToolCall {
+            id: "call_doc".to_string(),
+            name: "create_documents".to_string(),
+            arguments: serde_json::json!({
+                "documents": [{ "title": "Plan", "content": "# Hello" }]
+            }),
+        };
+        let action = tool_call_to_ai_action_with_registry(
+            &create,
+            &TaskId::new("task_1".to_string()),
+            &base,
+        )
+        .unwrap();
+        match action.action {
+            AIAgentActionType::CreateDocuments(CreateDocumentsRequest { documents }) => {
+                assert_eq!(documents.len(), 1);
+                assert_eq!(documents[0].title, "Plan");
+                assert_eq!(documents[0].content, "# Hello");
+            }
+            other => panic!("expected create_documents, got {other:?}"),
+        }
+
+        let read = ToolCall {
+            id: "call_read_doc".to_string(),
+            name: "read_documents".to_string(),
+            arguments: serde_json::json!({ "document_ids": [doc_id] }),
+        };
+        let action =
+            tool_call_to_ai_action_with_registry(&read, &TaskId::new("task_1".to_string()), &base)
+                .unwrap();
+        assert!(matches!(
+            action.action,
+            AIAgentActionType::ReadDocuments(ReadDocumentsRequest { ref document_ids })
+                if document_ids.len() == 1
+        ));
+
+        let req = ToolCall {
+            id: "call_rcu".to_string(),
+            name: "request_computer_use".to_string(),
+            arguments: serde_json::json!({ "task_summary": "Open settings" }),
+        };
+        let action = tool_call_to_ai_action_with_registry(
+            &req,
+            &TaskId::new("task_1".to_string()),
+            &with_cu,
+        )
+        .unwrap();
+        match action.action {
+            AIAgentActionType::RequestComputerUse(RequestComputerUseRequest {
+                task_summary,
+                ..
+            }) => assert_eq!(task_summary, "Open settings"),
+            other => panic!("expected request_computer_use, got {other:?}"),
+        }
+
+        let use_cu = ToolCall {
+            id: "call_uc".to_string(),
+            name: "use_computer".to_string(),
+            arguments: serde_json::json!({
+                "action_summary": "type hello",
+                "actions": [{ "TypeText": { "text": "hello" } }],
+                "take_screenshot": false
+            }),
+        };
+        let action = tool_call_to_ai_action_with_registry(
+            &use_cu,
+            &TaskId::new("task_1".to_string()),
+            &with_cu,
+        )
+        .unwrap();
+        match action.action {
+            AIAgentActionType::UseComputer(UseComputerRequest {
+                action_summary,
+                actions,
+                screenshot_params,
+            }) => {
+                assert_eq!(action_summary, "type hello");
+                assert_eq!(actions.len(), 1);
+                assert!(screenshot_params.is_none());
+                assert!(matches!(
+                    &actions[0],
+                    computer_use::Action::TypeText { text } if text == "hello"
+                ));
+            }
+            other => panic!("expected use_computer, got {other:?}"),
+        }
+
+        let content = action_result_to_content(&AIAgentActionResultType::CreateDocuments(
+            CreateDocumentsResult::Success {
+                created_documents: vec![],
+            },
+        ));
+        assert!(content.contains("\"status\":\"created\""));
+    }
+
+    #[test]
     fn background_shell_tools_map_and_round_trip() {
         let registry = LocalRuntimeToolRegistry::built_ins();
         assert!(registry.contains_tool("read_shell_command_output"));
@@ -3199,6 +3748,7 @@ mod tests {
         let mut plan_params = RequestParams::new_for_test();
         plan_params.ask_user_question_enabled = true;
         plan_params.orchestration_enabled = true;
+        plan_params.computer_use_enabled = true;
         plan_params.input = vec![AIAgentInput::UserQuery {
             query: "Plan this".to_string(),
             context: Arc::from([]),
@@ -3216,10 +3766,15 @@ mod tests {
         assert!(plan_registry.contains_tool("read_files"));
         assert!(plan_registry.contains_tool("ask_user_question"));
         assert!(plan_registry.contains_tool("read_shell_command_output"));
+        assert!(plan_registry.contains_tool("read_documents"));
         assert!(!plan_registry.contains_tool("run_shell_command"));
         assert!(!plan_registry.contains_tool("write_to_long_running_shell_command"));
         assert!(!plan_registry.contains_tool("edit_files"));
         assert!(!plan_registry.contains_tool("run_agents"));
+        assert!(!plan_registry.contains_tool("edit_documents"));
+        assert!(!plan_registry.contains_tool("create_documents"));
+        assert!(!plan_registry.contains_tool("use_computer"));
+        assert!(!plan_registry.contains_tool("request_computer_use"));
 
         let mut accept_params = RequestParams::new_for_test();
         accept_params.autonomy_level = api::AutonomyLevel::Unsupervised;

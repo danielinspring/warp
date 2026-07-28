@@ -2,33 +2,32 @@
 
 ## Current Objective
 
-Continue Phase B sequentially: next is **model-gated computer and document actions**.
+Continue Phase B: next is **skill discovery and bundled resources**.
 
 ## Last Updated
 
-2026-07-27
+2026-07-28
 
 ## Active Feature
 
-`feat-014` — Background shell and process lifecycle (`done`)
+`feat-015` — Model-gated computer and document actions (`done`)
 
 ## Branch
 
 - `cla-dev-2`
-- Uncommitted: feat-013 + feat-014 local runtime bridge work (and format fixes)
+- Commits: feat-013/014 (`dad6a7cd`), feat-015 (pending commit with this handoff)
 
 ## Current State
 
-- Phase A: done (feat-001–008)
-- Phase C early polish: done (feat-009–012)
-- **feat-013 done:** bounded `run_agents` (root-only, max 4, Local mode)
-- **feat-014 done:** `wait_until_complete` on shell + `read_shell_command_output` / `write_to_long_running_shell_command` LRC tools
+- Phase A done; Phase C early (009–012) done.
+- Phase B: feat-013 run_agents, feat-014 LRC shell, **feat-015 documents + gated computer use** done.
+- Documents always bridged; computer use only when `RequestParams.computer_use_enabled`.
 
 ## Verification
 
-- `cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use`: **40 passed**
+- `cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use`: **41 passed**
 - `./script/format --check`: **passed**
 
 ## Recommended Next Step
 
-Implement **feat-015: model-gated computer and document actions** (bridge only when `computer_use_enabled` / document tools are safe for the local model).
+Implement **feat-016: skill discovery and bundled resources** beyond `read_skill`.
