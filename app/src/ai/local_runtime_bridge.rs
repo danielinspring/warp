@@ -121,11 +121,21 @@ pub fn decode_local_runtime_tool_result_data(data: &str) -> Option<(String, Tool
     }
 }
 
+/// Compact skill entry for list_skills and system-prompt discovery.
+#[derive(Debug, Clone)]
+pub struct LocalRuntimeSkillInfo {
+    pub name: String,
+    pub description: String,
+    pub reference: String,
+    pub scope: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct LocalRuntimeToolRegistry {
     schemas: Vec<ToolSchema>,
     routes: HashMap<String, LocalRuntimeToolRoute>,
     permission_mode: LocalRuntimePermissionMode,
+    skill_catalog: Vec<LocalRuntimeSkillInfo>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,10 +162,20 @@ enum LocalRuntimeToolRouteKind {
     ReadSkill {
         skill_lookup: HashMap<String, SkillReference>,
     },
+    /// Catalog listing answered in-process from `skill_catalog` (no UI action).
+    ListSkills,
 }
 
 impl LocalRuntimeToolRegistry {
     pub fn from_request(params: &RequestParams) -> Self {
+        Self::from_request_with_available_skills(params, &[])
+    }
+
+    /// Build a registry, merging request-context skills with an optional cwd/bundled catalog.
+    pub fn from_request_with_available_skills(
+        params: &RequestParams,
+        available_skills: &[crate::ai::skills::SkillDescriptor],
+    ) -> Self {
         let mut registry = Self::built_ins();
         registry.permission_mode = LocalRuntimePermissionMode::from_request(params);
 
@@ -163,8 +183,52 @@ impl LocalRuntimeToolRegistry {
             registry.add_mcp_context(context);
         }
 
-        let skills = skill_references_for_request(params);
+        let mut skills = HashMap::new();
+        let mut catalog = Vec::new();
+        for skill in available_skills {
+            let reference = skill.reference.to_string();
+            skills.insert(skill.name.clone(), skill.reference.clone());
+            skills.insert(reference.clone(), skill.reference.clone());
+            catalog.push(LocalRuntimeSkillInfo {
+                name: skill.name.clone(),
+                description: skill.description.clone(),
+                reference,
+                scope: format!("{:?}", skill.scope),
+            });
+        }
+        // Request-context skills (user-attached) merge into lookup + catalog.
+        for input in &params.input {
+            let Some(contexts) = input.context() else {
+                continue;
+            };
+            for context in contexts {
+                let crate::ai::agent::AIAgentContext::Skills {
+                    skills: context_skills,
+                } = context
+                else {
+                    continue;
+                };
+                for skill in context_skills {
+                    let reference = skill.reference.to_string();
+                    skills.insert(skill.name.clone(), skill.reference.clone());
+                    skills.insert(reference.clone(), skill.reference.clone());
+                    if !catalog
+                        .iter()
+                        .any(|entry| entry.reference == reference || entry.name == skill.name)
+                    {
+                        catalog.push(LocalRuntimeSkillInfo {
+                            name: skill.name.clone(),
+                            description: String::new(),
+                            reference,
+                            scope: "context".to_string(),
+                        });
+                    }
+                }
+            }
+        }
         if !skills.is_empty() {
+            registry.skill_catalog = catalog;
+            registry.add_list_skills();
             registry.add_read_skill(skills);
         }
         if params.ask_user_question_enabled {
@@ -193,6 +257,7 @@ impl LocalRuntimeToolRegistry {
             schemas: Vec::new(),
             routes: HashMap::new(),
             permission_mode: LocalRuntimePermissionMode::Default,
+            skill_catalog: Vec::new(),
         };
 
         for schema in build_tool_schemas() {
@@ -230,6 +295,30 @@ impl LocalRuntimeToolRegistry {
 
     pub fn permission_mode(&self) -> LocalRuntimePermissionMode {
         self.permission_mode
+    }
+
+    pub fn skill_catalog(&self) -> &[LocalRuntimeSkillInfo] {
+        &self.skill_catalog
+    }
+
+    pub fn list_skills_json(&self) -> String {
+        let skills = self
+            .skill_catalog
+            .iter()
+            .map(|skill| {
+                serde_json::json!({
+                    "name": skill.name,
+                    "description": skill.description,
+                    "reference": skill.reference,
+                    "scope": skill.scope,
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "skills": skills,
+            "instruction": "Use read_skill with name or reference to load full skill instructions. For scripts or files listed inside a skill, use read_files with paths relative to the skill directory or absolute paths from the skill body.",
+        })
+        .to_string()
     }
 
     fn route(&self, name: &str) -> Option<&LocalRuntimeToolRoute> {
@@ -390,9 +479,24 @@ impl LocalRuntimeToolRegistry {
         );
     }
 
+    fn add_list_skills(&mut self) {
+        self.add_tool(
+            ToolSchemaBuilder::new(
+                "list_skills",
+                "List available Warp skills for this session (project, home, and activated bundled skills). Use read_skill to load full instructions for one skill.",
+            )
+            .build(),
+            ToolSafetyClass::ReadOnly,
+            LocalRuntimeToolRouteKind::ListSkills,
+        );
+    }
+
     fn add_read_skill(&mut self, skill_lookup: HashMap<String, SkillReference>) {
         self.add_tool(
-            ToolSchemaBuilder::new("read_skill", "Read an available Warp skill by reference.")
+            ToolSchemaBuilder::new(
+                "read_skill",
+                "Read full instructions for an available Warp skill by name or reference (from list_skills). After reading, follow the skill. For bundled script/assets mentioned in the skill, use read_files on those paths.",
+            )
                 .required_string(
                     "skill",
                     "The skill name or displayed reference to read, such as @warp-skill:name or a SKILL.md path",
@@ -405,7 +509,10 @@ impl LocalRuntimeToolRegistry {
 
     fn retain_plan_tools(&mut self) {
         self.routes.retain(|name, route| {
-            route.safety_class == ToolSafetyClass::ReadOnly || name == "ask_user_question"
+            route.safety_class == ToolSafetyClass::ReadOnly
+                || name == "ask_user_question"
+                || name == "list_skills"
+                || name == "read_skill"
         });
         self.schemas
             .retain(|schema| self.routes.contains_key(&schema.name));
@@ -497,6 +604,19 @@ impl ToolExecutor for WarpToolExecutor {
     }
 
     async fn execute(&self, call: &ToolCall) -> Result<ToolCallResult, ToolExecutionError> {
+        // Catalog listing is answered from the request-scoped registry without a UI action.
+        if call.name == "list_skills" {
+            if !self.registry.contains_tool("list_skills") {
+                return Err(ToolExecutionError::NotFound {
+                    name: call.name.clone(),
+                });
+            }
+            return Ok(ToolCallResult {
+                content: self.registry.list_skills_json(),
+                is_error: false,
+            });
+        }
+
         let (response_tx, response_rx) = oneshot::channel();
         self.request_tx
             .send(ToolExecutionRequest {
@@ -883,6 +1003,11 @@ pub fn tool_call_to_ai_action_with_registry(
 
     let action = match &route.kind {
         LocalRuntimeToolRouteKind::BuiltIn => built_in_tool_call_to_ai_action(call)?,
+        LocalRuntimeToolRouteKind::ListSkills => {
+            return Err(ToolExecutionError::ExecutionFailed(anyhow::anyhow!(
+                "list_skills is handled in-process and should not be queued as a Warp action"
+            )));
+        }
         LocalRuntimeToolRouteKind::McpTool { server_id, name } => AIAgentActionType::CallMCPTool {
             server_id: *server_id,
             name: name.clone(),
@@ -2317,6 +2442,10 @@ pub fn tool_call_to_proto_tool_with_registry(
         })?;
     match &route.kind {
         LocalRuntimeToolRouteKind::BuiltIn => tool_call_to_proto_tool(call),
+        LocalRuntimeToolRouteKind::ListSkills => Err(ToolExecutionError::InvalidInput {
+            reason: "list_skills has no wire proto tool form; results stay in the runtime transcript envelope"
+                .to_string(),
+        }),
         LocalRuntimeToolRouteKind::McpTool { server_id, name } => {
             let arguments = arguments_object(&call.arguments, &call.name)?;
             Ok(Tool::CallMcpTool(api::message::tool_call::CallMcpTool {
@@ -2488,6 +2617,7 @@ pub fn proto_tool_call_to_runtime_with_registry(
                         Some(function_name.clone())
                     }
                     LocalRuntimeToolRouteKind::BuiltIn
+                    | LocalRuntimeToolRouteKind::ListSkills
                     | LocalRuntimeToolRouteKind::McpTool { .. }
                     | LocalRuntimeToolRouteKind::ReadMcpResource
                     | LocalRuntimeToolRouteKind::ReadSkill { .. } => None,
@@ -3035,25 +3165,6 @@ fn validate_string_values(
     Ok(values)
 }
 
-fn skill_references_for_request(params: &RequestParams) -> HashMap<String, SkillReference> {
-    let mut skills_by_key = HashMap::new();
-    for input in &params.input {
-        let Some(contexts) = input.context() else {
-            continue;
-        };
-        for context in contexts {
-            let crate::ai::agent::AIAgentContext::Skills { skills } = context else {
-                continue;
-            };
-            for skill in skills {
-                skills_by_key.insert(skill.name.clone(), skill.reference.clone());
-                skills_by_key.insert(skill.reference.to_string(), skill.reference.clone());
-            }
-        }
-    }
-    skills_by_key
-}
-
 fn parse_skill_reference(value: String) -> SkillReference {
     const BUNDLED_PREFIX: &str = "@warp-skill:";
     if let Some(id) = value.strip_prefix(BUNDLED_PREFIX) {
@@ -3465,6 +3576,58 @@ mod tests {
         assert_eq!(restored.name, "run_agents");
         assert_eq!(restored.arguments["summary"], "Parallel research");
         assert_eq!(restored.arguments["agents"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn skill_catalog_registers_list_and_read_tools() {
+        use ai::skills::{SkillProvider, SkillScope};
+
+        use crate::ai::skills::SkillDescriptor;
+
+        let empty = LocalRuntimeToolRegistry::from_request(&RequestParams::new_for_test());
+        assert!(!empty.contains_tool("list_skills"));
+        assert!(!empty.contains_tool("read_skill"));
+
+        let skills = vec![SkillDescriptor {
+            reference: SkillReference::BundledSkillId("demo".to_string()),
+            name: "demo-skill".to_string(),
+            description: "A demo skill".to_string(),
+            scope: SkillScope::Bundled,
+            provider: SkillProvider::Warp,
+            icon_override: None,
+        }];
+        let registry = LocalRuntimeToolRegistry::from_request_with_available_skills(
+            &RequestParams::new_for_test(),
+            &skills,
+        );
+        assert!(registry.contains_tool("list_skills"));
+        assert!(registry.contains_tool("read_skill"));
+        assert_eq!(registry.skill_catalog().len(), 1);
+        let listed = registry.list_skills_json();
+        assert!(listed.contains("demo-skill"));
+        assert!(listed.contains("@warp-skill:demo"));
+        assert!(listed.contains("read_skill"));
+
+        let mut plan_params = RequestParams::new_for_test();
+        plan_params.input = vec![AIAgentInput::UserQuery {
+            query: "Plan".to_string(),
+            context: std::sync::Arc::from([]),
+            static_query_type: None,
+            referenced_attachments: std::collections::HashMap::new(),
+            user_query_mode: crate::ai::agent::UserQueryMode::Plan,
+            running_command: None,
+            intended_agent: None,
+        }];
+        let plan_registry =
+            LocalRuntimeToolRegistry::from_request_with_available_skills(&plan_params, &skills);
+        assert_eq!(
+            plan_registry.permission_mode(),
+            LocalRuntimePermissionMode::Plan
+        );
+        assert!(plan_registry.contains_tool("list_skills"));
+        assert!(plan_registry.contains_tool("read_skill"));
+        assert!(plan_registry.contains_tool("read_files"));
+        assert!(!plan_registry.contains_tool("edit_files"));
     }
 
     #[test]

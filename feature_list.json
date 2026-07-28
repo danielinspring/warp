@@ -2,7 +2,7 @@
   "roadmap": {
     "name": "Local Ollama Agent Runtime",
     "source": "dan_docs/reports/local_agent_runtime_competitive_gap_report.md",
-    "active_feature": "feat-015",
+    "active_feature": "feat-016",
     "status_values": [
       "not-started",
       "in-progress",
@@ -343,17 +343,39 @@
         "./script/format --check"
       ],
       "evidence": "2026-07-28: Bridged read/edit/create_documents always for local agents; request_computer_use + use_computer when computer_use_enabled. Structured JSON results (screenshot metadata only). Plan mode keeps read_documents, strips mutating docs and CU. cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use: 41 passed. ./script/format --check: passed."
+    },
+    {
+      "id": "feat-016",
+      "name": "Skill discovery and bundled catalog for local runtime",
+      "description": "Advertise list_skills and read_skill from the cwd/home/bundled SkillManager catalog (not only skills attached to request context), inject a short catalog into the system prompt, and return structured list results without requiring a Warp action card.",
+      "phase": "Phase B",
+      "dependencies": [
+        "feat-007",
+        "feat-015"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "Local runtime resolves available skills via SkillManager for the session working directory when starting a run.",
+        "list_skills and read_skill are advertised when the catalog is non-empty.",
+        "list_skills returns name, description, reference, and scope without executing a UI action.",
+        "System prompt includes a concise available-skills section when the catalog is non-empty.",
+        "Focused unit tests cover catalog registration, list_skills content, and plan-mode retention of list/read skill tools."
+      ],
+      "verification": [
+        "cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-28: ResponseStream resolves SkillManager catalog for cwd; from_request_with_available_skills registers list_skills + read_skill; list_skills answered in WarpToolExecutor without UI; prompt Available Skills section; plan mode keeps list/read. cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use: 42 passed. format --check: passed."
     }
   ],
   "future_phases": [
     {
       "phase": "Phase B",
       "scope": [
-        "skill discovery and bundled resources",
         "trusted lifecycle hooks",
         "local-runtime telemetry"
       ],
-      "note": "feat-013–015 promoted from this list"
+      "note": "feat-013–016 promoted from this list"
     },
     {
       "phase": "Phase C",

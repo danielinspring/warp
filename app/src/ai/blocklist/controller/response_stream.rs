@@ -206,12 +206,25 @@ impl ResponseStream {
                 .ollama_config
                 .clone()
                 .expect("checked local runtime requires ollama_config");
+            // Resolve project/home/bundled skills on the UI thread for local discovery (feat-016).
+            let cwd_path = params_clone
+                .session_context
+                .current_working_directory()
+                .as_ref()
+                .map(|cwd| {
+                    warp_util::local_or_remote_path::LocalOrRemotePath::Local(
+                        std::path::PathBuf::from(cwd),
+                    )
+                });
+            let available_skills = crate::ai::skills::SkillManager::as_ref(ctx)
+                .get_skills_for_working_directory(cwd_path.as_ref(), ctx);
             let _ = ctx.spawn(
                 async move {
                     Ok(
                         crate::ai::local_runtime_integration::run_with_local_runtime(
                             ollama_config,
                             params_clone,
+                            available_skills,
                             tool_request_tx,
                             cancellation_rx,
                         ),

@@ -41,6 +41,7 @@ struct PromptBuildInput {
     warp_drive_context_enabled: bool,
     permission_mode: Option<String>,
     local_tool_names: Vec<String>,
+    available_skills: Vec<String>,
     mcp_server_count: usize,
     mcp_tool_count: usize,
     mcp_resource_count: usize,
@@ -76,6 +77,22 @@ impl PromptBuildInput {
                 .into_iter()
                 .map(|tool| tool.name)
                 .collect::<Vec<_>>(),
+            available_skills: registry
+                .skill_catalog()
+                .iter()
+                .map(|skill| {
+                    if skill.description.is_empty() {
+                        format!("{} ({})", skill.name, skill.reference)
+                    } else {
+                        format!(
+                            "{} ({}) — {}",
+                            skill.name,
+                            skill.reference,
+                            truncate_for_prompt(&skill.description, 160)
+                        )
+                    }
+                })
+                .collect(),
             context_lines: render_request_context(params),
             ..Default::default()
         };
@@ -155,6 +172,24 @@ fn format_system_prompt(input: &PromptBuildInput) -> String {
         input.mcp_server_count, input.mcp_tool_count, input.mcp_resource_count
     )
     .ok();
+
+    if !input.available_skills.is_empty() {
+        prompt.push_str("\n## Available Skills\n");
+        prompt.push_str(
+            "Call list_skills for the full catalog, then read_skill before following a skill. Bundled skill scripts/assets referenced in the skill body should be read with read_files.\n",
+        );
+        for line in input.available_skills.iter().take(40) {
+            writeln!(prompt, "- {line}").ok();
+        }
+        if input.available_skills.len() > 40 {
+            writeln!(
+                prompt,
+                "- ... {} additional skills omitted; use list_skills",
+                input.available_skills.len() - 40
+            )
+            .ok();
+        }
+    }
 
     if !input.context_lines.is_empty() {
         prompt.push_str("\n## Request Context\n");

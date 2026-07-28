@@ -42,16 +42,27 @@ use crate::server::server_api::AIApiError;
 /// Build a `ResponseStream` using the new local agent runtime.
 ///
 /// This is a drop-in replacement for `ollama::agent_loop::run_request`.
+/// `available_skills` is the cwd/home/bundled catalog resolved on the UI thread
+/// before spawn (see feat-016).
 pub fn run_with_local_runtime(
     cfg: OllamaConfig,
     params: RequestParams,
+    available_skills: Vec<crate::ai::skills::SkillDescriptor>,
     tool_request_tx: async_channel::Sender<ToolExecutionRequest>,
     cancellation_rx: oneshot::Receiver<()>,
 ) -> ResponseStream {
     let (tx, rx) = async_channel::unbounded::<Event>();
 
     tokio::spawn(async move {
-        let result = run_runtime(cfg, params, tool_request_tx, cancellation_rx, &tx).await;
+        let result = run_runtime(
+            cfg,
+            params,
+            available_skills,
+            tool_request_tx,
+            cancellation_rx,
+            &tx,
+        )
+        .await;
         if let Err(err) = result {
             let _ = tx.send(Err(Arc::new(err))).await;
         }
@@ -63,6 +74,7 @@ pub fn run_with_local_runtime(
 async fn run_runtime(
     cfg: OllamaConfig,
     params: RequestParams,
+    available_skills: Vec<crate::ai::skills::SkillDescriptor>,
     tool_request_tx: async_channel::Sender<ToolExecutionRequest>,
     cancellation_rx: oneshot::Receiver<()>,
     tx: &Sender<Event>,
@@ -93,7 +105,9 @@ async fn run_runtime(
         .unwrap_or_else(|| Uuid::new_v4().to_string());
     let task_exists = !params.tasks.is_empty();
 
-    let registry = Arc::new(LocalRuntimeToolRegistry::from_request(&params));
+    let registry = Arc::new(
+        LocalRuntimeToolRegistry::from_request_with_available_skills(&params, &available_skills),
+    );
     let executor = WarpToolExecutor::new(
         tool_request_tx,
         Arc::clone(&registry),
