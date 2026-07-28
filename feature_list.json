@@ -2,7 +2,7 @@
   "roadmap": {
     "name": "Local Ollama Agent Runtime",
     "source": "dan_docs/reports/local_agent_runtime_competitive_gap_report.md",
-    "active_feature": "feat-012",
+    "active_feature": "feat-014",
     "status_values": [
       "not-started",
       "in-progress",
@@ -275,19 +275,64 @@
         "cargo clippy -p local_agent_runtime --all-targets --tests -- -D warnings"
       ],
       "evidence": "2026-07-24: Added infer_shell_command_is_read_only (+ /dev/null redirect allowance), safety_class_for_call ReadOnly path, stream markup withholding, and prompt/schema search guidance. local_agent_runtime and focused Warp infer tests passed."
+    },
+    {
+      "id": "feat-013",
+      "name": "Bounded local run_agents delegation",
+      "description": "When orchestration is enabled, advertise a local-runtime run_agents tool that bridges to Warp's existing RunAgents action with depth and concurrency bounds (root-only, max 4 local children).",
+      "phase": "Phase B",
+      "dependencies": [
+        "feat-007",
+        "feat-008"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "run_agents is advertised only when RequestParams.orchestration_enabled is true and the request is not itself a child agent (parent_agent_id is None).",
+        "Tool calls map to AIAgentActionType::RunAgents with Local execution mode and at most 4 agent_run_configs.",
+        "Invalid input (empty agents, too many agents, missing fields) returns structured ToolExecutionError::InvalidInput.",
+        "Plan mode does not advertise run_agents; results convert to model-facing content and typed transcript proto where available.",
+        "Focused bridge unit tests cover enablement, conversion, bounds, and result content."
+      ],
+      "verification": [
+        "cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-27: Bridged run_agents into LocalRuntimeToolRegistry when orchestration_enabled and parent_agent_id is None. Forces Local execution mode, caps agents at LOCAL_RUN_AGENTS_MAX_CHILDREN=4, maps results to JSON content + typed RunAgentsResult proto (cancel remains generic). Plan mode strips run_agents. cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use: 39 passed. ./script/format --check: passed."
+    },
+    {
+      "id": "feat-014",
+      "name": "Background shell and process lifecycle",
+      "description": "Allow local-runtime shell commands to run without blocking on completion, and bridge read/write long-running shell tools so the model can poll output and send input by block_id.",
+      "phase": "Phase B",
+      "dependencies": [
+        "feat-012",
+        "feat-013"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "run_shell_command accepts optional wait_until_complete (default true); false returns a long-running snapshot with block_id.",
+        "read_shell_command_output and write_to_long_running_shell_command are advertised and map to existing Warp actions.",
+        "Result content for LRC poll/write is structured JSON for the model; typed proto results persist when available.",
+        "Plan mode keeps read_shell_command_output and strips write_to_long_running_shell_command.",
+        "Focused bridge unit tests cover schema, conversion, and result content."
+      ],
+      "verification": [
+        "cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-27: Added wait_until_complete on run_shell_command (default true); built-in read_shell_command_output + write_to_long_running_shell_command bridge to Warp LRC actions; JSON result content + typed proto. Plan mode retains read LRC only. cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use: 40 passed. ./script/format --check: passed."
     }
   ],
   "future_phases": [
     {
       "phase": "Phase B",
       "scope": [
-        "bounded subagent delegation",
-        "background shell and process lifecycle",
         "model-gated computer and document actions",
         "skill discovery and bundled resources",
         "trusted lifecycle hooks",
         "local-runtime telemetry"
-      ]
+      ],
+      "note": "feat-013 run_agents and feat-014 background shell promoted from this list"
     },
     {
       "phase": "Phase C",

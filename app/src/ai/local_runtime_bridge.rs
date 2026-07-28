@@ -31,10 +31,18 @@ use crate::ai::agent::api::RequestParams;
 use crate::ai::agent::task::TaskId;
 use crate::ai::agent::{
     AIAgentAction, AIAgentActionId, AIAgentActionResult, AIAgentActionResultType,
-    AIAgentActionType, AIAgentInput, AnyFileContent, AskUserQuestionItem, AskUserQuestionOption,
-    AskUserQuestionType, FileContext, FileGlobV2Result, GrepResult, ReadFilesResult,
-    RequestCommandOutputResult, SearchCodebaseResult,
+    AIAgentActionType, AIAgentInput, AIAgentPtyWriteMode, AnyFileContent, AskUserQuestionItem,
+    AskUserQuestionOption, AskUserQuestionType, FileContext, FileGlobV2Result, GrepResult,
+    ReadFilesResult, ReadShellCommandOutputResult, RequestCommandOutputResult,
+    RunAgentsAgentOutcomeKind, RunAgentsAgentRunConfig, RunAgentsExecutionMode,
+    RunAgentsLaunchedExecutionMode, RunAgentsRequest, RunAgentsResult, SearchCodebaseResult,
+    ShellCommandDelay, WriteToLongRunningShellCommandResult,
 };
+use crate::terminal::model::block::BlockId;
+
+/// Maximum child agents a local-runtime `run_agents` call may request.
+/// Keeps local orchestration bounded relative to cloud-scale fan-out.
+pub const LOCAL_RUN_AGENTS_MAX_CHILDREN: usize = 4;
 
 /// Request sent from the runtime task to the app/UI model task for real Warp tool execution.
 pub struct ToolExecutionRequest {
@@ -158,6 +166,11 @@ impl LocalRuntimeToolRegistry {
         if params.ask_user_question_enabled {
             registry.add_ask_user_question();
         }
+        // Depth bound: only root agents may advertise run_agents so children
+        // cannot recursively fan out further local orchestration.
+        if params.orchestration_enabled && params.parent_agent_id.is_none() {
+            registry.add_run_agents();
+        }
         if registry.permission_mode == LocalRuntimePermissionMode::Plan {
             registry.retain_plan_tools();
         }
@@ -174,10 +187,14 @@ impl LocalRuntimeToolRegistry {
 
         for schema in build_tool_schemas() {
             let safety_class = match schema.name.as_str() {
-                "run_shell_command" | "edit_files" => ToolSafetyClass::Interactive,
-                "read_files" | "grep" | "file_glob_v2" | "search_codebase" => {
-                    ToolSafetyClass::ReadOnly
+                "run_shell_command" | "edit_files" | "write_to_long_running_shell_command" => {
+                    ToolSafetyClass::Interactive
                 }
+                "read_files"
+                | "grep"
+                | "file_glob_v2"
+                | "search_codebase"
+                | "read_shell_command_output" => ToolSafetyClass::ReadOnly,
                 _ => ToolSafetyClass::Interactive,
             };
             registry.add_tool(schema, safety_class, LocalRuntimeToolRouteKind::BuiltIn);
@@ -319,6 +336,14 @@ impl LocalRuntimeToolRegistry {
     fn add_ask_user_question(&mut self) {
         self.add_tool(
             ask_user_question_schema(),
+            ToolSafetyClass::Interactive,
+            LocalRuntimeToolRouteKind::BuiltIn,
+        );
+    }
+
+    fn add_run_agents(&mut self) {
+        self.add_tool(
+            run_agents_schema(),
             ToolSafetyClass::Interactive,
             LocalRuntimeToolRouteKind::BuiltIn,
         );
@@ -473,12 +498,43 @@ pub fn build_tool_schemas() -> Vec<ToolSchema> {
     vec![
         ToolSchemaBuilder::new(
             "run_shell_command",
-            "Run a shell command in the user's terminal. Use this for any system operation. For read-only lookups (find, ls, pwd, cat, mdfind, grep, python3 -c, etc.) set is_read_only=true so the command can auto-run. On macOS prefer python3 (not python). For quick math/scripts use: python3 -c 'print(sum(range(1, 101)))'. To locate a directory by name outside the project, prefer a FAST scoped search — on macOS: mdfind 'kMDItemFSName == \"folder-name\"c' | head -20; or find ~/codish -maxdepth 5 -type d -name 'folder-name' 2>/dev/null. Avoid unbounded find ~ without -maxdepth.",
+            "Run a shell command in the user's terminal. Use this for any system operation. For read-only lookups (find, ls, pwd, cat, mdfind, grep, python3 -c, etc.) set is_read_only=true so the command can auto-run. On macOS prefer python3 (not python). For quick math/scripts use: python3 -c 'print(sum(range(1, 101)))'. To locate a directory by name outside the project, prefer a FAST scoped search — on macOS: mdfind 'kMDItemFSName == \"folder-name\"c' | head -20; or find ~/codish -maxdepth 5 -type d -name 'folder-name' 2>/dev/null. Avoid unbounded find ~ without -maxdepth. For servers/tests that must keep running, set wait_until_complete=false, then use read_shell_command_output / write_to_long_running_shell_command with the returned block_id.",
         )
         .required_string("command", "The shell command to execute")
         .optional_bool("is_read_only", "Set true for commands with no side effects (find, ls, pwd, cat, mdfind, grep, python3 -c). Defaults to an automatic read-only heuristic when omitted.")
         .optional_bool("is_risky", "Whether the command should require user confirmation")
         .optional_bool("uses_pager", "Whether the command may open a pager")
+        .optional_bool(
+            "wait_until_complete",
+            "When true (default), wait for the command to finish (capped). When false, return a long-running snapshot with block_id so you can poll or write with the LRC tools.",
+        )
+        .build(),
+        ToolSchemaBuilder::new(
+            "read_shell_command_output",
+            "Read output from a long-running shell command previously started with wait_until_complete=false. Use the block_id from the long-running snapshot.",
+        )
+        .required_string(
+            "block_id",
+            "Block id from a long-running shell snapshot (also accepted as command_id)",
+        )
+        .optional_bool(
+            "wait_until_complete",
+            "When true, wait until the command finishes before returning. When false/omitted, return the current snapshot after a short delay.",
+        )
+        .build(),
+        ToolSchemaBuilder::new(
+            "write_to_long_running_shell_command",
+            "Write input to a long-running shell command (REPL/server) identified by block_id. Prefer mode=line for interactive shells.",
+        )
+        .required_string(
+            "block_id",
+            "Block id from a long-running shell snapshot (also accepted as command_id)",
+        )
+        .required_string("input", "Text or bytes to write to the PTY")
+        .optional_string(
+            "mode",
+            "Write mode: raw (default), line (send enter after text), or block (bracketed paste)",
+        )
         .build(),
         ToolSchemaBuilder::new(
             "read_files",
@@ -603,6 +659,55 @@ fn ask_user_question_schema() -> ToolSchema {
     }
 }
 
+fn run_agents_schema() -> ToolSchema {
+    ToolSchema {
+        name: "run_agents".to_string(),
+        description: format!(
+            "Delegate independent work to up to {LOCAL_RUN_AGENTS_MAX_CHILDREN} parallel child agents via Warp orchestration. Use only for parallelizable subtasks; prefer direct tools for sequential work. Local execution only. Child agents cannot call run_agents again."
+        ),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": "Short human-readable summary of what the child agents will do"
+                },
+                "base_prompt": {
+                    "type": "string",
+                    "description": "Optional shared instructions prepended to every child agent prompt"
+                },
+                "agents": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": LOCAL_RUN_AGENTS_MAX_CHILDREN,
+                    "description": "One entry per child agent to launch",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "description": "Stable short name for the child agent"
+                            },
+                            "prompt": {
+                                "type": "string",
+                                "description": "Task prompt for this child agent"
+                            },
+                            "title": {
+                                "type": "string",
+                                "description": "Optional display title for the child conversation"
+                            }
+                        },
+                        "required": ["name", "prompt"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["summary", "agents"],
+            "additionalProperties": false
+        }),
+    }
+}
+
 #[cfg(test)]
 pub fn is_supported_tool(name: &str) -> bool {
     LocalRuntimeToolRegistry::built_ins().contains_tool(name)
@@ -680,6 +785,15 @@ fn built_in_tool_call_to_ai_action(
     if call.name == "ask_user_question" {
         return ask_user_question_tool_call_to_ai_action(call);
     }
+    if call.name == "run_agents" {
+        return run_agents_tool_call_to_ai_action(call);
+    }
+    if call.name == "read_shell_command_output" {
+        return read_shell_command_output_tool_call_to_ai_action(call);
+    }
+    if call.name == "write_to_long_running_shell_command" {
+        return write_to_long_running_shell_command_tool_call_to_ai_action(call);
+    }
 
     let action: AIAgentActionType = match tool_call_to_proto_tool(call)? {
         api::message::tool_call::Tool::RunShellCommand(tool) => tool.into(),
@@ -687,6 +801,8 @@ fn built_in_tool_call_to_ai_action(
         api::message::tool_call::Tool::Grep(tool) => tool.into(),
         api::message::tool_call::Tool::FileGlobV2(tool) => tool.into(),
         api::message::tool_call::Tool::SearchCodebase(tool) => tool.into(),
+        api::message::tool_call::Tool::ReadShellCommandOutput(tool) => tool.into(),
+        api::message::tool_call::Tool::WriteToLongRunningShellCommand(tool) => tool.into(),
         _ => {
             return Err(ToolExecutionError::NotFound {
                 name: call.name.clone(),
@@ -695,6 +811,78 @@ fn built_in_tool_call_to_ai_action(
     };
 
     Ok(action)
+}
+
+fn read_shell_command_output_tool_call_to_ai_action(
+    call: &ToolCall,
+) -> Result<AIAgentActionType, ToolExecutionError> {
+    validate_allowed_arguments(
+        &call.arguments,
+        &["block_id", "command_id", "wait_until_complete"],
+        &call.name,
+    )?;
+    let block_id = required_string_any(&call.arguments, &["block_id", "command_id"], &call.name)?;
+    let wait_until_complete =
+        optional_bool(&call.arguments, "wait_until_complete")?.unwrap_or(false);
+    let delay = if wait_until_complete {
+        Some(ShellCommandDelay::OnCompletion)
+    } else {
+        None
+    };
+    Ok(AIAgentActionType::ReadShellCommandOutput {
+        block_id: BlockId::from(block_id),
+        delay,
+    })
+}
+
+fn write_to_long_running_shell_command_tool_call_to_ai_action(
+    call: &ToolCall,
+) -> Result<AIAgentActionType, ToolExecutionError> {
+    validate_allowed_arguments(
+        &call.arguments,
+        &["block_id", "command_id", "input", "mode"],
+        &call.name,
+    )?;
+    let block_id = required_string_any(&call.arguments, &["block_id", "command_id"], &call.name)?;
+    let input = required_string(&call.arguments, "input", &call.name)?;
+    let mode = match optional_string(&call.arguments, "mode")?
+        .unwrap_or_else(|| "raw".to_string())
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "raw" => AIAgentPtyWriteMode::Raw,
+        "line" => AIAgentPtyWriteMode::Line,
+        "block" => AIAgentPtyWriteMode::Block,
+        other => {
+            return Err(ToolExecutionError::InvalidInput {
+                reason: format!(
+                    "Tool `write_to_long_running_shell_command` mode must be raw, line, or block (got {other})"
+                ),
+            });
+        }
+    };
+    Ok(AIAgentActionType::WriteToLongRunningShellCommand {
+        block_id: BlockId::from(block_id),
+        input: bytes::Bytes::from(input),
+        mode,
+    })
+}
+
+fn required_string_any(
+    arguments: &Value,
+    keys: &[&str],
+    tool_name: &str,
+) -> Result<String, ToolExecutionError> {
+    for key in keys {
+        if let Some(value) = optional_string(arguments, key)? {
+            if !value.trim().is_empty() {
+                return Ok(value);
+            }
+        }
+    }
+    Err(ToolExecutionError::InvalidInput {
+        reason: format!("Tool `{tool_name}` requires one of: {}", keys.join(" or ")),
+    })
 }
 
 fn ask_user_question_tool_call_to_ai_action(
@@ -719,6 +907,91 @@ fn ask_user_question_tool_call_to_ai_action(
         .map(parse_ask_user_question)
         .collect::<Result<_, _>>()?;
     Ok(AIAgentActionType::AskUserQuestion { questions })
+}
+
+fn run_agents_tool_call_to_ai_action(
+    call: &ToolCall,
+) -> Result<AIAgentActionType, ToolExecutionError> {
+    validate_allowed_arguments(
+        &call.arguments,
+        &["summary", "base_prompt", "agents"],
+        &call.name,
+    )?;
+    let summary = required_string(&call.arguments, "summary", &call.name)?;
+    if summary.trim().is_empty() {
+        return Err(ToolExecutionError::InvalidInput {
+            reason: "Tool `run_agents` requires a non-empty `summary`".to_string(),
+        });
+    }
+    let base_prompt = optional_string(&call.arguments, "base_prompt")?.unwrap_or_default();
+    let agents = call
+        .arguments
+        .get("agents")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ToolExecutionError::InvalidInput {
+            reason: "Tool `run_agents` requires array argument `agents`".to_string(),
+        })?;
+    if agents.is_empty() {
+        return Err(ToolExecutionError::InvalidInput {
+            reason: "Tool `run_agents` requires at least one agent".to_string(),
+        });
+    }
+    if agents.len() > LOCAL_RUN_AGENTS_MAX_CHILDREN {
+        return Err(ToolExecutionError::InvalidInput {
+            reason: format!(
+                "Tool `run_agents` allows at most {LOCAL_RUN_AGENTS_MAX_CHILDREN} child agents"
+            ),
+        });
+    }
+
+    let agent_run_configs = agents
+        .iter()
+        .map(parse_run_agents_agent)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(AIAgentActionType::RunAgents(RunAgentsRequest {
+        summary,
+        base_prompt,
+        skills: Vec::new(),
+        // Leave model/harness empty so Warp's orchestration UI / profile defaults apply.
+        model_id: String::new(),
+        harness_type: String::new(),
+        // Local-runtime orchestration is forced to local execution (no remote fan-out).
+        execution_mode: RunAgentsExecutionMode::Local,
+        agent_run_configs,
+        plan_id: String::new(),
+        harness_auth_secret_name: None,
+    }))
+}
+
+fn parse_run_agents_agent(value: &Value) -> Result<RunAgentsAgentRunConfig, ToolExecutionError> {
+    let arguments = Value::Object(
+        value
+            .as_object()
+            .ok_or_else(|| ToolExecutionError::InvalidInput {
+                reason: "`run_agents.agents` entries must be objects".to_string(),
+            })?
+            .clone(),
+    );
+    validate_allowed_arguments(&arguments, &["name", "prompt", "title"], "run_agents agent")?;
+    let name = required_string(&arguments, "name", "run_agents agent")?;
+    if name.trim().is_empty() {
+        return Err(ToolExecutionError::InvalidInput {
+            reason: "`run_agents` agent `name` must be non-empty".to_string(),
+        });
+    }
+    let prompt = required_string(&arguments, "prompt", "run_agents agent")?;
+    if prompt.trim().is_empty() {
+        return Err(ToolExecutionError::InvalidInput {
+            reason: "`run_agents` agent `prompt` must be non-empty".to_string(),
+        });
+    }
+    let title = optional_string(&arguments, "title")?.unwrap_or_default();
+    Ok(RunAgentsAgentRunConfig {
+        name,
+        prompt,
+        title,
+    })
 }
 
 fn parse_ask_user_question(value: &Value) -> Result<AskUserQuestionItem, ToolExecutionError> {
@@ -917,6 +1190,11 @@ fn action_result_to_proto_tool_call_result_type(
         AIAgentActionResultType::CallMCPTool(result) => result.try_into().ok()?,
         AIAgentActionResultType::ReadSkill(result) => result.try_into().ok()?,
         AIAgentActionResultType::AskUserQuestion(result) => result.into(),
+        AIAgentActionResultType::RunAgents(result) => result.try_into().ok()?,
+        AIAgentActionResultType::ReadShellCommandOutput(result) => result.try_into().ok()?,
+        AIAgentActionResultType::WriteToLongRunningShellCommand(result) => {
+            result.try_into().ok()?
+        }
         _ => return None,
     };
 
@@ -931,6 +1209,13 @@ fn action_result_to_proto_tool_call_result_type(
         RequestResult::CallMcpTool(result) => Some(MessageResult::CallMcpTool(result)),
         RequestResult::ReadSkill(result) => Some(MessageResult::ReadSkill(result)),
         RequestResult::AskUserQuestion(result) => Some(MessageResult::AskUserQuestion(result)),
+        RequestResult::RunAgentsResult(result) => Some(MessageResult::RunAgentsResult(result)),
+        RequestResult::ReadShellCommandOutput(result) => {
+            Some(MessageResult::ReadShellCommandOutput(result))
+        }
+        RequestResult::WriteToLongRunningShellCommand(result) => {
+            Some(MessageResult::WriteToLongRunningShellCommand(result))
+        }
         _ => None,
     }
 }
@@ -994,7 +1279,7 @@ fn action_result_to_content(result: &AIAgentActionResultType) -> String {
             "stdout": grid_contents,
             "command": command,
             "block_id": block_id.to_string(),
-            "instruction": "Partial output only. If stdout already answers the user, report that answer immediately. Do not invent a timeout failure. Do not start another shell command until this one finishes.",
+            "instruction": "Command is still running. If stdout already answers the user, report that answer. Otherwise poll with read_shell_command_output or send input with write_to_long_running_shell_command using this block_id. Do not invent timeouts.",
         })
         .to_string(),
         AIAgentActionResultType::RequestCommandOutput(
@@ -1157,6 +1442,154 @@ fn action_result_to_content(result: &AIAgentActionResultType) -> String {
                 .to_string(),
             }
         }
+        AIAgentActionResultType::RunAgents(result) => match result {
+            RunAgentsResult::Launched {
+                model_id,
+                harness_type,
+                execution_mode,
+                agents,
+            } => {
+                let agents = agents
+                    .iter()
+                    .map(|agent| match &agent.kind {
+                        RunAgentsAgentOutcomeKind::Launched { agent_id } => serde_json::json!({
+                            "name": agent.name,
+                            "status": "launched",
+                            "agent_id": agent_id,
+                        }),
+                        RunAgentsAgentOutcomeKind::Failed { error } => serde_json::json!({
+                            "name": agent.name,
+                            "status": "failed",
+                            "error": error,
+                        }),
+                    })
+                    .collect::<Vec<_>>();
+                let execution_mode = match execution_mode {
+                    RunAgentsLaunchedExecutionMode::Local => serde_json::json!({ "type": "local" }),
+                    RunAgentsLaunchedExecutionMode::Remote {
+                        environment_id,
+                        worker_host,
+                        computer_use_enabled,
+                    } => serde_json::json!({
+                        "type": "remote",
+                        "environment_id": environment_id,
+                        "worker_host": worker_host,
+                        "computer_use_enabled": computer_use_enabled,
+                    }),
+                };
+                serde_json::json!({
+                    "status": "launched",
+                    "model_id": model_id,
+                    "harness_type": harness_type,
+                    "execution_mode": execution_mode,
+                    "agents": agents,
+                    "instruction": "Child agents were launched. Do not re-run the same orchestration. Use launched agent_ids if follow-up is needed; otherwise continue with local tools.",
+                })
+                .to_string()
+            }
+            RunAgentsResult::Denied { reason } => serde_json::json!({
+                "status": "denied",
+                "error": reason,
+            })
+            .to_string(),
+            RunAgentsResult::Failure { error } => serde_json::json!({
+                "status": "error",
+                "error": error,
+            })
+            .to_string(),
+            RunAgentsResult::Cancelled => serde_json::json!({
+                "status": "cancelled",
+            })
+            .to_string(),
+        },
+        AIAgentActionResultType::ReadShellCommandOutput(result) => match result {
+            ReadShellCommandOutputResult::CommandFinished {
+                command,
+                output,
+                exit_code,
+                block_id,
+                ..
+            } => {
+                let status = if exit_code.was_successful() {
+                    "completed"
+                } else {
+                    "failed"
+                };
+                serde_json::json!({
+                    "status": status,
+                    "block_id": block_id.to_string(),
+                    "exit_code": exit_code.value(),
+                    "stdout": output,
+                    "command": command,
+                    "instruction": "Long-running command finished. Answer from stdout; do not invent timeouts.",
+                })
+                .to_string()
+            }
+            ReadShellCommandOutputResult::LongRunningCommandSnapshot {
+                command,
+                grid_contents,
+                block_id,
+                ..
+            } => serde_json::json!({
+                "status": "long_running",
+                "block_id": block_id.to_string(),
+                "stdout": grid_contents,
+                "command": command,
+                "instruction": "Still running. Poll again with read_shell_command_output or write with write_to_long_running_shell_command using block_id.",
+            })
+            .to_string(),
+            ReadShellCommandOutputResult::Cancelled => serde_json::json!({
+                "status": "cancelled",
+            })
+            .to_string(),
+            ReadShellCommandOutputResult::Error(error) => serde_json::json!({
+                "status": "error",
+                "error": format!("{error:?}"),
+            })
+            .to_string(),
+        },
+        AIAgentActionResultType::WriteToLongRunningShellCommand(result) => match result {
+            WriteToLongRunningShellCommandResult::Snapshot {
+                block_id,
+                grid_contents,
+                ..
+            } => serde_json::json!({
+                "status": "long_running",
+                "block_id": block_id.to_string(),
+                "stdout": grid_contents,
+                "instruction": "Input was written; command still running. Poll with read_shell_command_output if needed.",
+            })
+            .to_string(),
+            WriteToLongRunningShellCommandResult::CommandFinished {
+                block_id,
+                output,
+                exit_code,
+                ..
+            } => {
+                let status = if exit_code.was_successful() {
+                    "completed"
+                } else {
+                    "failed"
+                };
+                serde_json::json!({
+                    "status": status,
+                    "block_id": block_id.to_string(),
+                    "exit_code": exit_code.value(),
+                    "stdout": output,
+                    "instruction": "Command finished after write. Answer from stdout.",
+                })
+                .to_string()
+            }
+            WriteToLongRunningShellCommandResult::Cancelled => serde_json::json!({
+                "status": "cancelled",
+            })
+            .to_string(),
+            WriteToLongRunningShellCommandResult::Error(error) => serde_json::json!({
+                "status": "error",
+                "error": format!("{error:?}"),
+            })
+            .to_string(),
+        },
         _ => result.to_string(),
     }
 }
@@ -1194,30 +1627,43 @@ pub fn tool_call_to_proto_tool(
         "run_shell_command" => {
             validate_allowed_arguments(
                 &call.arguments,
-                &["command", "is_read_only", "is_risky", "uses_pager"],
+                &[
+                    "command",
+                    "is_read_only",
+                    "is_risky",
+                    "uses_pager",
+                    "wait_until_complete",
+                ],
                 &call.name,
             )?;
             let command = required_string(&call.arguments, "command", &call.name)?;
             let explicit_read_only = optional_bool(&call.arguments, "is_read_only")?;
             let is_read_only =
                 explicit_read_only.unwrap_or_else(|| infer_shell_command_is_read_only(&command));
+            // Default true for weak local models; false enables LRC poll/write tools.
+            let wait_until_complete =
+                optional_bool(&call.arguments, "wait_until_complete")?.unwrap_or(true);
             Ok(Tool::RunShellCommand(
                 api::message::tool_call::RunShellCommand {
                     command,
                     is_read_only,
                     is_risky: optional_bool(&call.arguments, "is_risky")?.unwrap_or(false),
                     uses_pager: optional_bool(&call.arguments, "uses_pager")?.unwrap_or(false),
-                    // Local runtime has no long-running-command poll tools; always wait
-                    // for completion (capped by ShellCommandExecutor::MAX_AGENT_DELAY_DURATION).
                     wait_until_complete_value: Some(
                         api::message::tool_call::run_shell_command::WaitUntilCompleteValue::WaitUntilComplete(
-                            true,
+                            wait_until_complete,
                         ),
                     ),
                     ..Default::default()
                 },
             ))
         }
+        "read_shell_command_output" => Ok(Tool::ReadShellCommandOutput(
+            read_shell_command_output_tool_call_to_proto(call)?,
+        )),
+        "write_to_long_running_shell_command" => Ok(Tool::WriteToLongRunningShellCommand(
+            write_to_long_running_shell_command_tool_call_to_proto(call)?,
+        )),
         "read_files" => {
             validate_allowed_arguments(&call.arguments, &["paths", "files"], &call.name)?;
             Ok(Tool::ReadFiles(api::message::tool_call::ReadFiles {
@@ -1287,10 +1733,91 @@ pub fn tool_call_to_proto_tool(
         "ask_user_question" => Ok(Tool::AskUserQuestion(ask_user_question_tool_call_to_proto(
             call,
         )?)),
+        "run_agents" => Ok(Tool::RunAgents(run_agents_tool_call_to_proto(call)?)),
         _ => Err(ToolExecutionError::NotFound {
             name: call.name.clone(),
         }),
     }
+}
+
+fn read_shell_command_output_tool_call_to_proto(
+    call: &ToolCall,
+) -> Result<api::message::tool_call::ReadShellCommandOutput, ToolExecutionError> {
+    let AIAgentActionType::ReadShellCommandOutput { block_id, delay } =
+        read_shell_command_output_tool_call_to_ai_action(call)?
+    else {
+        unreachable!("read_shell_command_output conversion always returns that action");
+    };
+    let delay = match delay {
+        Some(ShellCommandDelay::OnCompletion) => {
+            Some(api::message::tool_call::read_shell_command_output::Delay::OnCompletion(()))
+        }
+        Some(ShellCommandDelay::Duration(duration)) => Some(
+            api::message::tool_call::read_shell_command_output::Delay::Duration(
+                prost_types::Duration {
+                    seconds: duration.as_secs() as i64,
+                    nanos: 0,
+                },
+            ),
+        ),
+        None => None,
+    };
+    Ok(api::message::tool_call::ReadShellCommandOutput {
+        command_id: block_id.to_string(),
+        delay,
+    })
+}
+
+fn write_to_long_running_shell_command_tool_call_to_proto(
+    call: &ToolCall,
+) -> Result<api::message::tool_call::WriteToLongRunningShellCommand, ToolExecutionError> {
+    use api::message::tool_call::write_to_long_running_shell_command::mode::Mode as ModeVariant;
+    use api::message::tool_call::write_to_long_running_shell_command::Mode;
+
+    let AIAgentActionType::WriteToLongRunningShellCommand {
+        block_id,
+        input,
+        mode,
+    } = write_to_long_running_shell_command_tool_call_to_ai_action(call)?
+    else {
+        unreachable!("write_to_long_running_shell_command conversion always returns that action");
+    };
+    let mode = match mode {
+        AIAgentPtyWriteMode::Raw => ModeVariant::Raw(()),
+        AIAgentPtyWriteMode::Line => ModeVariant::Line(()),
+        AIAgentPtyWriteMode::Block => ModeVariant::Block(()),
+    };
+    Ok(api::message::tool_call::WriteToLongRunningShellCommand {
+        input: input.to_vec(),
+        mode: Some(Mode { mode: Some(mode) }),
+        command_id: block_id.to_string(),
+    })
+}
+
+fn run_agents_tool_call_to_proto(call: &ToolCall) -> Result<api::RunAgents, ToolExecutionError> {
+    let AIAgentActionType::RunAgents(request) = run_agents_tool_call_to_ai_action(call)? else {
+        unreachable!("run_agents conversion always returns RunAgents");
+    };
+    Ok(api::RunAgents {
+        summary: request.summary,
+        base_prompt: request.base_prompt,
+        skills: Vec::new(),
+        model_id: request.model_id,
+        harness: None,
+        agent_run_configs: request
+            .agent_run_configs
+            .into_iter()
+            .map(|config| api::run_agents::AgentRunConfig {
+                name: config.name,
+                prompt: config.prompt,
+                title: config.title,
+            })
+            .collect(),
+        plan_id: request.plan_id,
+        execution_mode: Some(api::run_agents::ExecutionMode::Local(
+            api::run_agents::Local {},
+        )),
+    })
 }
 
 fn ask_user_question_tool_call_to_proto(
@@ -1404,15 +1931,53 @@ pub fn proto_tool_call_to_runtime_with_registry(
 
     let tool = tool_call.tool.as_ref()?;
     let (name, arguments) = match tool {
-        Tool::RunShellCommand(tool) => (
-            "run_shell_command".to_string(),
-            serde_json::json!({
-                "command": tool.command,
-                "is_read_only": tool.is_read_only,
-                "is_risky": tool.is_risky,
-                "uses_pager": tool.uses_pager,
-            }),
-        ),
+        Tool::RunShellCommand(tool) => {
+            let wait_until_complete = tool.wait_until_complete_value.is_none_or(
+                |api::message::tool_call::run_shell_command::WaitUntilCompleteValue::WaitUntilComplete(
+                    should_wait,
+                )| should_wait,
+            );
+            (
+                "run_shell_command".to_string(),
+                serde_json::json!({
+                    "command": tool.command,
+                    "is_read_only": tool.is_read_only,
+                    "is_risky": tool.is_risky,
+                    "uses_pager": tool.uses_pager,
+                    "wait_until_complete": wait_until_complete,
+                }),
+            )
+        }
+        Tool::ReadShellCommandOutput(tool) => {
+            let wait_until_complete = matches!(
+                tool.delay,
+                Some(api::message::tool_call::read_shell_command_output::Delay::OnCompletion(_))
+            );
+            (
+                "read_shell_command_output".to_string(),
+                serde_json::json!({
+                    "block_id": tool.command_id,
+                    "wait_until_complete": wait_until_complete,
+                }),
+            )
+        }
+        Tool::WriteToLongRunningShellCommand(tool) => {
+            use api::message::tool_call::write_to_long_running_shell_command::mode::Mode as ModeVariant;
+
+            let mode = match tool.mode.as_ref().and_then(|mode| mode.mode.as_ref()) {
+                Some(ModeVariant::Line(_)) => "line",
+                Some(ModeVariant::Block(_)) => "block",
+                Some(ModeVariant::Raw(_)) | None => "raw",
+            };
+            (
+                "write_to_long_running_shell_command".to_string(),
+                serde_json::json!({
+                    "block_id": tool.command_id,
+                    "input": String::from_utf8_lossy(&tool.input),
+                    "mode": mode,
+                }),
+            )
+        }
         Tool::ReadFiles(tool) => (
             "read_files".to_string(),
             serde_json::json!({
@@ -1544,6 +2109,30 @@ pub fn proto_tool_call_to_runtime_with_registry(
                 "ask_user_question".to_string(),
                 serde_json::json!({ "questions": questions }),
             )
+        }
+        Tool::RunAgents(tool) => {
+            let agents = tool
+                .agent_run_configs
+                .iter()
+                .map(|config| {
+                    let mut agent = serde_json::json!({
+                        "name": config.name,
+                        "prompt": config.prompt,
+                    });
+                    if !config.title.is_empty() {
+                        agent["title"] = Value::String(config.title.clone());
+                    }
+                    agent
+                })
+                .collect::<Vec<_>>();
+            let mut arguments = serde_json::json!({
+                "summary": tool.summary,
+                "agents": agents,
+            });
+            if !tool.base_prompt.is_empty() {
+                arguments["base_prompt"] = Value::String(tool.base_prompt.clone());
+            }
+            ("run_agents".to_string(), arguments)
         }
         _ => return None,
     };
@@ -2148,20 +2737,20 @@ mod tests {
 
     #[test]
     fn completed_shell_result_puts_stdout_and_forbids_invented_timeout() {
-        use crate::ai::agent::RequestCommandOutputResult;
-        use crate::terminal::model::block::BlockId;
         use warp_core::command::ExitCode;
 
-        let completed = AIAgentActionResultType::RequestCommandOutput(
-            RequestCommandOutputResult::Completed {
+        use crate::ai::agent::RequestCommandOutputResult;
+        use crate::terminal::model::block::BlockId;
+
+        let completed =
+            AIAgentActionResultType::RequestCommandOutput(RequestCommandOutputResult::Completed {
                 block_id: BlockId::from("blk_1".to_string()),
                 command: r#"python3 -c "print(sum(range(1, 101)))""#.to_string(),
                 output: "5050\n".to_string(),
                 exit_code: ExitCode::from(0),
                 start_ts: None,
                 completed_ts: None,
-            },
-        );
+            });
         let content = action_result_to_content(&completed);
         assert!(content.contains("\"status\":\"completed\""));
         assert!(content.contains("5050"));
@@ -2359,12 +2948,257 @@ mod tests {
     }
 
     #[test]
+    fn run_agents_is_gated_by_orchestration_and_root_depth() {
+        let mut params = RequestParams::new_for_test();
+        params.orchestration_enabled = true;
+        let registry = LocalRuntimeToolRegistry::from_request(&params);
+        assert!(registry.contains_tool("run_agents"));
+
+        params.parent_agent_id = Some("parent-1".to_string());
+        let child_registry = LocalRuntimeToolRegistry::from_request(&params);
+        assert!(!child_registry.contains_tool("run_agents"));
+
+        let mut disabled = RequestParams::new_for_test();
+        disabled.orchestration_enabled = false;
+        assert!(!LocalRuntimeToolRegistry::from_request(&disabled).contains_tool("run_agents"));
+    }
+
+    #[test]
+    fn run_agents_maps_to_local_warp_action_with_child_bounds() {
+        let mut registry = LocalRuntimeToolRegistry::built_ins();
+        registry.add_run_agents();
+        let call = ToolCall {
+            id: "call_orch_1".to_string(),
+            name: "run_agents".to_string(),
+            arguments: serde_json::json!({
+                "summary": "Parallel research",
+                "base_prompt": "Stay in-repo",
+                "agents": [
+                    { "name": "explorer", "prompt": "Find the runtime entrypoint", "title": "Explore" },
+                    { "name": "tester", "prompt": "List focused tests" }
+                ],
+            }),
+        };
+
+        let action = tool_call_to_ai_action_with_registry(
+            &call,
+            &TaskId::new("task_1".to_string()),
+            &registry,
+        )
+        .unwrap();
+        let AIAgentActionType::RunAgents(request) = action.action else {
+            panic!("expected run_agents action");
+        };
+        assert_eq!(request.summary, "Parallel research");
+        assert_eq!(request.base_prompt, "Stay in-repo");
+        assert!(matches!(
+            request.execution_mode,
+            RunAgentsExecutionMode::Local
+        ));
+        assert_eq!(request.agent_run_configs.len(), 2);
+        assert_eq!(request.agent_run_configs[0].name, "explorer");
+        assert_eq!(request.agent_run_configs[0].title, "Explore");
+        assert_eq!(request.agent_run_configs[1].prompt, "List focused tests");
+
+        let mut too_many = call.clone();
+        too_many.arguments = serde_json::json!({
+            "summary": "Too many",
+            "agents": (0..=LOCAL_RUN_AGENTS_MAX_CHILDREN)
+                .map(|i| serde_json::json!({ "name": format!("a{i}"), "prompt": "p" }))
+                .collect::<Vec<_>>(),
+        });
+        let err = tool_call_to_ai_action_with_registry(
+            &too_many,
+            &TaskId::new("task_1".to_string()),
+            &registry,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ToolExecutionError::InvalidInput { .. }));
+
+        let proto = tool_call_to_proto_tool_with_registry(&call, &registry).unwrap();
+        let restored = proto_tool_call_to_runtime_with_registry(
+            &api::message::ToolCall {
+                tool_call_id: call.id.clone(),
+                tool: Some(proto),
+            },
+            &registry,
+        )
+        .unwrap();
+        assert_eq!(restored.name, "run_agents");
+        assert_eq!(restored.arguments["summary"], "Parallel research");
+        assert_eq!(restored.arguments["agents"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn background_shell_tools_map_and_round_trip() {
+        let registry = LocalRuntimeToolRegistry::built_ins();
+        assert!(registry.contains_tool("read_shell_command_output"));
+        assert!(registry.contains_tool("write_to_long_running_shell_command"));
+        assert_eq!(
+            registry.safety_class("read_shell_command_output"),
+            ToolSafetyClass::ReadOnly
+        );
+        assert_eq!(
+            registry.safety_class("write_to_long_running_shell_command"),
+            ToolSafetyClass::Interactive
+        );
+
+        let shell = ToolCall {
+            id: "call_bg".to_string(),
+            name: "run_shell_command".to_string(),
+            arguments: serde_json::json!({
+                "command": "npm run dev",
+                "wait_until_complete": false,
+            }),
+        };
+        let action = tool_call_to_ai_action_with_registry(
+            &shell,
+            &TaskId::new("task_1".to_string()),
+            &registry,
+        )
+        .unwrap();
+        match action.action {
+            AIAgentActionType::RequestCommandOutput {
+                wait_until_completion: false,
+                command,
+                ..
+            } => assert_eq!(command, "npm run dev"),
+            other => panic!("expected background shell action, got {other:?}"),
+        }
+
+        let poll = ToolCall {
+            id: "call_poll".to_string(),
+            name: "read_shell_command_output".to_string(),
+            arguments: serde_json::json!({
+                "block_id": "blk_42",
+                "wait_until_complete": true,
+            }),
+        };
+        let action = tool_call_to_ai_action_with_registry(
+            &poll,
+            &TaskId::new("task_1".to_string()),
+            &registry,
+        )
+        .unwrap();
+        match action.action {
+            AIAgentActionType::ReadShellCommandOutput {
+                block_id,
+                delay: Some(ShellCommandDelay::OnCompletion),
+            } => assert_eq!(block_id.to_string(), "blk_42"),
+            other => panic!("expected read LRC action, got {other:?}"),
+        }
+
+        let write = ToolCall {
+            id: "call_write".to_string(),
+            name: "write_to_long_running_shell_command".to_string(),
+            arguments: serde_json::json!({
+                "command_id": "blk_42",
+                "input": "help",
+                "mode": "line",
+            }),
+        };
+        let action = tool_call_to_ai_action_with_registry(
+            &write,
+            &TaskId::new("task_1".to_string()),
+            &registry,
+        )
+        .unwrap();
+        match action.action {
+            AIAgentActionType::WriteToLongRunningShellCommand {
+                block_id,
+                input,
+                mode: AIAgentPtyWriteMode::Line,
+            } => {
+                assert_eq!(block_id.to_string(), "blk_42");
+                assert_eq!(input.as_ref(), b"help");
+            }
+            other => panic!("expected write LRC action, got {other:?}"),
+        }
+
+        let proto = tool_call_to_proto_tool_with_registry(&write, &registry).unwrap();
+        let restored = proto_tool_call_to_runtime_with_registry(
+            &api::message::ToolCall {
+                tool_call_id: write.id.clone(),
+                tool: Some(proto),
+            },
+            &registry,
+        )
+        .unwrap();
+        assert_eq!(restored.name, "write_to_long_running_shell_command");
+        assert_eq!(restored.arguments["block_id"], "blk_42");
+        assert_eq!(restored.arguments["mode"], "line");
+
+        use warp_core::command::ExitCode;
+
+        let finished = AIAgentActionResultType::ReadShellCommandOutput(
+            ReadShellCommandOutputResult::CommandFinished {
+                block_id: BlockId::from("blk_42".to_string()),
+                command: "npm run dev".to_string(),
+                output: "ready\n".to_string(),
+                exit_code: ExitCode::from(0),
+                start_ts: None,
+                completed_ts: None,
+            },
+        );
+        let content = action_result_to_content(&finished);
+        assert!(content.contains("\"status\":\"completed\""));
+        assert!(content.contains("ready"));
+        assert!(matches!(
+            action_result_to_proto_tool_call_result_type(&finished),
+            Some(api::message::tool_call_result::Result::ReadShellCommandOutput(_))
+        ));
+    }
+
+    #[test]
+    fn run_agents_result_content_and_proto_cover_launch_and_cancel() {
+        use crate::ai::agent::RunAgentsAgentOutcome;
+
+        let launched = AIAgentActionResultType::RunAgents(RunAgentsResult::Launched {
+            model_id: "local-model".to_string(),
+            harness_type: "oz".to_string(),
+            execution_mode: RunAgentsLaunchedExecutionMode::Local,
+            agents: vec![
+                RunAgentsAgentOutcome {
+                    name: "explorer".to_string(),
+                    kind: RunAgentsAgentOutcomeKind::Launched {
+                        agent_id: "agent-1".to_string(),
+                    },
+                },
+                RunAgentsAgentOutcome {
+                    name: "tester".to_string(),
+                    kind: RunAgentsAgentOutcomeKind::Failed {
+                        error: "spawn failed".to_string(),
+                    },
+                },
+            ],
+        });
+        let content = action_result_to_content(&launched);
+        assert!(content.contains("\"status\":\"launched\""));
+        assert!(content.contains("agent-1"));
+        assert!(content.contains("spawn failed"));
+
+        assert!(matches!(
+            action_result_to_proto_tool_call_result_type(&launched),
+            Some(api::message::tool_call_result::Result::RunAgentsResult(_))
+        ));
+
+        let cancelled = AIAgentActionResultType::RunAgents(RunAgentsResult::Cancelled);
+        assert_eq!(
+            action_result_to_content(&cancelled),
+            r#"{"status":"cancelled"}"#
+        );
+        // Cancelled maps to generic cancel marker, not a typed RunAgentsResult.
+        assert!(action_result_to_proto_tool_call_result_type(&cancelled).is_none());
+    }
+
+    #[test]
     fn request_permission_modes_filter_plan_tools_without_weakening_accept_edits() {
         use std::collections::HashMap;
         use std::sync::Arc;
 
         let mut plan_params = RequestParams::new_for_test();
         plan_params.ask_user_question_enabled = true;
+        plan_params.orchestration_enabled = true;
         plan_params.input = vec![AIAgentInput::UserQuery {
             query: "Plan this".to_string(),
             context: Arc::from([]),
@@ -2381,8 +3215,11 @@ mod tests {
         );
         assert!(plan_registry.contains_tool("read_files"));
         assert!(plan_registry.contains_tool("ask_user_question"));
+        assert!(plan_registry.contains_tool("read_shell_command_output"));
         assert!(!plan_registry.contains_tool("run_shell_command"));
+        assert!(!plan_registry.contains_tool("write_to_long_running_shell_command"));
         assert!(!plan_registry.contains_tool("edit_files"));
+        assert!(!plan_registry.contains_tool("run_agents"));
 
         let mut accept_params = RequestParams::new_for_test();
         accept_params.autonomy_level = api::AutonomyLevel::Unsupervised;
@@ -2447,6 +3284,8 @@ mod tests {
             names,
             vec![
                 "run_shell_command",
+                "read_shell_command_output",
+                "write_to_long_running_shell_command",
                 "read_files",
                 "grep",
                 "file_glob_v2",
@@ -2681,6 +3520,8 @@ mod tests {
             advertised_names,
             vec![
                 "run_shell_command",
+                "read_shell_command_output",
+                "write_to_long_running_shell_command",
                 "read_files",
                 "grep",
                 "file_glob_v2",

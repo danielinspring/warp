@@ -1456,7 +1456,9 @@ impl View for RequestedCommandView {
 
             is_last_output_message_in_output
                 && self.action_type.is_requested_command()
-                && action_status.as_ref().is_some_and(|status| status.is_running())
+                && action_status
+                    .as_ref()
+                    .is_some_and(|status| status.is_running())
                 && !is_input_pinned_to_top
                 && self.is_header_expanded
                 && terminal_model
@@ -1486,7 +1488,9 @@ impl View for RequestedCommandView {
         // (instead of only revealing a separate terminal block beneath the header).
         let should_render_command_result = self.is_header_expanded
             && self.action_type.is_requested_command()
-            && action_status.as_ref().is_some_and(|status| status.is_done())
+            && action_status
+                .as_ref()
+                .is_some_and(|status| status.is_done())
             && !should_render_editor;
 
         let has_citations_footer =

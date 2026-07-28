@@ -2,63 +2,33 @@
 
 ## Current Objective
 
-Verify the LiteLLM Settings Test Connection path in a bundled OSS build, then choose the next Phase B/C feature.
+Continue Phase B sequentially: next is **model-gated computer and document actions**.
 
 ## Last Updated
 
-2026-07-24
+2026-07-27
 
 ## Active Feature
 
-`feat-009` — LiteLLM / OpenAI-compatible local provider discovery (`done`)
+`feat-014` — Background shell and process lifecycle (`done`)
 
-## Branch and Commit
+## Branch
 
-- Branch: `cla-dev-2`
-- Commit: not recorded; no commit was requested
+- `cla-dev-2`
+- Uncommitted: feat-013 + feat-014 local runtime bridge work (and format fixes)
 
 ## Current State
 
-- Existing Warp project rules remain in `AGENTS.md`.
-- Phase A local Ollama runtime work is complete.
-- LiteLLM support reuses the Ollama settings/provider path:
-  - base URL trailing `/v1` is normalized
-  - model discovery falls back from `/api/tags` to `/v1/models`
-  - Settings UI documents Ollama / LiteLLM
-- Live probe against `http://100.95.111.65:4000` confirmed `/v1/models` works and `/api/tags` returns 404.
+- Phase A: done (feat-001–008)
+- Phase C early polish: done (feat-009–012)
+- **feat-013 done:** bounded `run_agents` (root-only, max 4, Local mode)
+- **feat-014 done:** `wait_until_complete` on shell + `read_shell_command_output` / `write_to_long_running_shell_command` LRC tools
 
-## Files Changed
+## Verification
 
-- `feature_list.json`
-- `progress.md`
-- `session-handoff.md`
-- `app/src/ai/agent/api.rs`
-- `app/src/ai/ollama/mod.rs`
-- `app/src/ai/ollama/mod_test.rs`
-- `app/src/settings_view/ai_page.rs`
-- `crates/local_agent_runtime/src/provider/ollama.rs`
-- `dan_docs/notes.md`
-
-## Verification Evidence
-
-- `cargo test -p local_agent_runtime`: passed (9 unit + 22 integration; live/doc ignored).
-- `cargo clippy -p local_agent_runtime --all-targets --tests -- -D warnings`: passed.
-- `./script/format --check`: passed.
-- Live LiteLLM: `/api/tags` 404, `/v1/models` 200 with 20 models.
-
-## Blockers
-
-- `xcrun metal --version` fails with instructions to run `xcodebuild -downloadComponent MetalToolchain`.
-- Full Warp clippy stops on two unrelated existing `warpui_core` findings.
-
-## Next Session Startup
-
-1. Read `AGENTS.md`.
-2. Confirm `feat-009` is `done` in `feature_list.json`.
-3. Read `progress.md`.
-4. Bundle/rebuild and Test Connection against LiteLLM.
-5. Choose the next Phase B/C feature after explicit approval.
+- `cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use`: **40 passed**
+- `./script/format --check`: **passed**
 
 ## Recommended Next Step
 
-Rebuild the OSS app and confirm Settings → Ollama / LiteLLM → Test succeeds for `http://100.95.111.65:4000` (with or without `/v1`).
+Implement **feat-015: model-gated computer and document actions** (bridge only when `computer_use_enabled` / document tools are safe for the local model).

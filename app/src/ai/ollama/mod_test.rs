@@ -1,5 +1,6 @@
-use super::normalize_base_url;
 use local_agent_runtime::provider::text_tool_calls::extract_qwen_style_tool_calls;
+
+use super::normalize_base_url;
 
 #[test]
 fn recovers_qwen_xml_shell_command_from_assistant_text() {

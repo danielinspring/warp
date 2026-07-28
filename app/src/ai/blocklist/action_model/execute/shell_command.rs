@@ -264,9 +264,8 @@ impl ShellCommandExecutor {
                         command.clone()
                     };
                 // Honor wait_until_completion (proto default when unset is "wait").
-                // Local Ollama has no LRC poll tools, so waiting is required for tool
-                // results. Cloud agents that want the 2s snapshot path set
-                // wait_until_complete=false explicitly.
+                // Local runtime defaults wait=true for weak models, but can set
+                // wait_until_complete=false and use read/write LRC tools with block_id.
                 let delay = if *wait_until_completion {
                     Some(ShellCommandDelay::OnCompletion)
                 } else {

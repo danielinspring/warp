@@ -105,7 +105,11 @@ fn parse_function_block(input: &str) -> Option<(ToolCall, usize)> {
         if name.is_empty() {
             return None;
         }
-        (name.to_string(), &rest[name_end + 1..], "<function=".len() + name_end + 1)
+        (
+            name.to_string(),
+            &rest[name_end + 1..],
+            "<function=".len() + name_end + 1,
+        )
     } else if let Some(rest) = input.strip_prefix("<function name=\"") {
         let name_end = rest.find('"')?;
         let name = rest[..name_end].trim();
