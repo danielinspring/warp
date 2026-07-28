@@ -2,7 +2,7 @@
 
 ## Current Objective
 
-Continue Phase B: next is **local-runtime telemetry**.
+Begin remaining **Phase C** items (web search/fetch, plan/todo, etc.).
 
 ## Last Updated
 
@@ -10,7 +10,7 @@ Continue Phase B: next is **local-runtime telemetry**.
 
 ## Active Feature
 
-`feat-017` — Trusted lifecycle hooks (`done`)
+`feat-018` — Local-runtime telemetry (`done`)
 
 ## Branch
 
@@ -18,8 +18,8 @@ Continue Phase B: next is **local-runtime telemetry**.
 
 ## Current State
 
-- Phase B: feat-013–017 done.
-- Hooks: `LifecycleHooks` in `local_agent_runtime`; LoggingHooks + optional `WARP_LOCAL_AGENT_DENIED_TOOLS` on local Ollama path.
+- **Phase B complete:** feat-013–018 (run_agents, LRC shell, documents/CU, skills, hooks, telemetry).
+- Telemetry: structured runtime events + `AgentMode.LocalRuntime.*` product event registration + `local_runtime_telemetry` logs.
 
 ## Verification
 
@@ -29,4 +29,4 @@ Continue Phase B: next is **local-runtime telemetry**.
 
 ## Recommended Next Step
 
-Implement **feat-018: local-runtime telemetry** (provider latency, tool decisions, denials, cancel pairing).
+Promote Phase C **local web search and fetch** to `feat-019` (requires local provider/policy — not a simple client action bridge).

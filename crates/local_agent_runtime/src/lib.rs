@@ -54,6 +54,7 @@ pub mod hooks;
 pub mod messages;
 pub mod provider;
 pub mod runtime;
+pub mod telemetry;
 pub mod tools;
 
 // Re-export primary types at crate root for convenience.
@@ -68,5 +69,9 @@ pub use provider::{
     ChatRequest, ChatResponse, ChatStopReason, ChatStreamEvent, LLMProvider, ProviderCapabilities,
 };
 pub use runtime::{AgentRuntime, CancelHandle};
+pub use telemetry::{
+    ChannelTelemetrySink, FnTelemetrySink, NoopTelemetrySink, RuntimeTelemetryEvent,
+    RuntimeTelemetrySink, TelemetryLifecycleHooks,
+};
 pub use tools::schema::{ToolSchema, ToolSchemaBuilder};
 pub use tools::{PermissionDecision, ToolCall, ToolCallResult, ToolExecutor, ToolSafetyClass};

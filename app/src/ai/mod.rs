@@ -68,6 +68,7 @@ pub(crate) mod local_runtime_bridge;
 pub(crate) mod local_runtime_event_bus;
 pub(crate) mod local_runtime_integration;
 pub(crate) mod local_runtime_spec;
+pub(crate) mod local_runtime_telemetry;
 pub mod mcp;
 pub(crate) mod ollama;
 pub mod outline;

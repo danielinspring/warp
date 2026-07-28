@@ -3,18 +3,23 @@
 ## Current State
 
 **Last Updated:** 2026-07-28  
-**Active Feature:** `feat-017` — Trusted lifecycle hooks  
+**Active Feature:** `feat-018` — Local-runtime telemetry  
 **Status:** Done  
 
 ## What's Done
 
-- Phase A; Phase C early; Phase B feat-013–016.
-- **feat-017:** In-process lifecycle hooks (pre_tool, on_permission, post_tool, on_stop); LoggingHooks; ToolNameDenyHooks; CompositeHooks; WARP_LOCAL_AGENT_DENIED_TOOLS env for local Ollama.
+- Phase A; Phase C early (009–012); **Phase B fully complete** (013–018).
+- **feat-018:** RuntimeTelemetrySink events (run/provider/tool/finish), TelemetryLifecycleHooks, ChannelTelemetrySink on Ollama path, Warp `LocalRuntimeTelemetryEvent` schema registration.
 
 ## Next
 
-1. local-runtime telemetry (last Phase B item)
-2. Remaining Phase C  
+Phase C remaining:
+1. local web search and fetch  
+2. durable plan and todo state  
+3. OpenAI-compat polish  
+4. model-specific prompt packs  
+5. multimodal  
+6. Git workflow helpers  
 
 ## Verification
 

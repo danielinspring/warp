@@ -2,7 +2,7 @@
   "roadmap": {
     "name": "Local Ollama Agent Runtime",
     "source": "dan_docs/reports/local_agent_runtime_competitive_gap_report.md",
-    "active_feature": "feat-017",
+    "active_feature": "feat-018",
     "status_values": [
       "not-started",
       "in-progress",
@@ -390,15 +390,36 @@
         "./script/format --check"
       ],
       "evidence": "2026-07-28: Added LifecycleHooks (pre_tool/on_permission/post_tool/on_stop), LoggingHooks, CompositeHooks, ToolNameDenyHooks; wired into runtime tool path and Finished. Local Ollama uses LoggingHooks + WARP_LOCAL_AGENT_DENIED_TOOLS. cargo test -p local_agent_runtime: 23+18 passed (1 ignored live). cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use: 42 passed. format --check: passed."
+    },
+    {
+      "id": "feat-018",
+      "name": "Local-runtime telemetry",
+      "description": "Emit structured local-runtime telemetry for run start/finish, provider turn latency, provider errors, tool permission decisions, and tool results (including hook denials), with Warp product event registration and structured logging on the Ollama path.",
+      "phase": "Phase B",
+      "dependencies": [
+        "feat-017"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "RuntimeTelemetrySink receives RunStarted, ProviderTurn (latency), ProviderError, ToolPermission, ToolResult, RunFinished.",
+        "TelemetryLifecycleHooks records tool permission/result latency; runtime records provider turn latency.",
+        "Local Ollama integration wires ChannelTelemetrySink + TelemetryLifecycleHooks and logs events under target local_runtime_telemetry.",
+        "Warp LocalRuntimeTelemetryEvent product events are registered for analytics schema.",
+        "Unit tests cover TelemetryLifecycleHooks emission."
+      ],
+      "verification": [
+        "cargo test -p local_agent_runtime",
+        "cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-28: Added RuntimeTelemetryEvent/Sink, TelemetryLifecycleHooks, ChannelTelemetrySink; provider latency in run_loop; app LocalRuntimeTelemetryEvent registration + integration drain/log. cargo test -p local_agent_runtime: 19 lib + 23 integration passed. cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use: 42 passed. format --check: passed."
     }
   ],
   "future_phases": [
     {
       "phase": "Phase B",
-      "scope": [
-        "local-runtime telemetry"
-      ],
-      "note": "feat-013–017 promoted from this list"
+      "scope": [],
+      "note": "Phase B complete (feat-013–018). Proceed to remaining Phase C."
     },
     {
       "phase": "Phase C",

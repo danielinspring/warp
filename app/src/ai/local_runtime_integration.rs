@@ -25,8 +25,9 @@ use futures::StreamExt;
 use local_agent_runtime::messages::{AssistantMessage, ToolResultMessage, UserMessage};
 use local_agent_runtime::provider::ollama::{OllamaProvider, OllamaProviderConfig};
 use local_agent_runtime::{
-    AgentRuntime, CompositeHooks, ContextBudget, LifecycleHooks, LoggingHooks, Message,
-    RuntimeConfig, ToolNameDenyHooks,
+    AgentRuntime, ChannelTelemetrySink, CompositeHooks, ContextBudget, LifecycleHooks,
+    LoggingHooks, Message, RuntimeConfig, RuntimeTelemetryEvent, RuntimeTelemetrySink,
+    TelemetryLifecycleHooks, ToolNameDenyHooks,
 };
 use uuid::Uuid;
 use warp_multi_agent_api as api;
@@ -129,8 +130,12 @@ async fn run_runtime(
         ..Default::default()
     };
 
-    let runtime =
-        AgentRuntime::new(provider, executor, runtime_config).with_hooks(default_lifecycle_hooks());
+    let (telemetry_tx, telemetry_rx) = async_channel::unbounded::<RuntimeTelemetryEvent>();
+    let telemetry_sink: Arc<dyn RuntimeTelemetrySink> =
+        Arc::new(ChannelTelemetrySink::new(telemetry_tx));
+    let runtime = AgentRuntime::new(provider, executor, runtime_config)
+        .with_hooks(default_lifecycle_hooks(Arc::clone(&telemetry_sink)))
+        .with_telemetry(Arc::clone(&telemetry_sink));
 
     // Build initial messages from existing conversation history
     let initial_messages = build_initial_messages(&params, &registry);
@@ -158,8 +163,22 @@ async fn run_runtime(
                 cancellation_sent = true;
                 cancel_handle.cancel();
             }
+            telemetry_event = telemetry_rx.recv() => {
+                match telemetry_event {
+                    Ok(event) => {
+                        log_and_record_runtime_telemetry(event);
+                    }
+                    Err(_) => {
+                        // Runtime finished and closed the telemetry channel.
+                    }
+                }
+            }
             event = runtime_events.next() => {
                 let Some(event) = event else {
+                    // Drain remaining telemetry before exit.
+                    while let Ok(event) = telemetry_rx.try_recv() {
+                        log_and_record_runtime_telemetry(event);
+                    }
                     break;
                 };
                 local_runtime_event_bus::publish(&run_id, event.clone());
@@ -168,6 +187,9 @@ async fn run_runtime(
                     let _ = tx.send(Ok(proto_event)).await;
                 }
                 if matches!(event, local_agent_runtime::RuntimeEvent::Finished { .. }) {
+                    while let Ok(event) = telemetry_rx.try_recv() {
+                        log_and_record_runtime_telemetry(event);
+                    }
                     break;
                 }
             }
@@ -177,12 +199,15 @@ async fn run_runtime(
     Ok(())
 }
 
-/// Trusted in-process hooks for local Ollama runs (logging + optional deny list).
+/// Trusted in-process hooks for local Ollama runs (logging + telemetry + optional deny list).
 ///
 /// Set `WARP_LOCAL_AGENT_DENIED_TOOLS=tool_a,tool_b` to block tools by exact name
 /// before permission/UI execution.
-fn default_lifecycle_hooks() -> Arc<dyn LifecycleHooks> {
-    let mut hooks: Vec<Arc<dyn LifecycleHooks>> = vec![Arc::new(LoggingHooks)];
+fn default_lifecycle_hooks(telemetry: Arc<dyn RuntimeTelemetrySink>) -> Arc<dyn LifecycleHooks> {
+    let mut hooks: Vec<Arc<dyn LifecycleHooks>> = vec![
+        Arc::new(LoggingHooks),
+        Arc::new(TelemetryLifecycleHooks::new(telemetry)),
+    ];
     if let Ok(raw) = std::env::var("WARP_LOCAL_AGENT_DENIED_TOOLS") {
         let denied_tools = raw
             .split(',')
@@ -195,6 +220,19 @@ fn default_lifecycle_hooks() -> Arc<dyn LifecycleHooks> {
         }
     }
     Arc::new(CompositeHooks::new(hooks))
+}
+
+fn log_and_record_runtime_telemetry(event: RuntimeTelemetryEvent) {
+    tracing::info!(
+        target: "local_runtime_telemetry",
+        ?event,
+        "local agent runtime telemetry"
+    );
+    // Product telemetry registration (schema) for analytics pipelines.
+    let _product_event =
+        crate::ai::local_runtime_telemetry::LocalRuntimeTelemetryEvent::from(event);
+    // Full send requires AppContext; structured log + registered schema cover dogfood today.
+    // When a ctx-bearing bridge is available, emit via send_telemetry_from_ctx.
 }
 
 fn build_initial_messages(

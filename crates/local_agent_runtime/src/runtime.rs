@@ -4,6 +4,7 @@
 //! testable and extractable to a separate service later.
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use futures::channel::mpsc;
 use futures::future::join_all;
@@ -17,6 +18,7 @@ use crate::hooks::{LifecycleHooks, NoopHooks, PreToolDecision};
 use crate::messages::normalize::model_messages;
 use crate::messages::{ConversationHistory, Message};
 use crate::provider::{ChatRequest, ChatResponse, ChatStopReason, ChatStreamEvent, LLMProvider};
+use crate::telemetry::{NoopTelemetrySink, RuntimeTelemetryEvent, RuntimeTelemetrySink};
 use crate::tools::{PermissionDecision, ToolCall, ToolCallResult, ToolExecutor, ToolSafetyClass};
 
 /// The local agent runtime.
@@ -28,6 +30,7 @@ pub struct AgentRuntime<P: LLMProvider, T: ToolExecutor> {
     executor: Arc<T>,
     config: RuntimeConfig,
     hooks: Arc<dyn LifecycleHooks>,
+    telemetry: Arc<dyn RuntimeTelemetrySink>,
 }
 
 impl<P: LLMProvider, T: ToolExecutor> AgentRuntime<P, T> {
@@ -37,12 +40,19 @@ impl<P: LLMProvider, T: ToolExecutor> AgentRuntime<P, T> {
             executor: Arc::new(executor),
             config,
             hooks: Arc::new(NoopHooks),
+            telemetry: Arc::new(NoopTelemetrySink),
         }
     }
 
     /// Attach trusted lifecycle hooks (pre/post tool, permission, stop).
     pub fn with_hooks(mut self, hooks: Arc<dyn LifecycleHooks>) -> Self {
         self.hooks = hooks;
+        self
+    }
+
+    /// Attach a telemetry sink for provider/tool/run observability.
+    pub fn with_telemetry(mut self, telemetry: Arc<dyn RuntimeTelemetrySink>) -> Self {
+        self.telemetry = telemetry;
         self
     }
 
@@ -72,15 +82,18 @@ impl<P: LLMProvider, T: ToolExecutor> AgentRuntime<P, T> {
         let provider = Arc::clone(&self.provider);
         let executor = Arc::clone(&self.executor);
         let hooks = Arc::clone(&self.hooks);
+        let telemetry = Arc::clone(&self.telemetry);
 
         tokio::spawn(async move {
             let mut sink = ChannelEventSink { tx };
             let hooks_for_error = Arc::clone(&hooks);
+            let telemetry_for_error = Arc::clone(&telemetry);
             let result = run_loop(
                 provider,
                 executor,
                 config,
                 hooks,
+                telemetry,
                 RunRequest {
                     model,
                     initial_messages,
@@ -94,6 +107,10 @@ impl<P: LLMProvider, T: ToolExecutor> AgentRuntime<P, T> {
             if let Err(err) = result {
                 if !matches!(err, RuntimeError::Cancelled) {
                     let reason = FinishReason::Error(err.to_string());
+                    telemetry_for_error.emit(RuntimeTelemetryEvent::RunFinished {
+                        reason: format!("{reason:?}"),
+                        turns: 0,
+                    });
                     hooks_for_error.on_stop(&reason).await;
                     sink.send(RuntimeEvent::Finished { reason }).await;
                 }
@@ -119,6 +136,7 @@ impl<P: LLMProvider, T: ToolExecutor> AgentRuntime<P, T> {
             Arc::clone(&self.executor),
             self.config.clone(),
             Arc::clone(&self.hooks),
+            Arc::clone(&self.telemetry),
             RunRequest {
                 model: model.to_string(),
                 initial_messages,
@@ -167,10 +185,19 @@ struct RunRequest {
     user_input: String,
 }
 
-async fn emit_finished<S>(hooks: &Arc<dyn LifecycleHooks>, sink: &mut S, reason: FinishReason)
-where
+async fn emit_finished<S>(
+    hooks: &Arc<dyn LifecycleHooks>,
+    telemetry: &Arc<dyn RuntimeTelemetrySink>,
+    sink: &mut S,
+    reason: FinishReason,
+    turns: u32,
+) where
     S: RuntimeEventSink + Send,
 {
+    telemetry.emit(RuntimeTelemetryEvent::RunFinished {
+        reason: format!("{reason:?}"),
+        turns,
+    });
     hooks.on_stop(&reason).await;
     sink.send(RuntimeEvent::Finished { reason }).await;
 }
@@ -180,6 +207,7 @@ async fn run_loop<P, T, S>(
     executor: Arc<T>,
     config: RuntimeConfig,
     hooks: Arc<dyn LifecycleHooks>,
+    telemetry: Arc<dyn RuntimeTelemetrySink>,
     request: RunRequest,
     mut cancel_rx: Option<watch::Receiver<bool>>,
     sink: &mut S,
@@ -205,6 +233,11 @@ where
     }
     history.push_user(user_input);
 
+    telemetry.emit(RuntimeTelemetryEvent::RunStarted {
+        model: model.clone(),
+        history_message_count: history.messages().len(),
+    });
+
     let mut turn: u32 = 0;
     let mut continuation_count = 0;
     let mut previous_tool_fingerprint = None;
@@ -213,7 +246,7 @@ where
 
     loop {
         if is_cancelled(&cancel_rx) {
-            emit_finished(&hooks, sink, FinishReason::Cancelled).await;
+            emit_finished(&hooks, &telemetry, sink, FinishReason::Cancelled, turn).await;
             return Err(RuntimeError::Cancelled);
         }
 
@@ -225,7 +258,7 @@ where
                 max_turns = config.max_turns,
                 "local runtime stopped at max turns"
             );
-            emit_finished(&hooks, sink, FinishReason::MaxTurns).await;
+            emit_finished(&hooks, &telemetry, sink, FinishReason::MaxTurns, turn).await;
             return Ok(history.messages().to_vec());
         }
 
@@ -234,6 +267,7 @@ where
         let tools = executor.available_tools();
 
         let mut retried_context_overflow = false;
+        let provider_started = Instant::now();
         let chat_result = loop {
             let request = ChatRequest {
                 model: model.clone(),
@@ -255,17 +289,31 @@ where
                     retried_context_overflow = true;
                     tighten_context_budget(&mut context_budget);
                 }
+                Err(RuntimeError::Provider(error)) => {
+                    telemetry.emit(RuntimeTelemetryEvent::ProviderError {
+                        turn,
+                        message: error.to_string(),
+                    });
+                    return Err(RuntimeError::Provider(error));
+                }
                 result => break result?,
             }
         };
+        let provider_latency_ms = provider_started.elapsed().as_millis() as u64;
         let chat_result = match chat_result {
             Some(response) => response,
             None => {
-                emit_finished(&hooks, sink, FinishReason::Cancelled).await;
+                emit_finished(&hooks, &telemetry, sink, FinishReason::Cancelled, turn).await;
                 return Err(RuntimeError::Cancelled);
             }
         };
         let response = chat_result.response;
+        telemetry.emit(RuntimeTelemetryEvent::ProviderTurn {
+            turn,
+            latency_ms: provider_latency_ms,
+            has_tool_calls: !response.tool_calls.is_empty(),
+            streamed_text: chat_result.streamed_text,
+        });
 
         if !response.text.is_empty() && !chat_result.streamed_text {
             sink.send(RuntimeEvent::TextCompleted {
@@ -297,7 +345,7 @@ where
             })
             .await;
             tracing::debug!(turn, "local runtime provider turn completed");
-            emit_finished(&hooks, sink, FinishReason::Done).await;
+            emit_finished(&hooks, &telemetry, sink, FinishReason::Done, turn).await;
             return Ok(history.messages().to_vec());
         }
 
@@ -358,7 +406,7 @@ where
         while call_index < calls.len() {
             if is_cancelled(&cancel_rx) {
                 synthesize_cancelled_tool_results(&calls[call_index..], &mut history, sink).await;
-                emit_finished(&hooks, sink, FinishReason::Cancelled).await;
+                emit_finished(&hooks, &telemetry, sink, FinishReason::Cancelled, turn).await;
                 return Err(RuntimeError::Cancelled);
             }
 
@@ -386,7 +434,8 @@ where
                     BatchResult::Cancelled => {
                         synthesize_cancelled_tool_results(&calls[call_index..], &mut history, sink)
                             .await;
-                        emit_finished(&hooks, sink, FinishReason::Cancelled).await;
+                        emit_finished(&hooks, &telemetry, sink, FinishReason::Cancelled, turn)
+                            .await;
                         return Err(RuntimeError::Cancelled);
                     }
                 };
@@ -425,7 +474,7 @@ where
                 SerialResult::Cancelled => {
                     synthesize_cancelled_tool_results(&calls[call_index..], &mut history, sink)
                         .await;
-                    emit_finished(&hooks, sink, FinishReason::Cancelled).await;
+                    emit_finished(&hooks, &telemetry, sink, FinishReason::Cancelled, turn).await;
                     return Err(RuntimeError::Cancelled);
                 }
             };
@@ -458,7 +507,7 @@ where
         }
 
         if should_stop {
-            emit_finished(&hooks, sink, FinishReason::Done).await;
+            emit_finished(&hooks, &telemetry, sink, FinishReason::Done, turn).await;
             return Ok(history.messages().to_vec());
         }
     }
