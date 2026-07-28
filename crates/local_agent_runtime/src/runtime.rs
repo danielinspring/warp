@@ -13,6 +13,7 @@ use tokio::sync::watch;
 use crate::config::RuntimeConfig;
 use crate::error::RuntimeError;
 use crate::events::{FinishReason, RuntimeEvent, StopReason};
+use crate::hooks::{LifecycleHooks, NoopHooks, PreToolDecision};
 use crate::messages::normalize::model_messages;
 use crate::messages::{ConversationHistory, Message};
 use crate::provider::{ChatRequest, ChatResponse, ChatStopReason, ChatStreamEvent, LLMProvider};
@@ -26,6 +27,7 @@ pub struct AgentRuntime<P: LLMProvider, T: ToolExecutor> {
     provider: Arc<P>,
     executor: Arc<T>,
     config: RuntimeConfig,
+    hooks: Arc<dyn LifecycleHooks>,
 }
 
 impl<P: LLMProvider, T: ToolExecutor> AgentRuntime<P, T> {
@@ -34,7 +36,14 @@ impl<P: LLMProvider, T: ToolExecutor> AgentRuntime<P, T> {
             provider: Arc::new(provider),
             executor: Arc::new(executor),
             config,
+            hooks: Arc::new(NoopHooks),
         }
+    }
+
+    /// Attach trusted lifecycle hooks (pre/post tool, permission, stop).
+    pub fn with_hooks(mut self, hooks: Arc<dyn LifecycleHooks>) -> Self {
+        self.hooks = hooks;
+        self
     }
 
     /// Run the agent loop for a single user message.
@@ -62,13 +71,16 @@ impl<P: LLMProvider, T: ToolExecutor> AgentRuntime<P, T> {
         let config = self.config.clone();
         let provider = Arc::clone(&self.provider);
         let executor = Arc::clone(&self.executor);
+        let hooks = Arc::clone(&self.hooks);
 
         tokio::spawn(async move {
             let mut sink = ChannelEventSink { tx };
+            let hooks_for_error = Arc::clone(&hooks);
             let result = run_loop(
                 provider,
                 executor,
                 config,
+                hooks,
                 RunRequest {
                     model,
                     initial_messages,
@@ -81,10 +93,9 @@ impl<P: LLMProvider, T: ToolExecutor> AgentRuntime<P, T> {
 
             if let Err(err) = result {
                 if !matches!(err, RuntimeError::Cancelled) {
-                    sink.send(RuntimeEvent::Finished {
-                        reason: FinishReason::Error(err.to_string()),
-                    })
-                    .await;
+                    let reason = FinishReason::Error(err.to_string());
+                    hooks_for_error.on_stop(&reason).await;
+                    sink.send(RuntimeEvent::Finished { reason }).await;
                 }
             }
         });
@@ -107,6 +118,7 @@ impl<P: LLMProvider, T: ToolExecutor> AgentRuntime<P, T> {
             Arc::clone(&self.provider),
             Arc::clone(&self.executor),
             self.config.clone(),
+            Arc::clone(&self.hooks),
             RunRequest {
                 model: model.to_string(),
                 initial_messages,
@@ -155,10 +167,19 @@ struct RunRequest {
     user_input: String,
 }
 
+async fn emit_finished<S>(hooks: &Arc<dyn LifecycleHooks>, sink: &mut S, reason: FinishReason)
+where
+    S: RuntimeEventSink + Send,
+{
+    hooks.on_stop(&reason).await;
+    sink.send(RuntimeEvent::Finished { reason }).await;
+}
+
 async fn run_loop<P, T, S>(
     provider: Arc<P>,
     executor: Arc<T>,
     config: RuntimeConfig,
+    hooks: Arc<dyn LifecycleHooks>,
     request: RunRequest,
     mut cancel_rx: Option<watch::Receiver<bool>>,
     sink: &mut S,
@@ -192,10 +213,7 @@ where
 
     loop {
         if is_cancelled(&cancel_rx) {
-            sink.send(RuntimeEvent::Finished {
-                reason: FinishReason::Cancelled,
-            })
-            .await;
+            emit_finished(&hooks, sink, FinishReason::Cancelled).await;
             return Err(RuntimeError::Cancelled);
         }
 
@@ -207,10 +225,7 @@ where
                 max_turns = config.max_turns,
                 "local runtime stopped at max turns"
             );
-            sink.send(RuntimeEvent::Finished {
-                reason: FinishReason::MaxTurns,
-            })
-            .await;
+            emit_finished(&hooks, sink, FinishReason::MaxTurns).await;
             return Ok(history.messages().to_vec());
         }
 
@@ -246,10 +261,7 @@ where
         let chat_result = match chat_result {
             Some(response) => response,
             None => {
-                sink.send(RuntimeEvent::Finished {
-                    reason: FinishReason::Cancelled,
-                })
-                .await;
+                emit_finished(&hooks, sink, FinishReason::Cancelled).await;
                 return Err(RuntimeError::Cancelled);
             }
         };
@@ -285,10 +297,7 @@ where
             })
             .await;
             tracing::debug!(turn, "local runtime provider turn completed");
-            sink.send(RuntimeEvent::Finished {
-                reason: FinishReason::Done,
-            })
-            .await;
+            emit_finished(&hooks, sink, FinishReason::Done).await;
             return Ok(history.messages().to_vec());
         }
 
@@ -349,10 +358,7 @@ where
         while call_index < calls.len() {
             if is_cancelled(&cancel_rx) {
                 synthesize_cancelled_tool_results(&calls[call_index..], &mut history, sink).await;
-                sink.send(RuntimeEvent::Finished {
-                    reason: FinishReason::Cancelled,
-                })
-                .await;
+                emit_finished(&hooks, sink, FinishReason::Cancelled).await;
                 return Err(RuntimeError::Cancelled);
             }
 
@@ -368,6 +374,7 @@ where
 
                 let outcomes = match execute_read_only_batch_with_cancel(
                     Arc::clone(&executor),
+                    Arc::clone(&hooks),
                     batch,
                     config.tool_timeout,
                     config.stop_on_permission_denied,
@@ -379,10 +386,7 @@ where
                     BatchResult::Cancelled => {
                         synthesize_cancelled_tool_results(&calls[call_index..], &mut history, sink)
                             .await;
-                        sink.send(RuntimeEvent::Finished {
-                            reason: FinishReason::Cancelled,
-                        })
-                        .await;
+                        emit_finished(&hooks, sink, FinishReason::Cancelled).await;
                         return Err(RuntimeError::Cancelled);
                     }
                 };
@@ -409,6 +413,7 @@ where
             let call = &calls[call_index];
             let outcome = match execute_serial_tool_with_cancel(
                 Arc::clone(&executor),
+                Arc::clone(&hooks),
                 call,
                 config.tool_timeout,
                 config.stop_on_permission_denied,
@@ -420,10 +425,7 @@ where
                 SerialResult::Cancelled => {
                     synthesize_cancelled_tool_results(&calls[call_index..], &mut history, sink)
                         .await;
-                    sink.send(RuntimeEvent::Finished {
-                        reason: FinishReason::Cancelled,
-                    })
-                    .await;
+                    emit_finished(&hooks, sink, FinishReason::Cancelled).await;
                     return Err(RuntimeError::Cancelled);
                 }
             };
@@ -456,10 +458,7 @@ where
         }
 
         if should_stop {
-            sink.send(RuntimeEvent::Finished {
-                reason: FinishReason::Done,
-            })
-            .await;
+            emit_finished(&hooks, sink, FinishReason::Done).await;
             return Ok(history.messages().to_vec());
         }
     }
@@ -487,6 +486,7 @@ enum SerialResult {
 
 async fn execute_read_only_batch_with_cancel<T>(
     executor: Arc<T>,
+    hooks: Arc<dyn LifecycleHooks>,
     calls: &[ToolCall],
     timeout: std::time::Duration,
     stop_on_permission_denied: bool,
@@ -498,6 +498,7 @@ where
     let execution = join_all(calls.iter().cloned().map(|call| {
         execute_tool_without_cancel(
             Arc::clone(&executor),
+            Arc::clone(&hooks),
             call,
             timeout,
             stop_on_permission_denied,
@@ -516,6 +517,7 @@ where
 
 async fn execute_serial_tool_with_cancel<T>(
     executor: Arc<T>,
+    hooks: Arc<dyn LifecycleHooks>,
     call: &ToolCall,
     timeout: std::time::Duration,
     stop_on_permission_denied: bool,
@@ -526,6 +528,7 @@ where
 {
     let execution = execute_tool_without_cancel(
         Arc::clone(&executor),
+        hooks,
         call.clone(),
         timeout,
         stop_on_permission_denied,
@@ -543,6 +546,7 @@ where
 
 async fn execute_tool_without_cancel<T>(
     executor: Arc<T>,
+    hooks: Arc<dyn LifecycleHooks>,
     call: ToolCall,
     timeout: std::time::Duration,
     stop_on_permission_denied: bool,
@@ -557,13 +561,32 @@ where
         "local runtime tool requested"
     );
 
-    match executor.check_permission(&call).await {
+    if let PreToolDecision::Deny { reason } = hooks.pre_tool(&call).await {
+        let result = ToolCallResult::error(format!("Permission denied: {reason}"));
+        hooks.post_tool(&call, &result).await;
+        return ToolOutcome {
+            call_id: call.id.clone(),
+            tool_name: call.name.clone(),
+            call,
+            permission_required: false,
+            started: false,
+            result,
+            stop_after: false,
+        };
+    }
+
+    let decision = hooks
+        .on_permission(&call, executor.check_permission(&call).await)
+        .await;
+
+    match decision {
         PermissionDecision::Allow => {
             let result = match tokio::time::timeout(timeout, executor.execute(&call)).await {
                 Ok(Ok(result)) => result,
                 Ok(Err(error)) => ToolCallResult::error(format!("Tool execution failed: {error}")),
                 Err(_) => ToolCallResult::error("Tool execution failed: timed out"),
             };
+            hooks.post_tool(&call, &result).await;
 
             ToolOutcome {
                 call_id: call.id.clone(),
@@ -575,26 +598,34 @@ where
                 stop_after: false,
             }
         }
-        PermissionDecision::Ask => ToolOutcome {
-            call_id: call.id.clone(),
-            tool_name: call.name.clone(),
-            call,
-            permission_required: true,
-            started: false,
-            result: ToolCallResult::error(
+        PermissionDecision::Ask => {
+            let result = ToolCallResult::error(
                 "Permission required - tool execution skipped in non-interactive mode",
-            ),
-            stop_after: stop_on_permission_denied,
-        },
-        PermissionDecision::Deny { reason } => ToolOutcome {
-            call_id: call.id.clone(),
-            tool_name: call.name.clone(),
-            call,
-            permission_required: false,
-            started: false,
-            result: ToolCallResult::error(format!("Permission denied: {reason}")),
-            stop_after: stop_on_permission_denied,
-        },
+            );
+            hooks.post_tool(&call, &result).await;
+            ToolOutcome {
+                call_id: call.id.clone(),
+                tool_name: call.name.clone(),
+                call,
+                permission_required: true,
+                started: false,
+                result,
+                stop_after: stop_on_permission_denied,
+            }
+        }
+        PermissionDecision::Deny { reason } => {
+            let result = ToolCallResult::error(format!("Permission denied: {reason}"));
+            hooks.post_tool(&call, &result).await;
+            ToolOutcome {
+                call_id: call.id.clone(),
+                tool_name: call.name.clone(),
+                call,
+                permission_required: false,
+                started: false,
+                result,
+                stop_after: stop_on_permission_denied,
+            }
+        }
     }
 }
 

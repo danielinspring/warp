@@ -2,7 +2,7 @@
   "roadmap": {
     "name": "Local Ollama Agent Runtime",
     "source": "dan_docs/reports/local_agent_runtime_competitive_gap_report.md",
-    "active_feature": "feat-016",
+    "active_feature": "feat-017",
     "status_values": [
       "not-started",
       "in-progress",
@@ -366,16 +366,39 @@
         "./script/format --check"
       ],
       "evidence": "2026-07-28: ResponseStream resolves SkillManager catalog for cwd; from_request_with_available_skills registers list_skills + read_skill; list_skills answered in WarpToolExecutor without UI; prompt Available Skills section; plan mode keeps list/read. cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use: 42 passed. format --check: passed."
+    },
+    {
+      "id": "feat-017",
+      "name": "Trusted lifecycle hooks",
+      "description": "Add in-process pre-tool, permission, post-tool, and stop hooks to the local agent runtime with logging hooks and optional tool-name deny policy for local Ollama runs.",
+      "phase": "Phase B",
+      "dependencies": [
+        "feat-004",
+        "feat-016"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "LifecycleHooks trait covers pre_tool, on_permission, post_tool, and on_stop.",
+        "Runtime invokes hooks on the tool path and before Finished events.",
+        "Pre-tool deny synthesizes an error tool result without executing the tool.",
+        "Local Ollama path installs LoggingHooks plus optional WARP_LOCAL_AGENT_DENIED_TOOLS deny list.",
+        "Unit tests cover deny hooks and composite short-circuit."
+      ],
+      "verification": [
+        "cargo test -p local_agent_runtime",
+        "cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-28: Added LifecycleHooks (pre_tool/on_permission/post_tool/on_stop), LoggingHooks, CompositeHooks, ToolNameDenyHooks; wired into runtime tool path and Finished. Local Ollama uses LoggingHooks + WARP_LOCAL_AGENT_DENIED_TOOLS. cargo test -p local_agent_runtime: 23+18 passed (1 ignored live). cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use: 42 passed. format --check: passed."
     }
   ],
   "future_phases": [
     {
       "phase": "Phase B",
       "scope": [
-        "trusted lifecycle hooks",
         "local-runtime telemetry"
       ],
-      "note": "feat-013–016 promoted from this list"
+      "note": "feat-013–017 promoted from this list"
     },
     {
       "phase": "Phase C",

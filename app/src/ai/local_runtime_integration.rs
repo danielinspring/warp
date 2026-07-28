@@ -24,7 +24,10 @@ use futures::channel::oneshot;
 use futures::StreamExt;
 use local_agent_runtime::messages::{AssistantMessage, ToolResultMessage, UserMessage};
 use local_agent_runtime::provider::ollama::{OllamaProvider, OllamaProviderConfig};
-use local_agent_runtime::{AgentRuntime, ContextBudget, Message, RuntimeConfig};
+use local_agent_runtime::{
+    AgentRuntime, CompositeHooks, ContextBudget, LifecycleHooks, LoggingHooks, Message,
+    RuntimeConfig, ToolNameDenyHooks,
+};
 use uuid::Uuid;
 use warp_multi_agent_api as api;
 
@@ -126,7 +129,8 @@ async fn run_runtime(
         ..Default::default()
     };
 
-    let runtime = AgentRuntime::new(provider, executor, runtime_config);
+    let runtime =
+        AgentRuntime::new(provider, executor, runtime_config).with_hooks(default_lifecycle_hooks());
 
     // Build initial messages from existing conversation history
     let initial_messages = build_initial_messages(&params, &registry);
@@ -171,6 +175,26 @@ async fn run_runtime(
     }
 
     Ok(())
+}
+
+/// Trusted in-process hooks for local Ollama runs (logging + optional deny list).
+///
+/// Set `WARP_LOCAL_AGENT_DENIED_TOOLS=tool_a,tool_b` to block tools by exact name
+/// before permission/UI execution.
+fn default_lifecycle_hooks() -> Arc<dyn LifecycleHooks> {
+    let mut hooks: Vec<Arc<dyn LifecycleHooks>> = vec![Arc::new(LoggingHooks)];
+    if let Ok(raw) = std::env::var("WARP_LOCAL_AGENT_DENIED_TOOLS") {
+        let denied_tools = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if !denied_tools.is_empty() {
+            hooks.push(Arc::new(ToolNameDenyHooks { denied_tools }));
+        }
+    }
+    Arc::new(CompositeHooks::new(hooks))
 }
 
 fn build_initial_messages(

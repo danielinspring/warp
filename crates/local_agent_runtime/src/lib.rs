@@ -50,6 +50,7 @@
 pub mod config;
 pub mod error;
 pub mod events;
+pub mod hooks;
 pub mod messages;
 pub mod provider;
 pub mod runtime;
@@ -59,6 +60,9 @@ pub mod tools;
 pub use config::{ContextBudget, RuntimeConfig};
 pub use error::{ProviderError, RuntimeError, ToolExecutionError};
 pub use events::{FinishReason, RunResult, RuntimeEvent, StopReason};
+pub use hooks::{
+    CompositeHooks, LifecycleHooks, LoggingHooks, NoopHooks, PreToolDecision, ToolNameDenyHooks,
+};
 pub use messages::Message;
 pub use provider::{
     ChatRequest, ChatResponse, ChatStopReason, ChatStreamEvent, LLMProvider, ProviderCapabilities,

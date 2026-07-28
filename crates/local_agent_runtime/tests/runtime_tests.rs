@@ -599,6 +599,41 @@ async fn test_cancellation_stops_streaming_loop() {
 }
 
 #[tokio::test]
+async fn test_pre_tool_lifecycle_hook_denies_without_executor() {
+    use std::sync::Arc;
+
+    use local_agent_runtime::ToolNameDenyHooks;
+
+    let provider = MockProvider::with_tool_call(
+        "run_shell_command",
+        serde_json::json!({"command": "pwd"}),
+        "should not reach",
+    );
+    let executor = MockExecutor::allow_all();
+    let runtime = AgentRuntime::new(provider, executor, RuntimeConfig::default()).with_hooks(
+        Arc::new(ToolNameDenyHooks {
+            denied_tools: vec!["run_shell_command".to_string()],
+        }),
+    );
+    let (events, _messages) = runtime
+        .run_to_completion("test-model", vec![], "run pwd")
+        .await
+        .unwrap();
+
+    assert!(events.iter().any(|e| matches!(
+        e,
+        RuntimeEvent::ToolResult { result, .. }
+            if result.is_error && result.content.contains("blocked by trusted lifecycle policy")
+    )));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        RuntimeEvent::Finished {
+            reason: FinishReason::Done
+        }
+    )));
+}
+
+#[tokio::test]
 async fn test_permission_denied_stops_when_configured() {
     let provider = MockProvider::with_tool_call(
         "run_shell_command",

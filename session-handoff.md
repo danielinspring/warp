@@ -2,7 +2,7 @@
 
 ## Current Objective
 
-Continue Phase B: next is **trusted lifecycle hooks**.
+Continue Phase B: next is **local-runtime telemetry**.
 
 ## Last Updated
 
@@ -10,7 +10,7 @@ Continue Phase B: next is **trusted lifecycle hooks**.
 
 ## Active Feature
 
-`feat-016` — Skill discovery and bundled catalog (`done`)
+`feat-017` — Trusted lifecycle hooks (`done`)
 
 ## Branch
 
@@ -18,14 +18,15 @@ Continue Phase B: next is **trusted lifecycle hooks**.
 
 ## Current State
 
-- Phase B through feat-016 complete (run_agents, LRC shell, documents/CU, skill discovery).
-- Skills: cwd/home/bundled catalog from SkillManager at run start; `list_skills` + `read_skill`; prompt section.
+- Phase B: feat-013–017 done.
+- Hooks: `LifecycleHooks` in `local_agent_runtime`; LoggingHooks + optional `WARP_LOCAL_AGENT_DENIED_TOOLS` on local Ollama path.
 
 ## Verification
 
-- local_runtime tests: **42 passed**
-- format --check: **passed**
+- `cargo test -p local_agent_runtime`: passed
+- `cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use`: 42 passed
+- format --check: passed
 
 ## Recommended Next Step
 
-Implement **feat-017: trusted lifecycle hooks** (pre/post tool, permission, stop).
+Implement **feat-018: local-runtime telemetry** (provider latency, tool decisions, denials, cancel pairing).
