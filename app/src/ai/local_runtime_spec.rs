@@ -46,6 +46,7 @@ struct PromptBuildInput {
     mcp_tool_count: usize,
     mcp_resource_count: usize,
     context_lines: Vec<String>,
+    todo_section: Option<String>,
 }
 
 impl PromptBuildInput {
@@ -94,6 +95,7 @@ impl PromptBuildInput {
                 })
                 .collect(),
             context_lines: render_request_context(params),
+            todo_section: registry.todo_prompt_section(),
             ..Default::default()
         };
 
@@ -172,6 +174,18 @@ fn format_system_prompt(input: &PromptBuildInput) -> String {
         input.mcp_server_count, input.mcp_tool_count, input.mcp_resource_count
     )
     .ok();
+
+    if input.local_tool_names.iter().any(|n| n == "update_todos") {
+        prompt.push_str(
+            "\n## Planning / todos\nUse update_todos to keep a pending task list for multi-step work, and mark_todos_completed when items finish. Keep ids stable across updates.\n",
+        );
+    }
+
+    if let Some(todo_section) = &input.todo_section {
+        prompt.push('\n');
+        prompt.push_str(todo_section);
+        prompt.push('\n');
+    }
 
     if !input.available_skills.is_empty() {
         prompt.push_str("\n## Available Skills\n");

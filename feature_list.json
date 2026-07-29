@@ -2,7 +2,7 @@
   "roadmap": {
     "name": "Local Ollama Agent Runtime",
     "source": "dan_docs/reports/local_agent_runtime_competitive_gap_report.md",
-    "active_feature": "feat-019",
+    "active_feature": "feat-020",
     "status_values": [
       "not-started",
       "in-progress",
@@ -438,6 +438,31 @@
         "./script/format --check"
       ],
       "evidence": "2026-07-29: Added app/src/ai/local_web (policy SSRF, HTML extract, reqwest fetch, DuckDuckGo HTML search). Registry advertises web_search/web_fetch when web_search_enabled; in-process execute via WarpToolExecutor. Plan mode keeps both tools. cargo test -p warp local_web --lib --features local_ollama_runtime_tool_use: 10 passed. cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use: 43 passed. cargo test -p local_agent_runtime: 19 lib + 23 integration passed. format --check: passed."
+    },
+    {
+      "id": "feat-020",
+      "name": "Durable local plan and todo state",
+      "description": "Expose update_todos and mark_todos_completed to the local Ollama runtime with in-process state, UpdateTodos task messages for existing UI/derive, and prompt injection of the current list.",
+      "phase": "Phase C",
+      "dependencies": [
+        "feat-007",
+        "feat-019"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "update_todos and mark_todos_completed are advertised on local registries and retained in plan mode.",
+        "Tools execute in-process and return a JSON snapshot of pending/completed items.",
+        "Successful updates emit Message::UpdateTodos (CreateTodoList / UpdatePendingTodos / MarkTodosCompleted) into the task stream via EventMapper.",
+        "Todo state hydrates from prior task UpdateTodos messages for multi-turn resume.",
+        "System prompt includes current todos when non-empty.",
+        "Focused tests and format check pass with evidence."
+      ],
+      "verification": [
+        "cargo test -p warp local_todos --lib --features local_ollama_runtime_tool_use",
+        "cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-30: Added app/src/ai/local_todos.rs (state, update_todos/mark_todos_completed schemas+execute). Registry always advertises both tools (ReadOnly, plan mode kept). Hydrate from task UpdateTodos. EventMapper emits UpdateTodos + ToolCallResult on ToolResult when pending persistence is set. Prompt injects current todos. cargo test local_todos: 2 passed. cargo test local_runtime: 44 passed. format --check: passed."
     }
   ],
   "future_phases": [
@@ -449,13 +474,12 @@
     {
       "phase": "Phase C",
       "scope": [
-        "durable plan and todo state",
         "remaining generic OpenAI-compatible provider polish",
         "model-specific prompt packs",
         "multimodal provider support",
         "Git workflow helpers"
       ],
-      "note": "feat-019 local web search/fetch done. Next: durable plan/todo (feat-020)."
+      "note": "feat-019 and feat-020 done. Next: OpenAI-compat polish / model prompt packs."
     }
   ]
 }

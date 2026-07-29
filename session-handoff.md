@@ -2,15 +2,15 @@
 
 ## Current Objective
 
-Begin **feat-020** — durable local plan/todo state for the Ollama agent runtime.
+Begin next Phase C item after todos (OpenAI-compat polish or model prompt packs).
 
 ## Last Updated
 
-2026-07-29
+2026-07-30
 
 ## Active Feature
 
-`feat-019` — Local web search and fetch (`done`)
+`feat-020` — Durable local plan and todo state (`done`)
 
 ## Branch
 
@@ -18,16 +18,18 @@ Begin **feat-020** — durable local plan/todo state for the Ollama agent runtim
 
 ## Current State
 
-- **Phase B complete:** feat-013–018.
-- **feat-019 done:** `app/src/ai/local_web/` + bridge registry. Tools: `web_search`, `web_fetch`. Gate: `RequestParams.web_search_enabled`. Backend: DuckDuckGo HTML + local HTTP fetch. SSRF policy on private/loopback/link-local/CGNAT/metadata hosts.
+- **feat-019 done:** local web_search / web_fetch.
+- **feat-020 done:** `app/src/ai/local_todos.rs` + registry/event mapper wiring.
+  - Tools: `update_todos`, `mark_todos_completed` (always on, ReadOnly, kept in plan mode).
+  - In-process state + `Message::UpdateTodos` for existing UI/derive.
+  - Hydrate from prior task messages; prompt shows current list.
 
 ## Verification
 
-- local_web: 10 passed  
-- local_runtime: 43 passed  
-- local_agent_runtime: passed  
+- local_todos: 2 passed  
+- local_runtime: 44 passed  
 - format --check: passed  
 
 ## Recommended Next Step
 
-Promote Phase C **durable plan and todo state** to `feat-020` (reuse `TodoOperation` / `AIAgentTodoList` UI via `AddMessagesToTask`; not a cloud tool bridge).
+Promote Phase C **OpenAI-compatible provider polish** or **model-specific prompt packs** to `feat-021` (either unblocks weaker local models / multi-provider UX).

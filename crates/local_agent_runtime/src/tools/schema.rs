@@ -168,6 +168,25 @@ impl ToolSchemaBuilder {
         self
     }
 
+    /// Add a required array-of-objects parameter (items are free-form objects).
+    pub fn required_array_of_objects(
+        mut self,
+        name: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
+        let name = name.into();
+        self.properties.insert(
+            name.clone(),
+            serde_json::json!({
+                "type": "array",
+                "description": description.into(),
+                "items": { "type": "object" }
+            }),
+        );
+        self.required.push(name);
+        self
+    }
+
     /// Build the final schema.
     pub fn build(self) -> ToolSchema {
         ToolSchema {

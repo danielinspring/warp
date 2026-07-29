@@ -2,28 +2,25 @@
 
 ## Current State
 
-**Last Updated:** 2026-07-29  
-**Active Feature:** `feat-019` — Local web search and fetch  
+**Last Updated:** 2026-07-30  
+**Active Feature:** `feat-020` — Durable local plan and todo state  
 **Status:** Done  
 
 ## What's Done
 
-- Phase A; Phase C early (009–012); **Phase B fully complete** (013–018).
-- **feat-018:** Local-runtime telemetry.
-- **feat-019:** Local `web_search` / `web_fetch` with SSRF policy, DuckDuckGo HTML search, HTTP fetch + extract; gated on `web_search_enabled`; in-process execute; plan mode keeps tools.
+- Phase A; Phase C early (009–012); Phase B (013–018); feat-019 web tools.
+- **feat-020:** `update_todos` / `mark_todos_completed` with in-process state, UpdateTodos task messages, hydrate from history, prompt injection.
 
 ## Next
 
 Phase C remaining:
-1. durable plan and todo state (`feat-020`)  
-2. OpenAI-compat polish  
-3. model-specific prompt packs  
-4. multimodal  
-5. Git workflow helpers  
+1. OpenAI-compat polish  
+2. model-specific prompt packs  
+3. multimodal  
+4. Git workflow helpers  
 
 ## Verification
 
-- `cargo test -p warp local_web --lib --features local_ollama_runtime_tool_use`: 10 passed  
-- `cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use`: 43 passed  
-- `cargo test -p local_agent_runtime`: passed  
+- local_todos: 2 passed  
+- local_runtime: 44 passed  
 - format --check: passed  

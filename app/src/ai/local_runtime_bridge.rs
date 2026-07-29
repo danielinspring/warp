@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use ai::agent::action::FileEdit;
 use ai::diff_validation::ParsedDiff;
@@ -130,12 +130,22 @@ pub struct LocalRuntimeSkillInfo {
     pub scope: String,
 }
 
+/// Persistence payload registered during in-process tool execution and consumed
+/// when mapping [`RuntimeEvent::ToolResult`] into Warp task messages.
+#[derive(Debug, Clone)]
+pub struct LocalToolPersistence {
+    pub todo_update: Option<api::message::UpdateTodos>,
+}
+
 #[derive(Debug, Clone)]
 pub struct LocalRuntimeToolRegistry {
     schemas: Vec<ToolSchema>,
     routes: HashMap<String, LocalRuntimeToolRoute>,
     permission_mode: LocalRuntimePermissionMode,
     skill_catalog: Vec<LocalRuntimeSkillInfo>,
+    todo_state: Arc<Mutex<crate::ai::local_todos::LocalTodoState>>,
+    /// call_id → side effects to emit when the runtime reports ToolResult.
+    pending_local_persistence: Arc<Mutex<HashMap<String, LocalToolPersistence>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,6 +176,8 @@ enum LocalRuntimeToolRouteKind {
     ListSkills,
     /// Local HTTP web_search / web_fetch (in-process; no cloud action).
     LocalWeb,
+    /// Local durable todos (in-process + UpdateTodos task messages).
+    LocalTodo,
 }
 
 impl LocalRuntimeToolRegistry {
@@ -251,6 +263,15 @@ impl LocalRuntimeToolRegistry {
         if params.web_search_enabled {
             registry.add_web_tools();
         }
+        // Durable todos: always available locally (UI + transcript replay).
+        registry.add_todo_tools();
+        {
+            let mut todos = registry
+                .todo_state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            todos.hydrate_from_tasks(&params.tasks);
+        }
         if registry.permission_mode == LocalRuntimePermissionMode::Plan {
             registry.retain_plan_tools();
         }
@@ -264,6 +285,8 @@ impl LocalRuntimeToolRegistry {
             routes: HashMap::new(),
             permission_mode: LocalRuntimePermissionMode::Default,
             skill_catalog: Vec::new(),
+            todo_state: Arc::new(Mutex::new(crate::ai::local_todos::LocalTodoState::default())),
+            pending_local_persistence: Arc::new(Mutex::new(HashMap::new())),
         };
 
         for schema in build_tool_schemas() {
@@ -510,6 +533,44 @@ impl LocalRuntimeToolRegistry {
         );
     }
 
+    fn add_todo_tools(&mut self) {
+        self.add_tool(
+            crate::ai::local_todos::update_todos_schema(),
+            ToolSafetyClass::ReadOnly,
+            LocalRuntimeToolRouteKind::LocalTodo,
+        );
+        self.add_tool(
+            crate::ai::local_todos::mark_todos_completed_schema(),
+            ToolSafetyClass::ReadOnly,
+            LocalRuntimeToolRouteKind::LocalTodo,
+        );
+    }
+
+    pub fn todo_prompt_section(&self) -> Option<String> {
+        self.todo_state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .prompt_section()
+    }
+
+    pub fn register_local_tool_persistence(
+        &self,
+        call_id: String,
+        persistence: LocalToolPersistence,
+    ) {
+        self.pending_local_persistence
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(call_id, persistence);
+    }
+
+    pub fn take_local_tool_persistence(&self, call_id: &str) -> Option<LocalToolPersistence> {
+        self.pending_local_persistence
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(call_id)
+    }
+
     fn add_read_skill(&mut self, skill_lookup: HashMap<String, SkillReference>) {
         self.add_tool(
             ToolSchemaBuilder::new(
@@ -644,6 +705,37 @@ impl ToolExecutor for WarpToolExecutor {
                 });
             }
             return crate::ai::local_web::execute_web_tool(call).await;
+        }
+
+        // Local durable todos: update session state + queue UpdateTodos for the event mapper.
+        if call.name == "update_todos" || call.name == "mark_todos_completed" {
+            if !self.registry.contains_tool(&call.name) {
+                return Err(ToolExecutionError::NotFound {
+                    name: call.name.clone(),
+                });
+            }
+            let mut todos = self
+                .registry
+                .todo_state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let (result, side) = crate::ai::local_todos::execute_todo_tool(call, &mut todos)?;
+            drop(todos);
+            if let Some(crate::ai::local_todos::LocalTodoSideEffect::UpdateTodos(update)) = side {
+                self.registry.register_local_tool_persistence(
+                    call.id.clone(),
+                    LocalToolPersistence {
+                        todo_update: Some(update),
+                    },
+                );
+            } else {
+                // Still persist tool result even when mark found no ids.
+                self.registry.register_local_tool_persistence(
+                    call.id.clone(),
+                    LocalToolPersistence { todo_update: None },
+                );
+            }
+            return Ok(result);
         }
 
         let (response_tx, response_rx) = oneshot::channel();
@@ -1038,6 +1130,12 @@ pub fn tool_call_to_ai_action_with_registry(
             )));
         }
         LocalRuntimeToolRouteKind::LocalWeb => {
+            return Err(ToolExecutionError::ExecutionFailed(anyhow::anyhow!(
+                "{} is handled in-process and should not be queued as a Warp action",
+                call.name
+            )));
+        }
+        LocalRuntimeToolRouteKind::LocalTodo => {
             return Err(ToolExecutionError::ExecutionFailed(anyhow::anyhow!(
                 "{} is handled in-process and should not be queued as a Warp action",
                 call.name
@@ -2487,6 +2585,12 @@ pub fn tool_call_to_proto_tool_with_registry(
                 call.name
             ),
         }),
+        LocalRuntimeToolRouteKind::LocalTodo => Err(ToolExecutionError::InvalidInput {
+            reason: format!(
+                "{} has no wire proto tool form; results stay in the runtime transcript envelope",
+                call.name
+            ),
+        }),
         LocalRuntimeToolRouteKind::McpTool { server_id, name } => {
             let arguments = arguments_object(&call.arguments, &call.name)?;
             Ok(Tool::CallMcpTool(api::message::tool_call::CallMcpTool {
@@ -2660,6 +2764,7 @@ pub fn proto_tool_call_to_runtime_with_registry(
                     LocalRuntimeToolRouteKind::BuiltIn
                     | LocalRuntimeToolRouteKind::ListSkills
                     | LocalRuntimeToolRouteKind::LocalWeb
+                    | LocalRuntimeToolRouteKind::LocalTodo
                     | LocalRuntimeToolRouteKind::McpTool { .. }
                     | LocalRuntimeToolRouteKind::ReadMcpResource
                     | LocalRuntimeToolRouteKind::ReadSkill { .. } => None,
@@ -3673,6 +3778,47 @@ mod tests {
     }
 
     #[test]
+    fn todo_tools_are_always_available_and_kept_in_plan_mode() {
+        let registry = LocalRuntimeToolRegistry::from_request(&RequestParams::new_for_test());
+        assert!(registry.contains_tool("update_todos"));
+        assert!(registry.contains_tool("mark_todos_completed"));
+        assert_eq!(
+            registry.safety_class("update_todos"),
+            ToolSafetyClass::ReadOnly
+        );
+
+        let mut plan_params = RequestParams::new_for_test();
+        plan_params.input = vec![AIAgentInput::UserQuery {
+            query: "Plan".to_string(),
+            context: std::sync::Arc::from([]),
+            static_query_type: None,
+            referenced_attachments: std::collections::HashMap::new(),
+            user_query_mode: crate::ai::agent::UserQueryMode::Plan,
+            running_command: None,
+            intended_agent: None,
+        }];
+        let plan = LocalRuntimeToolRegistry::from_request(&plan_params);
+        assert!(plan.contains_tool("update_todos"));
+        assert!(plan.contains_tool("mark_todos_completed"));
+        assert!(!plan.contains_tool("edit_files"));
+
+        let call = ToolCall {
+            id: "todo_call_1".to_string(),
+            name: "update_todos".to_string(),
+            arguments: serde_json::json!({
+                "todos": [{"id": "1", "title": "Ship feat-020"}]
+            }),
+        };
+        let err = tool_call_to_ai_action_with_registry(
+            &call,
+            &TaskId::new("task_1".to_string()),
+            &registry,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ToolExecutionError::ExecutionFailed(_)));
+    }
+
+    #[test]
     fn web_tools_are_gated_by_web_search_enabled_and_kept_in_plan_mode() {
         let off = LocalRuntimeToolRegistry::from_request(&RequestParams::new_for_test());
         assert!(!off.contains_tool("web_search"));
@@ -4612,8 +4758,8 @@ pub mod event_mapper {
     use warp_multi_agent_api as api;
 
     use super::{
-        encode_local_runtime_tool_call_data, tool_call_to_proto_tool_with_registry,
-        LocalRuntimeToolRegistry,
+        encode_local_runtime_tool_call_data, encode_local_runtime_tool_result_data,
+        tool_call_to_proto_tool_with_registry, LocalRuntimeToolRegistry,
     };
 
     /// State for mapping runtime events to proto ResponseEvents.
@@ -4766,6 +4912,76 @@ pub mod event_mapper {
                         )),
                     }]
                 }
+                RuntimeEvent::ToolResult { call_id, result } => {
+                    // In-process tools (todos, and any future local-only tools) register
+                    // persistence when they execute. Warp-action tools persist via the
+                    // controller and leave no pending entry.
+                    let Some(persistence) = self.registry.take_local_tool_persistence(call_id)
+                    else {
+                        return vec![];
+                    };
+
+                    let mut actions = Vec::new();
+                    actions.push(begin_transaction());
+                    if !self.task_created {
+                        actions.push(create_task(&self.task_id));
+                        self.task_created = true;
+                    }
+
+                    if let Some(update) = persistence.todo_update {
+                        actions.push(api::ClientAction {
+                            action: Some(api::client_action::Action::AddMessagesToTask(
+                                api::client_action::AddMessagesToTask {
+                                    task_id: self.task_id.clone(),
+                                    messages: vec![api::Message {
+                                        id: Uuid::new_v4().to_string(),
+                                        task_id: self.task_id.clone(),
+                                        request_id: self.request_id.clone(),
+                                        timestamp: None,
+                                        server_message_data: String::new(),
+                                        citations: vec![],
+                                        fetched_memories: vec![],
+                                        message: Some(api::message::Message::UpdateTodos(update)),
+                                    }],
+                                },
+                            )),
+                        });
+                    }
+
+                    actions.push(api::ClientAction {
+                        action: Some(api::client_action::Action::AddMessagesToTask(
+                            api::client_action::AddMessagesToTask {
+                                task_id: self.task_id.clone(),
+                                messages: vec![api::Message {
+                                    id: Uuid::new_v4().to_string(),
+                                    task_id: self.task_id.clone(),
+                                    request_id: self.request_id.clone(),
+                                    timestamp: None,
+                                    server_message_data: encode_local_runtime_tool_result_data(
+                                        call_id.clone(),
+                                        result,
+                                    ),
+                                    citations: vec![],
+                                    fetched_memories: vec![],
+                                    message: Some(api::message::Message::ToolCallResult(
+                                        api::message::ToolCallResult {
+                                            tool_call_id: call_id.clone(),
+                                            context: None,
+                                            result: None,
+                                        },
+                                    )),
+                                }],
+                            },
+                        )),
+                    });
+                    actions.push(commit_transaction());
+
+                    vec![api::ResponseEvent {
+                        r#type: Some(api::response_event::Type::ClientActions(
+                            api::response_event::ClientActions { actions },
+                        )),
+                    }]
+                }
                 RuntimeEvent::Finished { reason } => {
                     let proto_reason = match reason {
                         FinishReason::Done | FinishReason::MaxTurns => {
@@ -4796,23 +5012,34 @@ pub mod event_mapper {
                         )),
                     }]
                 }
-                // Other events (ToolResult, PermissionRequired, etc.) are handled
-                // by the app's existing action execution pipeline — they don't need
-                // to be mapped to ResponseEvents since the controller processes them
-                // directly.
+                // PermissionRequired / ToolExecutionStarted / etc. are handled by the
+                // runtime + controller for Warp-action tools; no ResponseEvent needed.
                 _ => vec![],
             }
         }
     }
 
     /// Convert a runtime ToolCall to a proto ClientAction (AddMessagesToTask with ToolCall message).
+    ///
+    /// Local todo tools have no wire proto tool form; we still persist a ToolCall message with
+    /// the runtime transcript envelope so pairs restore. Other local-only tools (web, list_skills)
+    /// keep results in the runtime loop only unless they gain similar persistence later.
     fn tool_call_to_proto_action(
         task_id: &str,
         request_id: &str,
         call: &local_agent_runtime::ToolCall,
         registry: &LocalRuntimeToolRegistry,
     ) -> Option<api::ClientAction> {
-        let proto_tool = tool_call_to_proto_tool_with_registry(call, registry).ok()?;
+        if !registry.contains_tool(&call.name) {
+            return None;
+        }
+        let proto_tool = tool_call_to_proto_tool_with_registry(call, registry).ok();
+        if proto_tool.is_none()
+            && call.name != "update_todos"
+            && call.name != "mark_todos_completed"
+        {
+            return None;
+        }
 
         let message_id = Uuid::new_v4().to_string();
         let message = api::Message {
@@ -4825,7 +5052,7 @@ pub mod event_mapper {
             fetched_memories: vec![],
             message: Some(api::message::Message::ToolCall(api::message::ToolCall {
                 tool_call_id: call.id.clone(),
-                tool: Some(proto_tool),
+                tool: proto_tool,
             })),
         };
 
