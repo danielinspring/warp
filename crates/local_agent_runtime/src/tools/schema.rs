@@ -152,6 +152,22 @@ impl ToolSchemaBuilder {
         self
     }
 
+    /// Add an optional integer parameter.
+    pub fn optional_number(
+        mut self,
+        name: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
+        self.properties.insert(
+            name.into(),
+            serde_json::json!({
+                "type": "integer",
+                "description": description.into()
+            }),
+        );
+        self
+    }
+
     /// Build the final schema.
     pub fn build(self) -> ToolSchema {
         ToolSchema {

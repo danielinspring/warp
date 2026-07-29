@@ -2,15 +2,15 @@
 
 ## Current Objective
 
-Begin remaining **Phase C** items (web search/fetch, plan/todo, etc.).
+Begin **feat-020** — durable local plan/todo state for the Ollama agent runtime.
 
 ## Last Updated
 
-2026-07-28
+2026-07-29
 
 ## Active Feature
 
-`feat-018` — Local-runtime telemetry (`done`)
+`feat-019` — Local web search and fetch (`done`)
 
 ## Branch
 
@@ -18,15 +18,16 @@ Begin remaining **Phase C** items (web search/fetch, plan/todo, etc.).
 
 ## Current State
 
-- **Phase B complete:** feat-013–018 (run_agents, LRC shell, documents/CU, skills, hooks, telemetry).
-- Telemetry: structured runtime events + `AgentMode.LocalRuntime.*` product event registration + `local_runtime_telemetry` logs.
+- **Phase B complete:** feat-013–018.
+- **feat-019 done:** `app/src/ai/local_web/` + bridge registry. Tools: `web_search`, `web_fetch`. Gate: `RequestParams.web_search_enabled`. Backend: DuckDuckGo HTML + local HTTP fetch. SSRF policy on private/loopback/link-local/CGNAT/metadata hosts.
 
 ## Verification
 
-- `cargo test -p local_agent_runtime`: passed
-- `cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use`: 42 passed
-- format --check: passed
+- local_web: 10 passed  
+- local_runtime: 43 passed  
+- local_agent_runtime: passed  
+- format --check: passed  
 
 ## Recommended Next Step
 
-Promote Phase C **local web search and fetch** to `feat-019` (requires local provider/policy — not a simple client action bridge).
+Promote Phase C **durable plan and todo state** to `feat-020` (reuse `TodoOperation` / `AIAgentTodoList` UI via `AddMessagesToTask`; not a cloud tool bridge).

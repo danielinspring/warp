@@ -2,7 +2,7 @@
   "roadmap": {
     "name": "Local Ollama Agent Runtime",
     "source": "dan_docs/reports/local_agent_runtime_competitive_gap_report.md",
-    "active_feature": "feat-018",
+    "active_feature": "feat-019",
     "status_values": [
       "not-started",
       "in-progress",
@@ -413,24 +413,49 @@
         "./script/format --check"
       ],
       "evidence": "2026-07-28: Added RuntimeTelemetryEvent/Sink, TelemetryLifecycleHooks, ChannelTelemetrySink; provider latency in run_loop; app LocalRuntimeTelemetryEvent registration + integration drain/log. cargo test -p local_agent_runtime: 19 lib + 23 integration passed. cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use: 42 passed. format --check: passed."
+    },
+    {
+      "id": "feat-019",
+      "name": "Local web search and fetch",
+      "description": "Give the local Ollama runtime executable web_search and web_fetch tools with a local HTTP provider, SSRF/privacy policy, size caps, and request-gated schemas (not a cloud action bridge).",
+      "phase": "Phase C",
+      "dependencies": [
+        "feat-007",
+        "feat-018"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "web_search and web_fetch are advertised only when RequestParams.web_search_enabled is true.",
+        "Both tools execute in-process (no Warp AIAgentActionType bridge) and return structured JSON tool results.",
+        "SSRF policy denies non-http(s), private/link-local/loopback IPs, and oversized responses; redirects re-check policy.",
+        "Plan mode retains web_search and web_fetch (read-only investigation).",
+        "Transcript codec/registry tests cover enablement, plan mode, invalid input, and policy denials.",
+        "Focused tests and format check pass with evidence recorded."
+      ],
+      "verification": [
+        "cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use",
+        "cargo test -p warp local_web --lib --features local_ollama_runtime_tool_use",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-29: Added app/src/ai/local_web (policy SSRF, HTML extract, reqwest fetch, DuckDuckGo HTML search). Registry advertises web_search/web_fetch when web_search_enabled; in-process execute via WarpToolExecutor. Plan mode keeps both tools. cargo test -p warp local_web --lib --features local_ollama_runtime_tool_use: 10 passed. cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use: 43 passed. cargo test -p local_agent_runtime: 19 lib + 23 integration passed. format --check: passed."
     }
   ],
   "future_phases": [
     {
       "phase": "Phase B",
       "scope": [],
-      "note": "Phase B complete (feat-013–018). Proceed to remaining Phase C."
+      "note": "Phase B complete (feat-013–018)."
     },
     {
       "phase": "Phase C",
       "scope": [
-        "local web search and fetch",
         "durable plan and todo state",
         "remaining generic OpenAI-compatible provider polish",
         "model-specific prompt packs",
         "multimodal provider support",
         "Git workflow helpers"
-      ]
+      ],
+      "note": "feat-019 local web search/fetch done. Next: durable plan/todo (feat-020)."
     }
   ]
 }

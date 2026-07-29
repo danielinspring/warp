@@ -2,27 +2,28 @@
 
 ## Current State
 
-**Last Updated:** 2026-07-28  
-**Active Feature:** `feat-018` — Local-runtime telemetry  
+**Last Updated:** 2026-07-29  
+**Active Feature:** `feat-019` — Local web search and fetch  
 **Status:** Done  
 
 ## What's Done
 
 - Phase A; Phase C early (009–012); **Phase B fully complete** (013–018).
-- **feat-018:** RuntimeTelemetrySink events (run/provider/tool/finish), TelemetryLifecycleHooks, ChannelTelemetrySink on Ollama path, Warp `LocalRuntimeTelemetryEvent` schema registration.
+- **feat-018:** Local-runtime telemetry.
+- **feat-019:** Local `web_search` / `web_fetch` with SSRF policy, DuckDuckGo HTML search, HTTP fetch + extract; gated on `web_search_enabled`; in-process execute; plan mode keeps tools.
 
 ## Next
 
 Phase C remaining:
-1. local web search and fetch  
-2. durable plan and todo state  
-3. OpenAI-compat polish  
-4. model-specific prompt packs  
-5. multimodal  
-6. Git workflow helpers  
+1. durable plan and todo state (`feat-020`)  
+2. OpenAI-compat polish  
+3. model-specific prompt packs  
+4. multimodal  
+5. Git workflow helpers  
 
 ## Verification
 
-- local_agent_runtime tests passed  
-- warp local_runtime 42 passed  
-- format --check passed  
+- `cargo test -p warp local_web --lib --features local_ollama_runtime_tool_use`: 10 passed  
+- `cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use`: 43 passed  
+- `cargo test -p local_agent_runtime`: passed  
+- format --check: passed  

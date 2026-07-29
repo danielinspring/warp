@@ -164,7 +164,7 @@ fn format_system_prompt(input: &PromptBuildInput) -> String {
     )
     .ok();
     prompt.push_str(
-        "- Capabilities without a matching executable schema are unavailable in this local run. Do not claim or attempt planning, web search, computer use, research, or orchestration unless such a tool appears above.\n",
+        "- Capabilities without a matching executable schema are unavailable in this local run. Do not claim or attempt planning, web search, computer use, research, or orchestration unless such a tool appears above. When `web_search` / `web_fetch` appear above, use them for current docs and URLs; do not invent sources.\n",
     );
     writeln!(
         prompt,

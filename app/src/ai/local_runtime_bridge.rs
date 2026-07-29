@@ -164,6 +164,8 @@ enum LocalRuntimeToolRouteKind {
     },
     /// Catalog listing answered in-process from `skill_catalog` (no UI action).
     ListSkills,
+    /// Local HTTP web_search / web_fetch (in-process; no cloud action).
+    LocalWeb,
 }
 
 impl LocalRuntimeToolRegistry {
@@ -244,6 +246,10 @@ impl LocalRuntimeToolRegistry {
         // Computer use is gated to the same request flag as cloud/Oz agent mode.
         if params.computer_use_enabled {
             registry.add_computer_use_tools();
+        }
+        // Local web search/fetch: request flag only (no cloud server tool).
+        if params.web_search_enabled {
+            registry.add_web_tools();
         }
         if registry.permission_mode == LocalRuntimePermissionMode::Plan {
             registry.retain_plan_tools();
@@ -491,6 +497,19 @@ impl LocalRuntimeToolRegistry {
         );
     }
 
+    fn add_web_tools(&mut self) {
+        self.add_tool(
+            crate::ai::local_web::web_search_schema(),
+            ToolSafetyClass::ReadOnly,
+            LocalRuntimeToolRouteKind::LocalWeb,
+        );
+        self.add_tool(
+            crate::ai::local_web::web_fetch_schema(),
+            ToolSafetyClass::ReadOnly,
+            LocalRuntimeToolRouteKind::LocalWeb,
+        );
+    }
+
     fn add_read_skill(&mut self, skill_lookup: HashMap<String, SkillReference>) {
         self.add_tool(
             ToolSchemaBuilder::new(
@@ -615,6 +634,16 @@ impl ToolExecutor for WarpToolExecutor {
                 content: self.registry.list_skills_json(),
                 is_error: false,
             });
+        }
+
+        // Local web tools execute in-process with SSRF policy (no Warp action card).
+        if call.name == "web_search" || call.name == "web_fetch" {
+            if !self.registry.contains_tool(&call.name) {
+                return Err(ToolExecutionError::NotFound {
+                    name: call.name.clone(),
+                });
+            }
+            return crate::ai::local_web::execute_web_tool(call).await;
         }
 
         let (response_tx, response_rx) = oneshot::channel();
@@ -1006,6 +1035,12 @@ pub fn tool_call_to_ai_action_with_registry(
         LocalRuntimeToolRouteKind::ListSkills => {
             return Err(ToolExecutionError::ExecutionFailed(anyhow::anyhow!(
                 "list_skills is handled in-process and should not be queued as a Warp action"
+            )));
+        }
+        LocalRuntimeToolRouteKind::LocalWeb => {
+            return Err(ToolExecutionError::ExecutionFailed(anyhow::anyhow!(
+                "{} is handled in-process and should not be queued as a Warp action",
+                call.name
             )));
         }
         LocalRuntimeToolRouteKind::McpTool { server_id, name } => AIAgentActionType::CallMCPTool {
@@ -2446,6 +2481,12 @@ pub fn tool_call_to_proto_tool_with_registry(
             reason: "list_skills has no wire proto tool form; results stay in the runtime transcript envelope"
                 .to_string(),
         }),
+        LocalRuntimeToolRouteKind::LocalWeb => Err(ToolExecutionError::InvalidInput {
+            reason: format!(
+                "{} has no wire proto tool form; results stay in the runtime transcript envelope",
+                call.name
+            ),
+        }),
         LocalRuntimeToolRouteKind::McpTool { server_id, name } => {
             let arguments = arguments_object(&call.arguments, &call.name)?;
             Ok(Tool::CallMcpTool(api::message::tool_call::CallMcpTool {
@@ -2618,6 +2659,7 @@ pub fn proto_tool_call_to_runtime_with_registry(
                     }
                     LocalRuntimeToolRouteKind::BuiltIn
                     | LocalRuntimeToolRouteKind::ListSkills
+                    | LocalRuntimeToolRouteKind::LocalWeb
                     | LocalRuntimeToolRouteKind::McpTool { .. }
                     | LocalRuntimeToolRouteKind::ReadMcpResource
                     | LocalRuntimeToolRouteKind::ReadSkill { .. } => None,
@@ -3628,6 +3670,56 @@ mod tests {
         assert!(plan_registry.contains_tool("read_skill"));
         assert!(plan_registry.contains_tool("read_files"));
         assert!(!plan_registry.contains_tool("edit_files"));
+    }
+
+    #[test]
+    fn web_tools_are_gated_by_web_search_enabled_and_kept_in_plan_mode() {
+        let off = LocalRuntimeToolRegistry::from_request(&RequestParams::new_for_test());
+        assert!(!off.contains_tool("web_search"));
+        assert!(!off.contains_tool("web_fetch"));
+
+        let mut on = RequestParams::new_for_test();
+        on.web_search_enabled = true;
+        let registry = LocalRuntimeToolRegistry::from_request(&on);
+        assert!(registry.contains_tool("web_search"));
+        assert!(registry.contains_tool("web_fetch"));
+        assert_eq!(
+            registry.safety_class("web_search"),
+            ToolSafetyClass::ReadOnly
+        );
+        assert_eq!(
+            registry.safety_class("web_fetch"),
+            ToolSafetyClass::ReadOnly
+        );
+
+        on.input = vec![AIAgentInput::UserQuery {
+            query: "Plan research".to_string(),
+            context: std::sync::Arc::from([]),
+            static_query_type: None,
+            referenced_attachments: std::collections::HashMap::new(),
+            user_query_mode: crate::ai::agent::UserQueryMode::Plan,
+            running_command: None,
+            intended_agent: None,
+        }];
+        let plan = LocalRuntimeToolRegistry::from_request(&on);
+        assert_eq!(plan.permission_mode(), LocalRuntimePermissionMode::Plan);
+        assert!(plan.contains_tool("web_search"));
+        assert!(plan.contains_tool("web_fetch"));
+        assert!(plan.contains_tool("read_files"));
+        assert!(!plan.contains_tool("edit_files"));
+
+        let call = ToolCall {
+            id: "call_web_1".to_string(),
+            name: "web_search".to_string(),
+            arguments: serde_json::json!({ "query": "rust async" }),
+        };
+        let err = tool_call_to_ai_action_with_registry(
+            &call,
+            &TaskId::new("task_1".to_string()),
+            &registry,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ToolExecutionError::ExecutionFailed(_)));
     }
 
     #[test]
