@@ -1,0 +1,141 @@
+{
+  "a": {
+    "arguments": {
+      "todos": [
+        {
+          "id": "x",
+          "title": "A"
+        },
+        {
+          "id": "x",
+          "title": "B"
+        }
+      ]
+    },
+    "expect_substr": "duplicate todo id"
+  },
+  "b": {
+    "arguments": {
+      "todos": [
+        {
+          "id": "y"
+        }
+      ]
+    },
+    "expect_substr": "title` is required"
+  },
+  "c": {
+    "arguments": {
+      "todos": [
+        {
+          "id": "",
+          "title": "A"
+        }
+      ]
+    },
+    "expect_substr": "non-empty"
+  },
+  "d": {
+    "arguments": {
+      "todos": [
+        "문자열"
+      ]
+    },
+    "expect_substr": "must be an object"
+  },
+  "e": {
+    "arguments": {},
+    "expect_substr": "requires a `todos` array"
+  },
+  "f": {
+    "arguments": {
+      "todos": [
+        {
+          "id": "t1",
+          "title": "T1"
+        },
+        {
+          "id": "t2",
+          "title": "T2"
+        },
+        {
+          "id": "t3",
+          "title": "T3"
+        },
+        {
+          "id": "t4",
+          "title": "T4"
+        },
+        {
+          "id": "t5",
+          "title": "T5"
+        },
+        {
+          "id": "t6",
+          "title": "T6"
+        },
+        {
+          "id": "t7",
+          "title": "T7"
+        },
+        {
+          "id": "t8",
+          "title": "T8"
+        },
+        {
+          "id": "t9",
+          "title": "T9"
+        },
+        {
+          "id": "t10",
+          "title": "T10"
+        },
+        {
+          "id": "t11",
+          "title": "T11"
+        },
+        {
+          "id": "t12",
+          "title": "T12"
+        },
+        {
+          "id": "t13",
+          "title": "T13"
+        },
+        {
+          "id": "t14",
+          "title": "T14"
+        },
+        {
+          "id": "t15",
+          "title": "T15"
+        },
+        {
+          "id": "t16",
+          "title": "T16"
+        },
+        {
+          "id": "t17",
+          "title": "T17"
+        },
+        {
+          "id": "t18",
+          "title": "T18"
+        },
+        {
+          "id": "t19",
+          "title": "T19"
+        },
+        {
+          "id": "t20",
+          "title": "T20"
+        },
+        {
+          "id": "t21",
+          "title": "T21"
+        }
+      ]
+    },
+    "expect_substr": "at most 20"
+  }
+}

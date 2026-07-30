@@ -288,19 +288,41 @@ impl ConvertAPIMessageToClientOutputMessage for api::Message {
                     ),
                 ))
             }
-            api::message::Message::ToolCall(tool_call) => match tool_call.to_action(params)? {
-                MaybeAIAgentAction::Action(action) => Ok(MaybeAIAgentOutputMessage::Message(
-                    AIAgentOutputMessage::action(MessageId::new(self.id), action)
-                        .with_citations(citations),
-                )),
-                MaybeAIAgentAction::Subagent(subagent) => Ok(MaybeAIAgentOutputMessage::Message(
-                    AIAgentOutputMessage::subagent(MessageId::new(self.id), subagent)
-                        .with_citations(citations),
-                )),
-                MaybeAIAgentAction::NoClientRepresentation => {
-                    Ok(MaybeAIAgentOutputMessage::NoClientRepresentation)
+            api::message::Message::ToolCall(tool_call) => {
+                // Local-only tools (e.g. update_todos) persist a ToolCall with no wire `tool`
+                // payload and stash the runtime call in `server_message_data`. That must not
+                // hard-fail conversion (it would abort the whole AddMessagesToTask batch).
+                if tool_call.tool.is_none() {
+                    if let Some(text) =
+                        format_local_runtime_tool_call_message(&self.server_message_data)
+                    {
+                        return Ok(MaybeAIAgentOutputMessage::Message(
+                            AIAgentOutputMessage::text(
+                                MessageId::new(self.id),
+                                AIAgentText {
+                                    sections: parse_markdown_into_text_and_code_sections(&text),
+                                },
+                            )
+                            .with_citations(citations),
+                        ));
+                    }
+                    return Ok(MaybeAIAgentOutputMessage::NoClientRepresentation);
                 }
-            },
+
+                match tool_call.to_action(params)? {
+                    MaybeAIAgentAction::Action(action) => Ok(MaybeAIAgentOutputMessage::Message(
+                        AIAgentOutputMessage::action(MessageId::new(self.id), action)
+                            .with_citations(citations),
+                    )),
+                    MaybeAIAgentAction::Subagent(subagent) => Ok(MaybeAIAgentOutputMessage::Message(
+                        AIAgentOutputMessage::subagent(MessageId::new(self.id), subagent)
+                            .with_citations(citations),
+                    )),
+                    MaybeAIAgentAction::NoClientRepresentation => {
+                        Ok(MaybeAIAgentOutputMessage::NoClientRepresentation)
+                    }
+                }
+            }
             api::message::Message::WebSearch(web_search) => {
                 let status = match &web_search.status {
                     Some(api::message::web_search::Status {
@@ -639,10 +661,28 @@ impl ConvertAPIMessageToClientOutputMessage for api::Message {
                         .with_citations(citations),
                 ))
             }
+            // Local-runtime tool results stash JSON in `server_message_data` so the model-facing
+            // snapshot (and errors) can be shown in the transcript.
+            api::message::Message::ToolCallResult(_) => {
+                if let Some(text) =
+                    format_local_runtime_tool_result_message(&self.server_message_data)
+                {
+                    Ok(MaybeAIAgentOutputMessage::Message(
+                        AIAgentOutputMessage::text(
+                            MessageId::new(self.id),
+                            AIAgentText {
+                                sections: parse_markdown_into_text_and_code_sections(&text),
+                            },
+                        )
+                        .with_citations(citations),
+                    ))
+                } else {
+                    Ok(MaybeAIAgentOutputMessage::NoClientRepresentation)
+                }
+            }
             // These messages don't indicate an error but they don't translate to a client-side output message.
             api::message::Message::UserQuery(_)
             | api::message::Message::SystemQuery(_)
-            | api::message::Message::ToolCallResult(_)
             | api::message::Message::CodeReview(_)
             | api::message::Message::ServerEvent(_)
             | api::message::Message::InvokeSkill(_)
@@ -655,6 +695,32 @@ impl ConvertAPIMessageToClientOutputMessage for api::Message {
             }
         }
     }
+}
+
+/// Pretty-print a local-runtime tool call from the transcript envelope in `server_message_data`.
+fn format_local_runtime_tool_call_message(server_message_data: &str) -> Option<String> {
+    let call =
+        crate::ai::local_runtime_bridge::decode_local_runtime_tool_call_data(server_message_data)?;
+    let args = serde_json::to_string_pretty(&call.arguments).unwrap_or_else(|_| "{}".to_string());
+    Some(format!(
+        "**Tool call:** `{}` (`{}`)\n```json\n{args}\n```",
+        call.name, call.id
+    ))
+}
+
+/// Pretty-print a local-runtime tool result from the transcript envelope in `server_message_data`.
+fn format_local_runtime_tool_result_message(server_message_data: &str) -> Option<String> {
+    let (call_id, result) =
+        crate::ai::local_runtime_bridge::decode_local_runtime_tool_result_data(server_message_data)?;
+    let status = if result.is_error { "error" } else { "ok" };
+    let body = result.content.trim();
+    let pretty = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| serde_json::to_string_pretty(&v).ok())
+        .unwrap_or_else(|| body.to_string());
+    Some(format!(
+        "**Tool result** (`{call_id}`, {status}):\n```json\n{pretty}\n```"
+    ))
 }
 
 impl From<api::message::AgentOutput> for AIAgentText {
@@ -690,8 +756,11 @@ impl ConvertAPIToolCallToAIAgentAction for api::message::ToolCall {
         self,
         params: ConversionParams,
     ) -> Result<MaybeAIAgentAction, ToolToAIAgentActionError> {
+        // Local-only tools intentionally omit the wire `tool` payload. Callers that need
+        // transcript display should handle `tool.is_none()` before `to_action` (see
+        // `to_client_output_message`). Treat as non-renderable action rather than a hard error.
         let Some(tool) = self.tool else {
-            return Err(ToolToAIAgentActionError::MissingTool);
+            return Ok(MaybeAIAgentAction::NoClientRepresentation);
         };
 
         let create_standard_action = |action: AIAgentActionType| {

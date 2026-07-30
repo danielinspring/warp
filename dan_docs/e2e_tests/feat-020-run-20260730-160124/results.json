@@ -1,0 +1,116 @@
+{
+  "model": "qwen3-coder:latest",
+  "endpoint": "http://100.95.111.65:4000/v1/chat/completions",
+  "cases": {
+    "T0": {
+      "pass": true,
+      "content": "현재 사용 가능한 도구는 다음과 같습니다:\n\n1. update_todos\n2. mark_todos_completed",
+      "tool_calls": 0
+    },
+    "T1": {
+      "pass": true,
+      "tool_calls": 1,
+      "args": {
+        "todos": [
+          {
+            "description": "check settings",
+            "id": "t1",
+            "title": "Read config"
+          },
+          {
+            "id": "t2",
+            "title": "Write patch"
+          },
+          {
+            "id": "t3",
+            "title": "Run tests"
+          }
+        ]
+      }
+    },
+    "T2": {
+      "pass": true,
+      "ids": [
+        "t2",
+        "t3"
+      ],
+      "args": {
+        "todos": [
+          {
+            "id": "t2",
+            "title": "Write patch (v2)"
+          },
+          {
+            "id": "t3",
+            "title": "Run tests"
+          }
+        ]
+      }
+    },
+    "T3": {
+      "pass": true,
+      "completed_ids": [
+        "t2"
+      ]
+    },
+    "T4a": {
+      "pass": true,
+      "content": "- [x] t2 — Write patch (v2)\n- [ ] t3 — Run tests"
+    },
+    "T4b": {
+      "pass": true,
+      "ids": [
+        "t3",
+        "t4"
+      ]
+    },
+    "T5": {
+      "pass": true,
+      "note": "plan mode retain is unit/registry: tools ReadOnly + retain_plan_tools; LiteLLM cannot exercise /plan slash. Structural: update_todos/mark in TOOLS, no edit_files advertised.",
+      "tools": [
+        "update_todos",
+        "mark_todos_completed"
+      ],
+      "edit_files_absent": true
+    },
+    "T6": {
+      "pass": null,
+      "note": "validated by cargo test t6_validation_errors_on_execute_path",
+      "cases": [
+        "a",
+        "b",
+        "c",
+        "d",
+        "e",
+        "f"
+      ]
+    },
+    "T9": {
+      "pass": true,
+      "note": "LiteLLM only has todo tools (no read_files/grep). Partial: unprompted update_todos?",
+      "tool_names": [
+        "update_todos"
+      ],
+      "first_args": {
+        "todos": [
+          {
+            "id": "step1",
+            "title": "README의 첫 10줄 읽기"
+          },
+          {
+            "id": "step2",
+            "title": "TODO/FIXME 주석 grep"
+          },
+          {
+            "id": "step3",
+            "title": "찾은 개수 요약"
+          }
+        ]
+      }
+    },
+    "T10": {
+      "pass": null,
+      "note": "validated by cargo test t10_hydrate_from_tasks_replay"
+    }
+  }
+}

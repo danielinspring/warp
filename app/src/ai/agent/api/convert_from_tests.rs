@@ -665,3 +665,116 @@ fn transfer_control_tool_call_converts_to_action_message() {
         }
     }
 }
+
+#[test]
+fn local_only_tool_call_without_wire_tool_renders_transcript_text() {
+    let call = local_agent_runtime::ToolCall {
+        id: "c1".to_string(),
+        name: "update_todos".to_string(),
+        arguments: serde_json::json!({
+            "todos": [{"id": "t1", "title": "Read config"}]
+        }),
+    };
+    let message = api::Message {
+        id: "m1".to_string(),
+        task_id: "task-id".to_string(),
+        request_id: "request-id".to_string(),
+        timestamp: None,
+        server_message_data: crate::ai::local_runtime_bridge::encode_local_runtime_tool_call_data(
+            &call,
+        ),
+        citations: vec![],
+        fetched_memories: vec![],
+        message: Some(api::message::Message::ToolCall(api::message::ToolCall {
+            tool_call_id: "c1".to_string(),
+            tool: None,
+        })),
+    };
+
+    let task_id = TaskId::new("task-id".to_string());
+    let converted = message
+        .to_client_output_message(ConversionParams {
+            task_id: &task_id,
+            current_todo_list: None,
+            active_code_review: None,
+            skill_path_origin: &SkillPathOrigin::Local,
+        })
+        .expect("local-only tool call conversion should not error");
+
+    match converted {
+        MaybeAIAgentOutputMessage::Message(output) => match output.message {
+            AIAgentOutputMessageType::Text(text) => {
+                let joined = agent_text_joined(&text);
+                assert!(joined.contains("update_todos"), "got: {joined}");
+                assert!(joined.contains("Read config"), "got: {joined}");
+            }
+            other => panic!("Expected text message for local-only tool call, got {other:?}"),
+        },
+        MaybeAIAgentOutputMessage::NoClientRepresentation => {
+            panic!("Expected local-only tool call to render transcript text")
+        }
+    }
+}
+
+#[test]
+fn local_only_tool_result_renders_snapshot_json() {
+    let result = local_agent_runtime::ToolCallResult::success(
+        r#"{"pending":[{"id":"t1","title":"Read config","description":""}],"completed":[]}"#,
+    );
+    let message = api::Message {
+        id: "m2".to_string(),
+        task_id: "task-id".to_string(),
+        request_id: "request-id".to_string(),
+        timestamp: None,
+        server_message_data:
+            crate::ai::local_runtime_bridge::encode_local_runtime_tool_result_data("c1", &result),
+        citations: vec![],
+        fetched_memories: vec![],
+        message: Some(api::message::Message::ToolCallResult(
+            api::message::ToolCallResult {
+                tool_call_id: "c1".to_string(),
+                context: None,
+                result: None,
+            },
+        )),
+    };
+
+    let task_id = TaskId::new("task-id".to_string());
+    let converted = message
+        .to_client_output_message(ConversionParams {
+            task_id: &task_id,
+            current_todo_list: None,
+            active_code_review: None,
+            skill_path_origin: &SkillPathOrigin::Local,
+        })
+        .expect("local-only tool result conversion should not error");
+
+    match converted {
+        MaybeAIAgentOutputMessage::Message(output) => match output.message {
+            AIAgentOutputMessageType::Text(text) => {
+                let joined = agent_text_joined(&text);
+                assert!(joined.contains("Tool result"), "got: {joined}");
+                assert!(joined.contains("pending"), "got: {joined}");
+            }
+            other => panic!("Expected text message for local-only tool result, got {other:?}"),
+        },
+        MaybeAIAgentOutputMessage::NoClientRepresentation => {
+            panic!("Expected local-only tool result to render transcript text")
+        }
+    }
+}
+
+fn agent_text_joined(text: &crate::ai::agent::AIAgentText) -> String {
+    text.sections
+        .iter()
+        .map(|section| match section {
+            crate::ai::agent::AIAgentTextSection::PlainText { text } => text.text().to_string(),
+            crate::ai::agent::AIAgentTextSection::Code { code, .. } => code.clone(),
+            crate::ai::agent::AIAgentTextSection::Table { table } => table.markdown_source.clone(),
+            crate::ai::agent::AIAgentTextSection::Image { image } => image.markdown_source.clone(),
+            crate::ai::agent::AIAgentTextSection::MermaidDiagram { diagram } => {
+                diagram.markdown_source.clone()
+            }
+        })
+        .collect()
+}

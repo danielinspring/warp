@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-734dab2e-433b-469e-bb87-5142e0701afa",
+  "created": 1785394950,
+  "model": "qwen3-coder:latest",
+  "object": "chat.completion",
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "content": "현재 사용 가능한 도구는 다음과 같습니다:\n\n1. update_todos\n2. mark_todos_completed",
+        "role": "assistant"
+      }
+    }
+  ],
+  "usage": {
+    "completion_tokens": 23,
+    "prompt_tokens": 513,
+    "total_tokens": 536
+  }
+}

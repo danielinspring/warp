@@ -177,7 +177,10 @@ fn format_system_prompt(input: &PromptBuildInput) -> String {
 
     if input.local_tool_names.iter().any(|n| n == "update_todos") {
         prompt.push_str(
-            "\n## Planning / todos\nUse update_todos to keep a pending task list for multi-step work, and mark_todos_completed when items finish. Keep ids stable across updates.\n",
+            "\n## Planning / todos\n\
+Use update_todos to REPLACE the full pending list (not merge). \
+Ids you omit are removed from pending — they are not completed. \
+Use mark_todos_completed to finish items. Keep ids stable when only titles change.\n",
         );
     }
 

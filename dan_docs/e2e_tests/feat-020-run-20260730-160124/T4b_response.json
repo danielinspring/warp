@@ -1,0 +1,31 @@
+{
+  "id": "chatcmpl-37f1ae10-b273-43e3-8612-425d1a9a24e6",
+  "created": 1785394954,
+  "model": "qwen3-coder:latest",
+  "object": "chat.completion",
+  "choices": [
+    {
+      "finish_reason": "tool_calls",
+      "index": 0,
+      "message": {
+        "content": "",
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "function": {
+              "arguments": "{\"todos\": [{\"id\": \"t3\", \"title\": \"Run tests\"}, {\"id\": \"t4\", \"title\": \"Open PR\"}]}",
+              "name": "update_todos"
+            },
+            "id": "call_pasjol49",
+            "type": "function"
+          }
+        ]
+      }
+    }
+  ],
+  "usage": {
+    "completion_tokens": 45,
+    "prompt_tokens": 1089,
+    "total_tokens": 1134
+  }
+}

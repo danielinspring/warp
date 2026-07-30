@@ -14,13 +14,14 @@ UNAME_S := $(shell uname -s)
 ARGS ?=
 
 .DEFAULT_GOAL := help
-.PHONY: help dev app
+.PHONY: help dev app oss
 
 help:
 	@echo "make dev   - build a debug bundle and launch it (development / debugging)"
 	@echo "make app   - build the app without launching it, ready to install"
+	@echo "make oss   - OSS debug .app (channel oss, single-arch, selfsign; skips DMG)"
 	@echo ""
-	@echo "Pass extra flags with ARGS=\"...\" (forwarded to ./script/run)."
+	@echo "Pass extra flags with ARGS=\"...\" (forwarded to the underlying script)."
 
 # Development / debugging: debug profile.
 # On macOS this bundles and launches a real signed .app so URL schemes and
@@ -39,3 +40,7 @@ ifeq ($(UNAME_S),Darwin)
 else
 	./script/bundle $(ARGS)
 endif
+
+# Local OSS debug .app only (no DMG — create-dmg Finder AppleScript often times out locally).
+oss:
+	./script/bundle --channel oss --debug --nouniversal --selfsign --skip-dmg $(ARGS)

@@ -3087,20 +3087,14 @@ impl Input {
         );
 
         ctx.subscribe_to_model(&ai_controller, |me, _, event, ctx| match event {
-            BlocklistAIControllerEvent::SentRequest {
-                contains_user_query: is_user_initiated,
-                is_queued_prompt,
-                ..
-            } => {
-                // Skip the buffer clear for queued prompts. The user may have typed new
-                // input while the agent was busy and we don't want to wipe it on auto-send.
-                if *is_user_initiated && !*is_queued_prompt {
-                    me.editor.update(ctx, |editor, ctx| {
-                        editor.system_clear_buffer(true, ctx);
-                    });
-                    ctx.notify();
-                }
-            }
+            // `SentRequest` used to clear the input buffer here. It intentionally no longer
+            // does: the submitted prompt stays in the input so a run that stalls, errors, or
+            // gets cancelled does not cost the user the prompt they just typed. The prompt has
+            // already been collected and sent by this point, so keeping it is display-only.
+            //
+            // Queued prompts were already exempt for a related reason — the user may have typed
+            // new input while the agent was busy, and auto-send must not wipe it.
+            BlocklistAIControllerEvent::SentRequest { .. } => {}
             BlocklistAIControllerEvent::ExportConversationToFile {
                 #[cfg_attr(target_family = "wasm", allow(unused))]
                 filename,

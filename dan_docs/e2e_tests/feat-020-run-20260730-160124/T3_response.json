@@ -1,0 +1,31 @@
+{
+  "id": "chatcmpl-f67bcac2-1dad-4231-89d1-ea4bb6a29197",
+  "created": 1785394953,
+  "model": "qwen3-coder:latest",
+  "object": "chat.completion",
+  "choices": [
+    {
+      "finish_reason": "tool_calls",
+      "index": 0,
+      "message": {
+        "content": "",
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "function": {
+              "arguments": "{\"completed_ids\": [\"t2\"]}",
+              "name": "mark_todos_completed"
+            },
+            "id": "call_fyxnw87n",
+            "type": "function"
+          }
+        ]
+      }
+    }
+  ],
+  "usage": {
+    "completion_tokens": 28,
+    "prompt_tokens": 945,
+    "total_tokens": 973
+  }
+}

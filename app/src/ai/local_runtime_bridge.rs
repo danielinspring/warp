@@ -5012,8 +5012,35 @@ pub mod event_mapper {
                         )),
                     }]
                 }
-                // PermissionRequired / ToolExecutionStarted / etc. are handled by the
-                // runtime + controller for Warp-action tools; no ResponseEvent needed.
+                // Surface recoverable runtime warnings (model/tool issues) as agent text so
+                // the conversation isn't stuck on "Warping..." with no detail.
+                RuntimeEvent::Warning { message } => {
+                    if message.is_empty() {
+                        return vec![];
+                    }
+                    let mut actions = Vec::new();
+                    actions.push(begin_transaction());
+                    if !self.task_created {
+                        actions.push(create_task(&self.task_id));
+                        self.task_created = true;
+                    }
+                    let message_id = Uuid::new_v4().to_string();
+                    actions.push(add_agent_output(
+                        &self.task_id,
+                        &message_id,
+                        &self.request_id,
+                        &format!("**Runtime warning:** {message}"),
+                    ));
+                    actions.push(commit_transaction());
+                    vec![api::ResponseEvent {
+                        r#type: Some(api::response_event::Type::ClientActions(
+                            api::response_event::ClientActions { actions },
+                        )),
+                    }]
+                }
+                // PermissionRequired / ToolExecutionStarted for Warp-action tools are handled by
+                // the runtime + controller (action cards). Local-only tools surface via ToolCall /
+                // ToolResult transcript messages instead.
                 _ => vec![],
             }
         }

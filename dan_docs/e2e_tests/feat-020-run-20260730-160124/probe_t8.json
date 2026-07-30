@@ -1,0 +1,35 @@
+{
+  "steps": [
+    {
+      "name": "update_todos",
+      "arguments": {
+        "todos": [
+          {
+            "id": "t3",
+            "title": "Run tests"
+          },
+          {
+            "id": "t4",
+            "title": "Open PR"
+          }
+        ]
+      }
+    },
+    {
+      "name": "mark_todos_completed",
+      "arguments": {
+        "completed_ids": [
+          "t3",
+          "nope"
+        ]
+      }
+    }
+  ],
+  "assert_pending_ids": [
+    "t4"
+  ],
+  "assert_completed_ids": [
+    "t3"
+  ],
+  "write_snapshot_to": "/Users/lt-018/codish/open_soures/warp/dan_docs/e2e_tests/feat-020-run-20260730-160124/T8_execute_snapshot.json"
+}

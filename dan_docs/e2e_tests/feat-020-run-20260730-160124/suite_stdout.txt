@@ -1,0 +1,29 @@
+=== T0 ===
+T0 True 현재 사용 가능한 도구는 다음과 같습니다:
+
+1. update_todos
+2. mark_todos_completed
+=== T1-T3 ===
+T1 True {'todos': [{'description': 'check settings', 'id': 't1', 'title': 'Read config'}, {'id': 't2', 'title': 'Write patch'}, {'id': 't3', 'title': 'Run tests'}]}
+T2 True ['t2', 't3']
+T3 True ['t2']
+T4a True - [x] t2 — Write patch (v2)
+- [ ] t3 — Run tests
+T4b True ['t3', 't4']
+=== T5 structural ===
+T5 structural pass
+=== T6 probes ===
+=== T9 ===
+T9 True ['update_todos']
+{
+  "T0": true,
+  "T1": true,
+  "T2": true,
+  "T3": true,
+  "T4a": true,
+  "T4b": true,
+  "T5": true,
+  "T6": null,
+  "T9": true,
+  "T10": null
+}

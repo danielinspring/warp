@@ -1,0 +1,11 @@
+267:        registry.add_todo_tools();
+276:            registry.retain_plan_tools();
+536:    fn add_todo_tools(&mut self) {
+538:            crate::ai::local_todos::update_todos_schema(),
+590:    fn retain_plan_tools(&mut self) {
+711:        if call.name == "update_todos" || call.name == "mark_todos_completed" {
+3783:        assert!(registry.contains_tool("update_todos"));
+3786:            registry.safety_class("update_todos"),
+3801:        assert!(plan.contains_tool("update_todos"));
+3807:            name: "update_todos".to_string(),
+5065:            && call.name != "update_todos"

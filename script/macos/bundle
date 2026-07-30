@@ -107,6 +107,7 @@ CODESIGN=true
 SELFSIGN=false
 OPEN_AFTER_BUNDLE=false
 READ_PASSWORDS_FROM_ENV=false
+SKIP_DMG=false
 
 PARAMS=""
 while (( "$#" )); do
@@ -143,6 +144,12 @@ while (( "$#" )); do
       echo "Self-signing enabled."
       CODESIGN=false
       SELFSIGN=true
+      shift
+      ;;
+    # Skip DMG creation (local dogfood loop only needs the .app).
+    --skip-dmg)
+      echo "Skipping DMG creation."
+      SKIP_DMG=true
       shift
       ;;
     # Build only for the default target architecture instead of universal binary
@@ -730,7 +737,7 @@ fi
 ## Step 4: Create DMG ##
 ########################
 
-if [[ "$ARTIFACT" = app ]]; then
+if [[ "$ARTIFACT" = app && "$SKIP_DMG" != true ]]; then
   function create_warp_dmg() {
     echo "Creating $DMG_DIR/$DMG_NAME..."
     rm "$DMG_DIR/$DMG_NAME" || true
@@ -756,7 +763,9 @@ if [[ "$ARTIFACT" = app ]]; then
 
     # Skip running an AppleScript to format the DMG contents if running in Namespace - this consistently times out.
     # See https://github.com/create-dmg/create-dmg/issues/72
-    if [[ "${RUNNER_NAME:-}" == nsc-* ]]; then
+    # Same timeout shows up on local interactive Macs (Finder AppleEvent -1712), so also skip
+    # for selfsign / non-distribution local loops.
+    if [[ "${RUNNER_NAME:-}" == nsc-* || "$SELFSIGN" = true ]]; then
       args+=(--skip-jenkins)
     fi
 
@@ -792,6 +801,9 @@ if [[ "$ARTIFACT" = app ]]; then
 
     create_warp_dmg "$BUNDLE_DIR"
   fi
+elif [[ "$ARTIFACT" = app && "$SKIP_DMG" = true ]]; then
+  echo "Skipping DMG creation (--skip-dmg). App bundle is ready at:"
+  echo "  $BUNDLE_DIR/$WARP_APP_NAME.app"
 fi
 
 ##############################
@@ -827,9 +839,13 @@ fi
 #######################################
 
 if [[ "$ARTIFACT" = app ]]; then
-  echo "Copying dmg and app to $OUT_DIR"
+  echo "Copying app to $OUT_DIR"
   cp -R "$BUNDLE_DIR/$WARP_APP_NAME.app" "$OUT_DIR"
-  cp "$DMG_DIR/$DMG_NAME" "$OUT_DIR/$FINAL_DMG_NAME"
+  if [[ "$SKIP_DMG" != true && -f "$DMG_DIR/$DMG_NAME" ]]; then
+    echo "Copying dmg to $OUT_DIR"
+    cp "$DMG_DIR/$DMG_NAME" "$OUT_DIR/$FINAL_DMG_NAME"
+  fi
+  echo "App: $OUT_DIR/$WARP_APP_NAME.app"
 fi
 
 # If this is being run within a GitHub action, set an output variable with the

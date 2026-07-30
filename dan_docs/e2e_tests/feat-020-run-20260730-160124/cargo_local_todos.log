@@ -1,0 +1,66 @@
+warning: unused import: `TerminalModel`
+  --> app/src/ai/blocklist/block/view_impl/common.rs:93:46
+   |
+93 | use crate::terminal::{self, ShellLaunchData, TerminalModel};
+   |                                              ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated function `tool` is never used
+  --> app/src/ai/ollama/mod.rs:91:12
+   |
+60 | impl ChatMessage {
+   | ---------------- associated function in this implementation
+...
+91 |     pub fn tool(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+   |            ^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `kind` is never read
+   --> app/src/ai/ollama/mod.rs:128:9
+    |
+124 | pub struct ToolCallParsed {
+    |            -------------- field in this struct
+...
+128 |     pub kind: String,
+    |         ^^^^
+    |
+    = note: `ToolCallParsed` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: struct `WelcomePane` is never constructed
+  --> app/src/pane_group/pane/welcome_pane.rs:11:12
+   |
+11 | pub struct WelcomePane {
+   |            ^^^^^^^^^^^
+
+warning: associated function `new` is never used
+  --> app/src/pane_group/pane/welcome_pane.rs:17:12
+   |
+16 | impl WelcomePane {
+   | ---------------- associated function in this implementation
+17 |     pub fn new<V: View>(startup_directory: Option<PathBuf>, ctx: &mut ViewContext<V>) -> Self {
+   |            ^^^
+
+warning: function `init` is never used
+  --> app/src/pane_group/pane/welcome_view.rs:32:8
+   |
+32 | pub fn init(app: &mut AppContext) {
+   |        ^^^^
+
+warning: `warp` (lib test) generated 6 warnings (run `cargo fix --lib -p warp --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.09s
+     Running unittests src/lib.rs (/Users/lt-018/.cache/cargo-target/debug/deps/warp-944b7a48782f3ca4)
+
+running 8 tests
+test ai::local_todos::tests::primary_model_probe_drives_execute_todo_tool ... ok
+test ai::local_todos::tests::rejects_duplicate_ids ... ok
+test ai::local_todos::tests::e2e_t1_create_t2_replace_then_mark_complete ... ok
+test ai::local_todos::tests::update_then_complete_round_trip ... ok
+test ai::local_todos::tests::t10_hydrate_from_tasks_replay ... ok
+test ai::local_todos::tests::t8_mark_partial_match_success ... ok
+test ai::local_todos::tests::t7_mark_no_match_error_result_preserves_state ... ok
+test ai::local_todos::tests::t6_validation_errors_on_execute_path ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 5507 filtered out; finished in 0.01s
+
