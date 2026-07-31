@@ -74,6 +74,8 @@ pub enum UriHost {
     Launch,
     /// Supports joining shared sessions via a warp:// URI.
     SharedSession,
+    /// Supports joining a local LAN session share via a warp:// URI.
+    LocalSession,
     /// Supports viewing AI conversations via a warp:// URI.
     Conversation,
     /// Supports WD object actions
@@ -107,6 +109,7 @@ impl FromStr for UriHost {
             "shared_session" if FeatureFlag::ViewingSharedSessions.is_enabled() => {
                 Ok(Self::SharedSession)
             }
+            "local_session" => Ok(Self::LocalSession),
             "conversation" => Ok(Self::Conversation),
             "drive" => Ok(Self::Drive),
             "settings" => Ok(Self::Settings),
@@ -235,6 +238,9 @@ impl UriHost {
                 } else {
                     log::warn!("Failed to join shared session with uri={url}");
                 }
+            }
+            UriHost::LocalSession => {
+                handle_local_session_uri(primary_window_id, url, ctx);
             }
             UriHost::Conversation => {
                 // We expect the uri to have the conversation ID as the last segment.
@@ -518,7 +524,11 @@ impl UriHost {
             }),
             Self::Team | Self::Drive | Self::Settings => W::default(),
             // These URLs always open new windows.
-            Self::Launch | Self::SharedSession | Self::Conversation | Self::Home => W::Nothing,
+            Self::Launch
+            | Self::SharedSession
+            | Self::LocalSession
+            | Self::Conversation
+            | Self::Home => W::Nothing,
             // This will actually be handled by [`Action::window_behavior_hint`].
             Self::Action => W::Nothing,
             // TODO(vorporeal): probably want to focus the window with the MCP pane open
@@ -1140,6 +1150,82 @@ impl Action {
     }
 }
 
+/// Handles `warp://local_session/{secret}` (and optional `?ws=` for desktop).
+/// Prefer deriving the WS URL from the current browser location on WASM.
+fn handle_local_session_uri(primary_window_id: Option<WindowId>, url: &Url, ctx: &mut AppContext) {
+    let secret = url
+        .path_segments()
+        .into_iter()
+        .flatten()
+        .find(|segment| !segment.is_empty())
+        .map(str::to_owned);
+
+    let Some(secret) = secret else {
+        log::warn!("Failed to join local session share with uri={url}: missing secret");
+        return;
+    };
+
+    let ws_from_query = url
+        .query_pairs()
+        .find(|(key, _)| key == "ws")
+        .map(|(_, value)| value.into_owned());
+
+    let ws_url = ws_from_query.or_else(|| {
+        #[cfg(target_family = "wasm")]
+        {
+            browser_url_handler::parse_current_url()
+                .and_then(|current| derive_local_session_ws_url_from_page(&current, &secret))
+        }
+        #[cfg(not(target_family = "wasm"))]
+        {
+            None
+        }
+    });
+
+    let Some(ws_url) = ws_url else {
+        log::error!(
+            "local_session URI missing ws URL (desktop warp://local_session without ?ws= is not supported yet); uri={url}"
+        );
+        return;
+    };
+
+    ChannelState::set_local_session_share_ws_url(Some(ws_url));
+    let session_id = SessionId::new();
+
+    match primary_window_id.and_then(|window_id| {
+        ctx.root_view_id(window_id)
+            .map(|view_id| (window_id, view_id))
+    }) {
+        Some((primary_window_id, root_view_id)) => {
+            ctx.dispatch_action(
+                primary_window_id,
+                &[root_view_id],
+                "root_view:join_shared_session_in_existing_window",
+                &session_id,
+                log::Level::Info,
+            );
+        }
+        None => ctx.dispatch_global_action("root_view:join_shared_session", &session_id),
+    }
+}
+
+/// Builds `ws(s)://{host}/local-session/{secret}/ws` from the page URL that
+/// served the WASM viewer.
+#[cfg(target_family = "wasm")]
+fn derive_local_session_ws_url_from_page(page_url: &Url, secret: &str) -> Option<String> {
+    let mut ws_url = page_url.clone();
+    let ws_scheme = match page_url.scheme() {
+        "https" => "wss",
+        "http" => "ws",
+        _ => return None,
+    };
+    ws_url.set_scheme(ws_scheme).ok()?;
+    ws_url.set_path(&format!("/local-session/{secret}/ws"));
+    ws_url.set_query(None);
+    ws_url.set_fragment(None);
+    Some(ws_url.to_string())
+}
+
 /// Handles all incoming urls. These urls are file urls, auth urls for login,
 /// and team urls for opening team settings.
 pub fn handle_incoming_uri(url: &Url, ctx: &mut AppContext) {
@@ -1601,6 +1687,7 @@ fn validate_custom_uri(url: &Url) -> Result<UriHost> {
         UriHost::Action
         | UriHost::Launch
         | UriHost::SharedSession
+        | UriHost::LocalSession
         | UriHost::Conversation
         | UriHost::Drive
         | UriHost::Team

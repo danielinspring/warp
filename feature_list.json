@@ -2,7 +2,7 @@
   "roadmap": {
     "name": "Local Ollama Agent Runtime",
     "source": "dan_docs/reports/local_agent_runtime_competitive_gap_report.md",
-      "active_feature": "feat-026",
+      "active_feature": "feat-028",
     "status_values": [
       "not-started",
       "in-progress",
@@ -608,6 +608,54 @@
         "./script/format --check"
       ],
       "evidence": "2026-07-31: Local WS speaks viewer Initialize→JoinedSuccessfully (empty scrollback, Role::Reader); publish_pty_bytes LZ4+OrderedTerminalEvent broadcast; WriteToPty/Execute/Agent/Control → InsufficientPermissions. cargo test local_session_share: 22 passed. format --check passed."
+    },
+    {
+      "id": "feat-027",
+      "name": "Local LAN share WASM serve + WebIntent boot",
+      "description": "Serve Warp WASM from the local session share hub when configured; parse http://LAN/local-session/{secret} as WebIntent; connect viewer WS to same-origin /local-session/{secret}/ws without cloud sessions server or IAP.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-025",
+        "feat-026"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "Hub optionally serves index.html + /assets/client/{wasm,static} from WARP_LOCAL_SHARE_WASM_DIR or start_with_options.",
+        "GET /local-session/{secret}/boot.json returns ws_url for a valid secret.",
+        "WebIntent parses LAN local-session URLs without requiring server_root host match.",
+        "ChannelState local_session_share_ws_url override routes viewer WS with empty IAP headers.",
+        "Cloud shared-session WebIntent path remains intact.",
+        "Focused unit tests and format check pass."
+      ],
+      "verification": [
+        "cargo test -p warp local_session_share --lib",
+        "cargo test -p warp web_intent --lib",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-31: Hub serves WASM from WARP_LOCAL_SHARE_WASM_DIR/start_with_options; /boot.json returns ws_url; WebIntent::LocalSessionView for LAN hosts; ChannelState local_session_share_ws_url skips IAP. local_session_share: 24 passed; web_intent: 4 passed; format --check passed."
+    },
+    {
+      "id": "feat-028",
+      "name": "Local LAN share host UX + TerminalModel fan-in",
+      "description": "Command Palette start/copy/stop for local session share; TerminalModel publish_pty_bytes fan-in; mutual exclusion with cloud share; host banners.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-025",
+        "feat-026",
+        "feat-027"
+      ],
+      "status": "in-progress",
+      "acceptance_criteria": [
+        "Host can start, copy URL, and stop a local LAN share from Command Palette when LocalLanSessionShare is enabled.",
+        "Active terminal PTY bytes fan into publish_pty_bytes for joined guests.",
+        "Local share and cloud share cannot both be active for the same session (mutual exclusion).",
+        "Focused unit tests and format check pass."
+      ],
+      "verification": [
+        "cargo test -p warp local_session_share --lib",
+        "./script/format --check"
+      ],
+      "evidence": ""
     }
   ],
   "future_phases": [
@@ -624,10 +672,9 @@
     {
       "phase": "Phase D",
       "scope": [
-        "WASM viewer + WebIntent/boot overrides",
         "Host UX (palette, banners, TerminalModel fan-in, mutual exclusion with cloud share)"
       ],
-      "note": "feat-025 hub + feat-026 protocol shim done. Next: WASM serve + host wiring."
+      "note": "feat-025/026/027 done. Active: feat-028 host UX + TerminalModel fan-in."
     }
   ]
 }

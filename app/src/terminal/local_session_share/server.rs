@@ -2,12 +2,14 @@ use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
-use axum::response::{Html, IntoResponse, Response};
+use axum::http::{header, HeaderMap, StatusCode, Uri};
+use axum::response::{Html, IntoResponse, Json, Response};
 use axum::routing::get;
 use axum::Router;
 use futures_util::{SinkExt, StreamExt};
+use serde::Serialize;
 use session_sharing_protocol::viewer::{DownstreamMessage, UpstreamMessage};
+use tower_http::services::ServeDir;
 
 use super::hub::ShareState;
 use super::protocol::{joined_successfully, reply_for_upstream};
@@ -25,32 +27,85 @@ const PLACEHOLDER_HTML: &str = r#"<!doctype html>
 </html>
 "#;
 
+#[derive(Serialize)]
+struct BootConfig {
+    ws_url: String,
+    secret: String,
+}
+
 /// Builds the axum router for a local session share hub. Every route other
-/// than `/health` is gated by the URL secret embedded in `state`
-/// (PRODUCT.md P17, P26).
+/// than `/health` (and static WASM assets when configured) is gated by the
+/// URL secret embedded in `state` (PRODUCT.md P17, P26).
 pub(crate) fn build_router(state: Arc<ShareState>) -> Router {
-    Router::new()
+    let mut router = Router::new()
         .route("/health", get(health))
-        .route("/local-session/{secret}", get(serve_placeholder))
-        .route("/local-session/{secret}/ws", get(ws_upgrade))
-        .with_state(state)
+        .route("/local-session/{secret}", get(serve_session_page))
+        .route("/local-session/{secret}/boot.json", get(serve_boot_json))
+        .route("/local-session/{secret}/ws", get(ws_upgrade));
+
+    if let Some(dir) = state.wasm_bundle_dir() {
+        if dir.join("index.html").is_file() {
+            router = router
+                .nest_service("/assets/client/wasm", ServeDir::new(dir.join("wasm")))
+                .nest_service("/assets/client/static", ServeDir::new(dir.join("assets")));
+        }
+    }
+
+    router.with_state(state)
 }
 
 async fn health() -> &'static str {
     "ok"
 }
 
-async fn serve_placeholder(
+async fn serve_session_page(
     State(state): State<Arc<ShareState>>,
     Path(secret): Path<String>,
 ) -> Response {
-    if state.check_secret(&secret) {
-        Html(PLACEHOLDER_HTML).into_response()
-    } else {
+    if !state.check_secret(&secret) {
         // Do not leak whether a share ever existed; a stopped or unknown
         // secret both look like "not found" (PRODUCT.md P17, P18).
-        StatusCode::NOT_FOUND.into_response()
+        return StatusCode::NOT_FOUND.into_response();
     }
+
+    if let Some(dir) = state.wasm_bundle_dir() {
+        let index_path = dir.join("index.html");
+        if index_path.is_file() {
+            match tokio::fs::read_to_string(&index_path).await {
+                Ok(html) => return Html(html).into_response(),
+                Err(err) => {
+                    log::error!("Failed to read local share WASM index.html: {err}");
+                    return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                }
+            }
+        }
+    }
+
+    Html(PLACEHOLDER_HTML).into_response()
+}
+
+async fn serve_boot_json(
+    State(state): State<Arc<ShareState>>,
+    Path(secret): Path<String>,
+    headers: HeaderMap,
+    uri: Uri,
+) -> Response {
+    if !state.check_secret(&secret) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned)
+        .or_else(|| uri.authority().map(|authority| authority.to_string()))
+        .unwrap_or_else(|| "localhost".to_owned());
+
+    let boot = BootConfig {
+        ws_url: format!("ws://{host}/local-session/{secret}/ws"),
+        secret,
+    };
+    Json(boot).into_response()
 }
 
 async fn ws_upgrade(

@@ -218,6 +218,7 @@ impl View for WasmNUXDialog {
             let object_kind = match web_intent_parser::current_web_intent() {
                 Some(WebIntent::DriveObject(_)) => "Warp Drive objects",
                 Some(WebIntent::SessionView(_)) => "shared sessions",
+                Some(WebIntent::LocalSessionView { .. }) => "local shared sessions",
                 _ => "Warp links",
             };
 

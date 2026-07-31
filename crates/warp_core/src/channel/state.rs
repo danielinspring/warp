@@ -32,6 +32,10 @@ pub struct ChannelState {
     additional_features: HashSet<FeatureFlag>,
 
     config: ChannelConfig,
+
+    /// When set, shared-session viewers connect to this full WebSocket URL
+    /// instead of the cloud session-sharing server (local LAN share).
+    local_session_share_ws_url: Option<String>,
 }
 
 impl ChannelState {
@@ -51,6 +55,7 @@ impl ChannelState {
                 crash_reporting_config: None,
                 mcp_static_config: None,
             },
+            local_session_share_ws_url: None,
         }
     }
 
@@ -69,6 +74,7 @@ impl ChannelState {
             channel,
             additional_features: Default::default(),
             config,
+            local_session_share_ws_url: None,
         }
     }
 
@@ -265,6 +271,17 @@ impl ChannelState {
                 CHANNEL_STATE.lock().config.server_config.session_sharing_server_url.clone()
             }
         }
+    }
+
+    /// Overrides the shared-session viewer WebSocket endpoint for local LAN
+    /// session share. Pass `None` to clear and restore the cloud path.
+    pub fn set_local_session_share_ws_url(url: Option<String>) {
+        CHANNEL_STATE.lock().local_session_share_ws_url = url;
+    }
+
+    /// Returns the local LAN session share WebSocket URL override, if any.
+    pub fn local_session_share_ws_url() -> Option<String> {
+        CHANNEL_STATE.lock().local_session_share_ws_url.clone()
     }
 
     pub fn oz_root_url() -> Cow<'static, str> {

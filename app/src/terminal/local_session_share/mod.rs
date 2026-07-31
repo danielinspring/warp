@@ -6,8 +6,7 @@
 //! without going through Warp cloud. See `specs/local-lan-session-share/`
 //! for the full product and technical specs.
 //!
-//! The Warp WASM viewer and host TerminalModel fan-in land in follow-up
-//! work (TECH.md PR3/PR4).
+//! Host TerminalModel fan-in and share UX land in follow-up work (TECH.md PR4).
 
 mod bind;
 mod hub;
@@ -16,5 +15,5 @@ mod secret;
 mod server;
 
 pub use bind::{is_all_interfaces, non_loopback_candidates, BindCandidate};
-pub use hub::{HubError, LocalSessionShareHub, ShareHandle};
+pub use hub::{HubError, LocalSessionShareHub, ShareHandle, WASM_BUNDLE_DIR_ENV};
 pub use secret::ShareSecret;

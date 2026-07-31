@@ -1,4 +1,5 @@
 use std::net::{IpAddr, SocketAddr};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -10,6 +11,10 @@ use tokio::sync::{broadcast, oneshot};
 use super::protocol::{compress_pty_bytes, ordered_event_downstream};
 use super::secret::ShareSecret;
 use super::server;
+
+/// Environment variable consulted when [`LocalSessionShareHub::start`] is
+/// called without an explicit WASM bundle directory.
+pub const WASM_BUNDLE_DIR_ENV: &str = "WARP_LOCAL_SHARE_WASM_DIR";
 
 const EVENT_BROADCAST_CAPACITY: usize = 256;
 
@@ -51,17 +56,25 @@ pub(crate) struct ShareState {
     window_size: RwLock<WindowSize>,
     next_event_no: AtomicUsize,
     event_tx: broadcast::Sender<String>,
+    /// Optional directory containing `index.html`, `wasm/`, and `assets/` for
+    /// serving the Warp WASM viewer over the share URL.
+    wasm_bundle_dir: Option<PathBuf>,
 }
 
 impl ShareState {
-    fn new(secret: ShareSecret) -> Self {
+    fn new(secret: ShareSecret, wasm_bundle_dir: Option<PathBuf>) -> Self {
         let (event_tx, _) = broadcast::channel(EVENT_BROADCAST_CAPACITY);
         Self {
             secret: RwLock::new(Some(secret)),
             window_size: RwLock::new(WindowSize::default()),
             next_event_no: AtomicUsize::new(0),
             event_tx,
+            wasm_bundle_dir,
         }
+    }
+
+    pub(crate) fn wasm_bundle_dir(&self) -> Option<&std::path::Path> {
+        self.wasm_bundle_dir.as_deref()
     }
 
     pub(crate) fn check_secret(&self, candidate: &str) -> bool {
@@ -164,7 +177,22 @@ impl LocalSessionShareHub {
     /// an OS-assigned ephemeral port) and starts serving it. Fails if a
     /// share is already active on this hub (PRODUCT.md P3) or if the address
     /// cannot be bound (PRODUCT.md P8).
+    ///
+    /// When `wasm_bundle_dir` is `None`, falls back to
+    /// [`WASM_BUNDLE_DIR_ENV`] if set.
     pub fn start(&mut self, bind_ip: IpAddr, port: u16) -> Result<ShareHandle, HubError> {
+        self.start_with_options(bind_ip, port, None)
+    }
+
+    /// Like [`start`](Self::start), but accepts an explicit WASM bundle
+    /// directory. When `wasm_bundle_dir` is `None`, falls back to
+    /// [`WASM_BUNDLE_DIR_ENV`].
+    pub fn start_with_options(
+        &mut self,
+        bind_ip: IpAddr,
+        port: u16,
+        wasm_bundle_dir: Option<PathBuf>,
+    ) -> Result<ShareHandle, HubError> {
         if self.active.is_some() {
             return Err(HubError::AlreadyActive);
         }
@@ -192,8 +220,9 @@ impl LocalSessionShareHub {
             .build()
             .map_err(HubError::Runtime)?;
 
+        let wasm_bundle_dir = resolve_wasm_bundle_dir(wasm_bundle_dir);
         let secret = ShareSecret::generate();
-        let state = Arc::new(ShareState::new(secret.clone()));
+        let state = Arc::new(ShareState::new(secret.clone(), wasm_bundle_dir));
         let router = server::build_router(state.clone());
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
@@ -298,6 +327,10 @@ fn build_url(addr: SocketAddr, secret: &ShareSecret) -> String {
         IpAddr::V6(v6) => format!("[{v6}]"),
     };
     format!("http://{host}:{}/local-session/{secret}", addr.port())
+}
+
+fn resolve_wasm_bundle_dir(explicit: Option<PathBuf>) -> Option<PathBuf> {
+    explicit.or_else(|| std::env::var_os(WASM_BUNDLE_DIR_ENV).map(PathBuf::from))
 }
 
 #[cfg(test)]

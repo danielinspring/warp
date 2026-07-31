@@ -367,3 +367,83 @@ fn write_to_pty_from_guest_is_rejected() {
 
     hub.stop();
 }
+
+fn write_fake_wasm_bundle(root: &std::path::Path) {
+    std::fs::create_dir_all(root.join("wasm")).unwrap();
+    std::fs::create_dir_all(root.join("assets")).unwrap();
+    std::fs::write(
+        root.join("index.html"),
+        "<!doctype html><html><body>fake-wasm-index-marker</body></html>",
+    )
+    .unwrap();
+    std::fs::write(root.join("wasm/probe.txt"), "wasm-asset-ok").unwrap();
+    std::fs::write(root.join("assets/probe.txt"), "static-asset-ok").unwrap();
+}
+
+#[test]
+fn wasm_bundle_serves_index_and_assets() {
+    let bundle = tempfile::tempdir().unwrap();
+    write_fake_wasm_bundle(bundle.path());
+
+    let mut hub = LocalSessionShareHub::new();
+    let handle = hub
+        .start_with_options(loopback_ip(), 0, Some(bundle.path().to_path_buf()))
+        .expect("start should succeed");
+
+    let (status, body) = get(&handle.url);
+    assert_eq!(status, reqwest::StatusCode::OK);
+    assert!(body.contains("fake-wasm-index-marker"));
+    assert!(!body.contains("WASM viewer coming soon"));
+
+    let bad_url = format!("http://{}/local-session/not-the-secret", handle.addr);
+    let (bad_status, bad_body) = get(&bad_url);
+    assert_ne!(bad_status, reqwest::StatusCode::OK);
+    assert!(!bad_body.contains("fake-wasm-index-marker"));
+
+    let (wasm_status, wasm_body) = get(&format!(
+        "http://{}/assets/client/wasm/probe.txt",
+        handle.addr
+    ));
+    assert_eq!(wasm_status, reqwest::StatusCode::OK);
+    assert_eq!(wasm_body, "wasm-asset-ok");
+
+    let (static_status, static_body) = get(&format!(
+        "http://{}/assets/client/static/probe.txt",
+        handle.addr
+    ));
+    assert_eq!(static_status, reqwest::StatusCode::OK);
+    assert_eq!(static_body, "static-asset-ok");
+
+    hub.stop();
+}
+
+#[test]
+fn boot_json_returns_ws_url_for_valid_secret() {
+    let mut hub = LocalSessionShareHub::new();
+    let handle = hub.start(loopback_ip(), 0).expect("start should succeed");
+
+    let boot_url = format!(
+        "http://{}/local-session/{}/boot.json",
+        handle.addr,
+        handle.secret.as_str()
+    );
+    let (status, body) = get(&boot_url);
+    assert_eq!(status, reqwest::StatusCode::OK);
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("boot.json should be JSON");
+    assert_eq!(
+        json["ws_url"].as_str().unwrap(),
+        format!(
+            "ws://{}/local-session/{}/ws",
+            handle.addr,
+            handle.secret.as_str()
+        )
+    );
+    assert_eq!(json["secret"].as_str().unwrap(), handle.secret.as_str());
+
+    let bad_boot = format!("http://{}/local-session/wrong/boot.json", handle.addr);
+    let (bad_status, _) = get(&bad_boot);
+    assert_ne!(bad_status, reqwest::StatusCode::OK);
+
+    hub.stop();
+}

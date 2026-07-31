@@ -52,6 +52,7 @@ use crate::terminal::shared_session::{
 };
 use crate::terminal::{TerminalModel, TerminalView};
 use crate::throttle::throttle;
+use crate::ChannelState;
 
 /// The amount of time we will wait to batch consecutive write to pty requests before sending an event to the server.
 const PTY_WRITES_BATCH_THRESHOLD: Duration = if cfg!(test) {
@@ -298,6 +299,20 @@ impl Network {
         auth_state: Arc<AuthState>,
         iap_headers: Vec<(&'static str, String)>,
     ) -> anyhow::Result<((impl Sink, impl Stream), UserID)> {
+        // Local LAN session share: connect to the hub WS URL with no IAP.
+        if let Some(local_ws_url) = ChannelState::local_session_share_ws_url() {
+            let user_id = Self::get_user_id(auth_client, &auth_state)
+                .await
+                .unwrap_or_else(|_| UserID {
+                    anonymous_id: auth_state.anonymous_id(),
+                    access_token: None,
+                });
+            let socket =
+                websocket::WebSocket::connect_with_headers(&local_ws_url, None::<&str>, vec![])
+                    .await?;
+            return anyhow::Ok(((socket.split().await), user_id));
+        }
+
         let Some(join_endpoint) = connect_endpoint(format!("/sessions/join/{session_id}")) else {
             bail!("This channel does not support session-sharing.");
         };

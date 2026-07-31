@@ -12,6 +12,11 @@ use crate::ChannelState;
 /// Represents an intent parsed from a web url
 pub enum WebIntent {
     SessionView(Url),
+    /// Local LAN / Tailscale session share opened at
+    /// `http://<host>/local-session/<secret>`.
+    LocalSessionView {
+        secret: String,
+    },
     ConversationView(Url),
     DriveObject(Url),
     SettingsView(Url),
@@ -22,7 +27,21 @@ pub enum WebIntent {
 
 impl WebIntent {
     pub fn try_from_url(url: &Url) -> Result<Self> {
-        // Only handle URLs that point at the current channel's web server.
+        let segments = url
+            .path_segments()
+            .map(|segments| segments.collect::<Vec<_>>());
+
+        // Local LAN session share must work for arbitrary hosts (LAN IPs,
+        // Tailscale MagicDNS, etc.) — check before the server_root lock.
+        if let Some(ref segments) = segments {
+            if segments.len() == 2 && segments[0] == "local-session" && !segments[1].is_empty() {
+                return Ok(WebIntent::LocalSessionView {
+                    secret: segments[1].to_owned(),
+                });
+            }
+        }
+
+        // Only handle remaining URLs that point at the current channel's web server.
         let server_root = ChannelState::server_root_url();
         let server_root_url = Url::parse(&server_root)?;
         if url.scheme() != server_root_url.scheme()
@@ -32,9 +51,6 @@ impl WebIntent {
             return Err(anyhow!("Attempting to parse invalid url: {}", url));
         }
 
-        let segments = url
-            .path_segments()
-            .map(|segments| segments.collect::<Vec<_>>());
         if let Some(segments) = segments {
             let url_scheme = ChannelState::url_scheme();
             if segments.is_empty() {
@@ -151,6 +167,11 @@ impl WebIntent {
     pub fn into_intent_url(self) -> Url {
         match self {
             WebIntent::SessionView(url) => url,
+            WebIntent::LocalSessionView { secret } => {
+                let url_scheme = ChannelState::url_scheme();
+                Url::parse(&format!("{url_scheme}://local_session/{secret}"))
+                    .expect("local_session intent URL should be valid")
+            }
             WebIntent::ConversationView(url) => url,
             WebIntent::DriveObject(url) => url,
             WebIntent::SettingsView(url) => url,
@@ -182,7 +203,10 @@ pub fn open_url_on_desktop(url: &Url) {
                 url: intent.into(),
             });
         }
-        _ => {
+        Ok(WebIntent::LocalSessionView { .. })
+        | Ok(WebIntent::Home(_))
+        | Ok(WebIntent::SettingsView(_))
+        | Err(_) => {
             log::warn!("Attempting to open invalid url on desktop app:{url}");
         }
     };
@@ -191,14 +215,16 @@ pub fn open_url_on_desktop(url: &Url) {
 #[cfg(target_family = "wasm")]
 fn set_context_flags_from_url(url: Url) {
     match WebIntent::try_from_url(&url) {
-        Ok(WebIntent::SessionView(_)) => ContextFlag::set_shared_session_only(),
+        Ok(WebIntent::SessionView(_)) | Ok(WebIntent::LocalSessionView { .. }) => {
+            ContextFlag::set_shared_session_only()
+        }
         Ok(WebIntent::ConversationView(_)) => ContextFlag::set_conversation_only(),
         Ok(WebIntent::DriveObject(_)) => ContextFlag::set_warp_drive_link_only(),
         Ok(WebIntent::SettingsView(_)) => ContextFlag::set_settings_link_only(),
         Ok(WebIntent::Home(_)) => ContextFlag::set_warp_home_link_only(),
         Ok(WebIntent::CloudAgentHome(_)) => {}
         Ok(WebIntent::Action(_)) => {} // No special context flag for actions
-        _ => {}
+        Err(_) => {}
     }
 
     // Allow directly setting flags through query params in dogfood.
@@ -243,3 +269,7 @@ pub fn set_context_flags_from_current_url() {
 
     set_context_flags_from_url(current_url);
 }
+
+#[cfg(test)]
+#[path = "web_intent_parser_tests.rs"]
+mod tests;
