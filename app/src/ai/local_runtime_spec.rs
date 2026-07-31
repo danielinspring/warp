@@ -35,7 +35,8 @@ pub fn system_prompt_for_request_with_model(
     registry: &LocalRuntimeToolRegistry,
     model: &str,
 ) -> String {
-    let mut input = PromptBuildInput::from_request(params, registry);
+    let vision_enabled = local_agent_runtime::provider::ollama::model_supports_vision(model);
+    let mut input = PromptBuildInput::from_request(params, registry, vision_enabled);
     input.model_family = local_runtime_model_packs::detect_model_family(model);
     format_system_prompt(&input)
 }
@@ -60,11 +61,17 @@ struct PromptBuildInput {
     context_lines: Vec<String>,
     todo_section: Option<String>,
     model_family: ModelFamily,
+    vision_enabled: bool,
 }
 
 impl PromptBuildInput {
-    fn from_request(params: &RequestParams, registry: &LocalRuntimeToolRegistry) -> Self {
+    fn from_request(
+        params: &RequestParams,
+        registry: &LocalRuntimeToolRegistry,
+        vision_enabled: bool,
+    ) -> Self {
         let mut input = Self {
+            vision_enabled,
             working_directory: params.session_context.current_working_directory().clone(),
             session_type: params
                 .session_context
@@ -107,7 +114,7 @@ impl PromptBuildInput {
                     }
                 })
                 .collect(),
-            context_lines: render_request_context(params),
+            context_lines: render_request_context(params, vision_enabled),
             todo_section: registry.todo_prompt_section(),
             ..Default::default()
         };
@@ -178,6 +185,16 @@ fn format_system_prompt(input: &PromptBuildInput) -> String {
         input.permission_mode.as_deref().unwrap_or("default")
     )
     .ok();
+    writeln!(
+        prompt,
+        "- Vision (image understanding): {}",
+        if input.vision_enabled {
+            "enabled; attached images are sent as visible image content"
+        } else {
+            "disabled; this model cannot see image pixels, only attachment metadata"
+        }
+    )
+    .ok();
     prompt.push_str(
         "- Capabilities without a matching executable schema are unavailable in this local run. Do not claim or attempt planning, web search, computer use, research, or orchestration unless such a tool appears above. When `web_search` / `web_fetch` appear above, use them for current docs and URLs; do not invent sources.\n",
     );
@@ -241,20 +258,20 @@ Use mark_todos_completed to finish items. Keep ids stable when only titles chang
     prompt
 }
 
-fn render_request_context(params: &RequestParams) -> Vec<String> {
+fn render_request_context(params: &RequestParams, vision_enabled: bool) -> Vec<String> {
     let mut lines = Vec::new();
     for input in &params.input {
         let Some(contexts) = input.context() else {
             continue;
         };
         for context in contexts {
-            lines.push(render_context_line(context));
+            lines.push(render_context_line(context, vision_enabled));
         }
     }
     lines
 }
 
-fn render_context_line(context: &AIAgentContext) -> String {
+fn render_context_line(context: &AIAgentContext, vision_enabled: bool) -> String {
     match context {
         AIAgentContext::Directory {
             pwd,
@@ -277,8 +294,15 @@ fn render_context_line(context: &AIAgentContext) -> String {
             format!("Current time: {}", current_time.to_rfc3339())
         }
         AIAgentContext::Image(image) => format!(
-            "Image attachment: file={}, mime_type={}, figma={}",
-            image.file_name, image.mime_type, image.is_figma
+            "Image attachment: file={}, mime_type={}, figma={}, visibility={}",
+            image.file_name,
+            image.mime_type,
+            image.is_figma,
+            if vision_enabled {
+                "sent to the model as image content; you can see its pixels"
+            } else {
+                "metadata only; this model cannot see image pixels, only this description"
+            }
         ),
         AIAgentContext::Codebase { path, name } => {
             format!("Codebase: name={name}, path={path}")
@@ -542,6 +566,54 @@ mod tests {
         assert!(prompt.contains(SYSTEM_PROMPT));
         assert!(prompt.contains("## Model Pack: Qwen"));
         assert!(prompt.contains("edit_files"));
+    }
+
+    #[test]
+    fn vision_capability_line_reflects_model_support() {
+        let vision_prompt = format_system_prompt(&PromptBuildInput {
+            vision_enabled: true,
+            ..Default::default()
+        });
+        assert!(vision_prompt.contains("Vision (image understanding): enabled"));
+
+        let text_only_prompt = format_system_prompt(&PromptBuildInput {
+            vision_enabled: false,
+            ..Default::default()
+        });
+        assert!(text_only_prompt.contains("Vision (image understanding): disabled"));
+        assert!(text_only_prompt
+            .contains("this model cannot see image pixels, only attachment metadata"));
+    }
+
+    #[test]
+    fn image_attachment_line_notes_visibility_for_vision_models() {
+        let image_context = AIAgentContext::Image(crate::ai::agent::ImageContext {
+            data: String::new(),
+            mime_type: "image/png".to_string(),
+            file_name: "screenshot.png".to_string(),
+            is_figma: false,
+        });
+
+        let vision_line = render_context_line(&image_context, true);
+        assert!(vision_line.contains("file=screenshot.png"));
+        assert!(vision_line.contains("you can see its pixels"));
+
+        let non_vision_line = render_context_line(&image_context, false);
+        assert!(non_vision_line.contains("this model cannot see image pixels"));
+    }
+
+    #[test]
+    fn system_prompt_for_request_with_model_infers_vision_from_model_id() {
+        let params = RequestParams::new_for_test();
+        let registry = LocalRuntimeToolRegistry::built_ins();
+
+        let vision_prompt =
+            system_prompt_for_request_with_model(&params, &registry, "qwen2.5-vl:7b");
+        assert!(vision_prompt.contains("Vision (image understanding): enabled"));
+
+        let text_prompt =
+            system_prompt_for_request_with_model(&params, &registry, "qwen2.5-coder:7b");
+        assert!(text_prompt.contains("Vision (image understanding): disabled"));
     }
 
     #[test]

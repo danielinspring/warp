@@ -16,7 +16,7 @@ use super::{
     ChatRequest, ChatResponse, ChatStopReason, ChatStreamEvent, LLMProvider, ProviderCapabilities,
 };
 use crate::error::ProviderError;
-use crate::messages::Message;
+use crate::messages::{ContentPart, Message, UserMessage};
 use crate::tools::ToolCall;
 
 /// Normalize a user-entered Ollama / LiteLLM / OpenAI-compatible base URL.
@@ -50,6 +50,24 @@ pub fn host_prefers_openai_discovery(url: &str) -> bool {
         || normalized == "https://127.0.0.1")
 }
 
+/// True when a model id looks like a vision-capable (multimodal) model.
+///
+/// Matches common vision model families: `llava`, `bakllava`, anything with
+/// `vision` in the name (e.g. `llama3.2-vision`), `minicpm-v`, and Qwen VL
+/// variants (e.g. `qwen2-vl`, `qwen2.5-vl`). Used to infer
+/// [`ProviderCapabilities::vision`] when no explicit override is configured.
+pub fn model_supports_vision(model: &str) -> bool {
+    let lower = model.to_ascii_lowercase();
+    const VISION_NEEDLES: &[&str] = &["llava", "bakllava", "vision", "minicpm-v"];
+    if VISION_NEEDLES.iter().any(|needle| lower.contains(needle)) {
+        return true;
+    }
+    lower.contains("qwen")
+        && lower
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|token| token == "vl")
+}
+
 /// Configuration for connecting to an Ollama or OpenAI-compatible server.
 #[derive(Debug, Clone)]
 pub struct OllamaProviderConfig {
@@ -64,6 +82,9 @@ pub struct OllamaProviderConfig {
     /// Prefer `/v1/models` before Ollama `/api/tags` during discovery.
     /// Set automatically when the input URL ends with `/v1`.
     pub prefer_openai_discovery: bool,
+    /// Explicit override for vision support. `None` infers from the request
+    /// model id via [`model_supports_vision`] on each chat request.
+    pub vision: Option<bool>,
 }
 
 impl Default for OllamaProviderConfig {
@@ -73,6 +94,7 @@ impl Default for OllamaProviderConfig {
             api_key: None,
             timeout_secs: 300,
             prefer_openai_discovery: false,
+            vision: None,
         }
     }
 }
@@ -98,6 +120,7 @@ impl OllamaProvider {
                 api_key,
                 prefer_openai_discovery,
                 timeout_secs: config.timeout_secs,
+                vision: config.vision,
             },
             client: reqwest::Client::new(),
         }
@@ -227,6 +250,16 @@ impl OllamaProvider {
         self.config.base_url.trim_end_matches('/')
     }
 
+    /// Whether image content parts should be serialized on the wire for `model`.
+    ///
+    /// Uses the explicit `vision` config override when set, otherwise infers
+    /// from the model id via [`model_supports_vision`].
+    fn vision_enabled_for_model(&self, model: &str) -> bool {
+        self.config
+            .vision
+            .unwrap_or_else(|| model_supports_vision(model))
+    }
+
     /// Prefer structured `tool_calls` from the API; fall back to Qwen-style XML
     /// embedded in the assistant text (common with some Ollama/LiteLLM models).
     fn recover_tool_calls_from_text(mut response: ChatResponse) -> ChatResponse {
@@ -258,19 +291,19 @@ impl OllamaProvider {
         response
     }
 
-    fn translate_messages(messages: &[Message]) -> Vec<OllamaChatMessage> {
+    fn translate_messages(messages: &[Message], vision_enabled: bool) -> Vec<OllamaChatMessage> {
         messages
             .iter()
             .map(|msg| match msg {
                 Message::System(s) => OllamaChatMessage {
                     role: "system".to_string(),
-                    content: Some(s.content.clone()),
+                    content: Some(OllamaMessageContent::Text(s.content.clone())),
                     tool_call_id: None,
                     tool_calls: None,
                 },
                 Message::User(u) => OllamaChatMessage {
                     role: "user".to_string(),
-                    content: Some(u.content.clone()),
+                    content: Some(Self::translate_user_content(u, vision_enabled)),
                     tool_call_id: None,
                     tool_calls: None,
                 },
@@ -298,7 +331,7 @@ impl OllamaProvider {
                         content: if a.content.is_empty() {
                             None
                         } else {
-                            Some(a.content.clone())
+                            Some(OllamaMessageContent::Text(a.content.clone()))
                         },
                         tool_call_id: None,
                         tool_calls,
@@ -308,12 +341,45 @@ impl OllamaProvider {
                     role: "tool".to_string(),
                     // Prefix makes success/failure hard for weak models to ignore when
                     // they would otherwise invent timeouts after a green shell card.
-                    content: Some(format_tool_result_content(&t.result)),
+                    content: Some(OllamaMessageContent::Text(format_tool_result_content(
+                        &t.result,
+                    ))),
                     tool_call_id: Some(t.call_id.clone()),
                     tool_calls: None,
                 },
             })
             .collect()
+    }
+
+    /// Serialize a user message's content parts.
+    ///
+    /// When vision is enabled and the message carries image parts, emits an
+    /// OpenAI-style content array with `text` and `image_url` parts so the
+    /// model can see the attached images. Otherwise (vision disabled, or a
+    /// vision-capable model with a text-only message) images are stripped
+    /// and only text reaches the wire.
+    fn translate_user_content(message: &UserMessage, vision_enabled: bool) -> OllamaMessageContent {
+        if vision_enabled && message.has_images() {
+            let parts = message
+                .parts
+                .iter()
+                .map(|part| match part {
+                    ContentPart::Text(text) => OllamaContentPart::Text { text: text.clone() },
+                    ContentPart::Image {
+                        mime_type,
+                        data_base64,
+                        ..
+                    } => OllamaContentPart::ImageUrl {
+                        image_url: OllamaImageUrl {
+                            url: format!("data:{mime_type};base64,{data_base64}"),
+                        },
+                    },
+                })
+                .collect();
+            OllamaMessageContent::Parts(parts)
+        } else {
+            OllamaMessageContent::Text(message.text_content())
+        }
     }
 
     fn parse_tool_calls(raw: &[RawToolCall]) -> Vec<ToolCall> {
@@ -340,6 +406,7 @@ impl OllamaProvider {
     ) -> Result<reqwest::Response, ProviderError> {
         let url = format!("{}/v1/chat/completions", self.base_url());
         let model = request.model.clone();
+        let vision_enabled = self.vision_enabled_for_model(&model);
 
         let tools: Option<Vec<Value>> = if request.tools.is_empty() {
             None
@@ -349,7 +416,7 @@ impl OllamaProvider {
 
         let body = OllamaChatRequest {
             model: request.model,
-            messages: Self::translate_messages(&request.messages),
+            messages: Self::translate_messages(&request.messages, vision_enabled),
             stream,
             tools,
         };
@@ -561,7 +628,7 @@ impl LLMProvider for OllamaProvider {
         ProviderCapabilities {
             streaming: true,
             tool_calling: true,
-            vision: false,
+            vision: self.config.vision.unwrap_or(false),
         }
     }
 
@@ -599,11 +666,34 @@ struct OllamaChatRequest {
 struct OllamaChatMessage {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    content: Option<OllamaMessageContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<OllamaToolCall>>,
+}
+
+/// A chat message's content: plain text, or (for vision requests with image
+/// parts) an OpenAI-style array of typed content parts.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum OllamaMessageContent {
+    Text(String),
+    Parts(Vec<OllamaContentPart>),
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+enum OllamaContentPart {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: OllamaImageUrl },
+}
+
+#[derive(Debug, Serialize)]
+struct OllamaImageUrl {
+    url: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1074,6 +1164,78 @@ mod tests {
 
         let flushed = assembly.flush_streamable_text_prefix().unwrap();
         assert_eq!(format!("{first_text}{flushed}"), "hello there friend");
+    }
+
+    #[test]
+    fn model_supports_vision_detects_known_vision_model_families() {
+        assert!(model_supports_vision("llava:13b"));
+        assert!(model_supports_vision("bakllava:latest"));
+        assert!(model_supports_vision("llama3.2-vision:11b"));
+        assert!(model_supports_vision("minicpm-v:8b"));
+        assert!(model_supports_vision("qwen2-vl:7b"));
+        assert!(model_supports_vision("qwen2.5-vl:32b"));
+        assert!(model_supports_vision("QWEN2-VL-7B-INSTRUCT"));
+    }
+
+    #[test]
+    fn model_supports_vision_rejects_non_vision_models() {
+        assert!(!model_supports_vision("qwen2.5-coder:7b"));
+        assert!(!model_supports_vision("llama3.1:8b"));
+        assert!(!model_supports_vision("qwen3-coder:latest"));
+        assert!(!model_supports_vision("mistral:7b"));
+    }
+
+    #[test]
+    fn translate_messages_serializes_images_as_data_urls_when_vision_enabled() {
+        let messages = vec![Message::User(UserMessage {
+            parts: vec![
+                ContentPart::Text("what is in this image?".to_string()),
+                ContentPart::Image {
+                    mime_type: "image/png".to_string(),
+                    data_base64: "AAAA".to_string(),
+                    file_name: Some("shot.png".to_string()),
+                },
+            ],
+        })];
+
+        let translated = OllamaProvider::translate_messages(&messages, true);
+        let content = serde_json::to_value(&translated[0].content).unwrap();
+        let parts = content.as_array().expect("expected content parts array");
+
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "what is in this image?");
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,AAAA");
+    }
+
+    #[test]
+    fn translate_messages_strips_images_to_text_when_vision_disabled() {
+        let messages = vec![Message::User(UserMessage {
+            parts: vec![
+                ContentPart::Text("describe this".to_string()),
+                ContentPart::Image {
+                    mime_type: "image/png".to_string(),
+                    data_base64: "AAAA".to_string(),
+                    file_name: None,
+                },
+            ],
+        })];
+
+        let translated = OllamaProvider::translate_messages(&messages, false);
+        let content = serde_json::to_value(&translated[0].content).unwrap();
+
+        assert_eq!(content, serde_json::json!("describe this"));
+    }
+
+    #[test]
+    fn translate_messages_keeps_plain_text_for_text_only_message_even_with_vision_enabled() {
+        let messages = vec![Message::User(UserMessage::text("just text, no images"))];
+
+        let translated = OllamaProvider::translate_messages(&messages, true);
+        let content = serde_json::to_value(&translated[0].content).unwrap();
+
+        assert_eq!(content, serde_json::json!("just text, no images"));
     }
 
     #[test]

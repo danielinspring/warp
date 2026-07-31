@@ -2,7 +2,7 @@
 
 ## Current Objective
 
-Begin next Phase C item (multimodal provider support or Git workflow helpers).
+Implement `feat-024` Git workflow helpers for the local Ollama runtime.
 
 ## Last Updated
 
@@ -10,7 +10,7 @@ Begin next Phase C item (multimodal provider support or Git workflow helpers).
 
 ## Active Feature
 
-`feat-022` — Model-specific prompt and tool-schema packs (`done`)
+`feat-024` — Git workflow helpers (`in-progress`)
 
 ## Branch
 
@@ -18,17 +18,9 @@ Begin next Phase C item (multimodal provider support or Git workflow helpers).
 
 ## Current State
 
-- **feat-021 done** (OpenAI-compat polish), committed.
-- **feat-022 done:** `app/src/ai/local_runtime_model_packs.rs`
-  - `detect_model_family` for qwen / deepseek / llama / generic
-  - Prompt addenda via `system_prompt_for_request_with_model`
-  - Schema description prefixes on `edit_files`, `run_shell_command`, `update_todos`
-
-## Verification
-
-- cargo test -p warp local_runtime: 49 passed  
-- format --check: passed  
+- **feat-023 done:** multimodal ContentPart + Ollama image_url + vision gating + ImageContext extraction.
+- **feat-024 next:** `local_git` tools registered like local_todos/local_web.
 
 ## Recommended Next Step
 
-Promote Phase C **multimodal provider support** or **Git workflow helpers** to `feat-023`.
+Add `app/src/ai/local_git.rs` with three ReadOnly tools wired through LocalRuntimeToolRegistry, verify, commit.

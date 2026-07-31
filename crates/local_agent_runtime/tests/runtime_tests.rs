@@ -513,9 +513,9 @@ async fn test_system_prompt_is_prepended_to_runtime_history() {
         system_prompt: Some(prompt.clone()),
         ..Default::default()
     };
-    let initial_messages = vec![Message::User(local_agent_runtime::messages::UserMessage {
-        content: "Earlier context".to_string(),
-    })];
+    let initial_messages = vec![Message::User(
+        local_agent_runtime::messages::UserMessage::text("Earlier context"),
+    )];
 
     let runtime = AgentRuntime::new(provider, executor, config);
     let (_events, messages) = runtime
@@ -535,7 +535,7 @@ async fn test_system_prompt_is_prepended_to_runtime_history() {
     assert_eq!(request_system_message.content, prompt);
     assert!(matches!(
         &requests[0].messages[1],
-        Message::User(message) if message.content == "Earlier context"
+        Message::User(message) if message.text_content() == "Earlier context"
     ));
 }
 
@@ -726,9 +726,9 @@ async fn test_conversation_history_preserved() {
     };
 
     let initial_messages = vec![
-        Message::User(local_agent_runtime::messages::UserMessage {
-            content: "Previous question".to_string(),
-        }),
+        Message::User(local_agent_runtime::messages::UserMessage::text(
+            "Previous question",
+        )),
         Message::Assistant(local_agent_runtime::messages::AssistantMessage {
             content: "Previous answer".to_string(),
             tool_calls: vec![],

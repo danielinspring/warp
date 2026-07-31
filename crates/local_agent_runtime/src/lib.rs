@@ -64,7 +64,7 @@ pub use events::{FinishReason, RunResult, RuntimeEvent, StopReason};
 pub use hooks::{
     CompositeHooks, LifecycleHooks, LoggingHooks, NoopHooks, PreToolDecision, ToolNameDenyHooks,
 };
-pub use messages::Message;
+pub use messages::{ContentPart, Message, UserMessage};
 pub use provider::{
     ChatRequest, ChatResponse, ChatStopReason, ChatStreamEvent, LLMProvider, ProviderCapabilities,
 };

@@ -20,9 +20,12 @@
 use std::sync::Arc;
 
 use async_channel::Sender;
+use base64::Engine;
 use futures::channel::oneshot;
 use futures::StreamExt;
-use local_agent_runtime::messages::{AssistantMessage, ToolResultMessage, UserMessage};
+use local_agent_runtime::messages::{
+    AssistantMessage, ContentPart, ToolResultMessage, UserMessage,
+};
 use local_agent_runtime::provider::ollama::{OllamaProvider, OllamaProviderConfig};
 use local_agent_runtime::{
     AgentRuntime, ChannelTelemetrySink, CompositeHooks, ContextBudget, LifecycleHooks,
@@ -33,7 +36,7 @@ use uuid::Uuid;
 use warp_multi_agent_api as api;
 
 use crate::ai::agent::api::{Event, OllamaConfig, RequestParams, ResponseStream};
-use crate::ai::agent::AIAgentInput;
+use crate::ai::agent::{AIAgentContext, AIAgentInput, ImageContext};
 use crate::ai::local_runtime_bridge::event_mapper::EventMapper;
 use crate::ai::local_runtime_bridge::{
     decode_local_runtime_tool_call_data, decode_local_runtime_tool_result_data,
@@ -42,6 +45,7 @@ use crate::ai::local_runtime_bridge::{
 };
 use crate::ai::{local_runtime_event_bus, local_runtime_spec};
 use crate::server::server_api::AIApiError;
+use crate::util::image::{process_image_for_agent, ProcessImageResult, MAX_IMAGE_COUNT_FOR_QUERY};
 
 /// Build a `ResponseStream` using the new local agent runtime.
 ///
@@ -143,8 +147,8 @@ async fn run_runtime(
     // Build initial messages from existing conversation history
     let initial_messages = build_initial_messages(&params, &registry);
 
-    // Extract the user's latest input
-    let user_input = extract_user_input(&params).unwrap_or_default();
+    // Extract the user's latest input, including any attached images.
+    let user_input = extract_user_input(&params);
 
     let mut mapper = EventMapper::new(
         conversation_id,
@@ -262,9 +266,7 @@ fn translate_proto_to_runtime_message(
     use api::message::Message as M;
     let inner = msg.message.as_ref()?;
     match inner {
-        M::UserQuery(q) => Some(Message::User(UserMessage {
-            content: q.query.clone(),
-        })),
+        M::UserQuery(q) => Some(Message::User(UserMessage::text(q.query.clone()))),
         M::AgentOutput(out) => Some(Message::Assistant(AssistantMessage {
             content: out.text.clone(),
             tool_calls: vec![],
@@ -337,14 +339,62 @@ fn retain_paired_tool_messages(messages: Vec<Message>) -> Vec<Message> {
         .collect()
 }
 
-fn extract_user_input(params: &RequestParams) -> Option<String> {
+/// Extract the latest user query as a multimodal [`UserMessage`], including
+/// any attached images as image content parts (capped at
+/// `MAX_IMAGE_COUNT_FOR_QUERY`). Non-vision models strip these back to text
+/// only at the provider layer (see `OllamaProvider::translate_messages`).
+fn extract_user_input(params: &RequestParams) -> UserMessage {
     for input in &params.input {
-        match input {
-            AIAgentInput::UserQuery { query, .. } => return Some(query.clone()),
-            _ => continue,
+        if let AIAgentInput::UserQuery { query, context, .. } = input {
+            return build_user_message(query, context);
         }
     }
-    None
+    UserMessage::text(String::new())
+}
+
+fn build_user_message(query: &str, context: &[AIAgentContext]) -> UserMessage {
+    let mut parts = vec![ContentPart::Text(query.to_string())];
+    parts.extend(
+        context
+            .iter()
+            .filter_map(|context| match context {
+                AIAgentContext::Image(image) => image_to_content_part(image),
+                _ => None,
+            })
+            .take(MAX_IMAGE_COUNT_FOR_QUERY),
+    );
+    UserMessage { parts }
+}
+
+/// Decode, resize/validate, and re-encode an image attachment as a
+/// `ContentPart::Image`. Returns `None` (skipping the image) if decoding or
+/// processing fails, so a single bad attachment doesn't fail the whole turn.
+fn image_to_content_part(image: &ImageContext) -> Option<ContentPart> {
+    let raw_bytes = match base64::engine::general_purpose::STANDARD.decode(&image.data) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(%error, "failed to decode image attachment for local runtime");
+            return None;
+        }
+    };
+
+    let processed_bytes = match process_image_for_agent(&raw_bytes) {
+        ProcessImageResult::Success { data } => data,
+        ProcessImageResult::TooLarge => {
+            tracing::warn!("skipping image attachment for local runtime: too large after resizing");
+            return None;
+        }
+        ProcessImageResult::Error(error) => {
+            tracing::warn!(%error, "skipping image attachment for local runtime: failed to process");
+            return None;
+        }
+    };
+
+    Some(ContentPart::Image {
+        mime_type: image.mime_type.clone(),
+        data_base64: base64::engine::general_purpose::STANDARD.encode(&processed_bytes),
+        file_name: (!image.file_name.is_empty()).then(|| image.file_name.clone()),
+    })
 }
 
 #[cfg(test)]

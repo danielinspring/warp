@@ -3,21 +3,19 @@
 ## Current State
 
 **Last Updated:** 2026-07-31  
-**Active Feature:** `feat-022` — Model-specific prompt and tool-schema packs  
-**Status:** Done  
+**Active Feature:** `feat-024` — Git workflow helpers  
+**Status:** In progress  
 
 ## What's Done
 
-- Through feat-021 OpenAI-compat polish.
-- **feat-022:** `local_runtime_model_packs` detects Qwen / DeepSeek / Llama from model id; appends prompt addenda; prefixes allowlisted tool descriptions. Generic = prior behavior.
+- Through feat-023 multimodal provider support.
 
-## Next
+## Current Work
 
-Phase C remaining:
-1. Multimodal provider support  
-2. Git workflow helpers  
+- **feat-024:** First-class `git_status`, `draft_commit_message_context`, `draft_pr_summary_context` in-process tools.
 
-## Verification
+## Verification (feat-023)
 
-- warp local_runtime: 49 passed  
+- local_agent_runtime: 30 unit + 23 integration passed  
+- warp local_runtime: 56 passed  
 - format --check: passed  

@@ -2,7 +2,7 @@
   "roadmap": {
     "name": "Local Ollama Agent Runtime",
     "source": "dan_docs/reports/local_agent_runtime_competitive_gap_report.md",
-      "active_feature": "feat-022",
+      "active_feature": "feat-024",
     "status_values": [
       "not-started",
       "in-progress",
@@ -516,6 +516,55 @@
         "./script/format --check"
       ],
       "evidence": "2026-07-31: Added app/src/ai/local_runtime_model_packs.rs (detect_model_family, prompt addenda, schema description prefixes). Wired via system_prompt_for_request_with_model + WarpToolExecutor::new_with_model_family. Generic models unchanged. cargo test -p warp local_runtime: 49 passed. format --check passed."
+    },
+    {
+      "id": "feat-023",
+      "name": "Multimodal provider support",
+      "description": "Send user-attached images as OpenAI-compatible multimodal content parts to vision-capable local models, with model-id vision gating and non-vision fallback that keeps metadata-only prompt notes.",
+      "phase": "Phase C",
+      "dependencies": [
+        "feat-011",
+        "feat-021"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "UserMessage supports text and image content parts; ConversationHistory can push multimodal user turns.",
+        "OllamaProvider serializes image parts as OpenAI image_url data URLs when vision is enabled.",
+        "ProviderCapabilities.vision is inferred from model id (llava, bakllava, *-vision*, qwen*-vl*, minicpm-v*) or explicit config.",
+        "Non-vision models strip image bytes from the wire and system prompt notes that images are not visible.",
+        "Local integration extracts ImageContext attachments into multimodal user input with process_image_for_agent caps.",
+        "Focused unit tests cover detection, serialization, and integration extraction."
+      ],
+      "verification": [
+        "cargo test -p local_agent_runtime",
+        "cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-31: ContentPart Text/Image + UserMessage parts; OllamaProvider OpenAI image_url data-URL serialize when vision_enabled_for_model; model_supports_vision heuristic + config override; non-vision strips pixels; integration extracts ImageContext via process_image_for_agent; prompt notes visibility. cargo test -p local_agent_runtime: 30 unit + 23 integration passed. cargo test -p warp local_runtime: 56 passed. format --check passed."
+    },
+    {
+      "id": "feat-024",
+      "name": "Git workflow helpers",
+      "description": "Advertise first-class read-only local tools git_status, draft_commit_message_context, and draft_pr_summary_context that gather repo state via existing git utils instead of freeform shell.",
+      "phase": "Phase C",
+      "dependencies": [
+        "feat-007",
+        "feat-019"
+      ],
+      "status": "in-progress",
+      "acceptance_criteria": [
+        "Three git tools are advertised on local registries, ReadOnly, and retained in plan mode.",
+        "Tools execute in-process and return structured JSON; never queued as AIAgentAction.",
+        "Non-repo cwd returns structured ok:false error JSON.",
+        "Diff payloads reuse existing size-capped git helpers.",
+        "Focused unit and registry tests pass with evidence."
+      ],
+      "verification": [
+        "cargo test -p warp local_git --lib --features local_ollama_runtime_tool_use",
+        "cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use",
+        "./script/format --check"
+      ],
+      "evidence": ""
     }
   ],
   "future_phases": [
@@ -527,10 +576,9 @@
     {
       "phase": "Phase C",
       "scope": [
-        "multimodal provider support",
-        "Git workflow helpers"
+        "feat-024 Git workflow helpers (in-progress)"
       ],
-      "note": "feat-022 done. Remaining: multimodal, Git helpers."
+      "note": "feat-023 multimodal done. Remaining: Git helpers."
     }
   ]
 }

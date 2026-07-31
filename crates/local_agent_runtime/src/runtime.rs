@@ -16,7 +16,7 @@ use crate::error::RuntimeError;
 use crate::events::{FinishReason, RuntimeEvent, StopReason};
 use crate::hooks::{LifecycleHooks, NoopHooks, PreToolDecision};
 use crate::messages::normalize::model_messages;
-use crate::messages::{ConversationHistory, Message};
+use crate::messages::{ConversationHistory, Message, UserMessage};
 use crate::provider::{ChatRequest, ChatResponse, ChatStopReason, ChatStreamEvent, LLMProvider};
 use crate::telemetry::{NoopTelemetrySink, RuntimeTelemetryEvent, RuntimeTelemetrySink};
 use crate::tools::{PermissionDecision, ToolCall, ToolCallResult, ToolExecutor, ToolSafetyClass};
@@ -69,12 +69,13 @@ impl<P: LLMProvider, T: ToolExecutor> AgentRuntime<P, T> {
         &self,
         model: String,
         initial_messages: Vec<Message>,
-        user_input: String,
+        user_input: impl Into<UserMessage>,
     ) -> (mpsc::Receiver<RuntimeEvent>, CancelHandle)
     where
         P: 'static,
         T: 'static,
     {
+        let user_input = user_input.into();
         let (tx, rx) = mpsc::channel(64);
         let (cancel_tx, cancel_rx) = watch::channel(false);
 
@@ -128,7 +129,7 @@ impl<P: LLMProvider, T: ToolExecutor> AgentRuntime<P, T> {
         &self,
         model: &str,
         initial_messages: Vec<Message>,
-        user_input: &str,
+        user_input: impl Into<UserMessage>,
     ) -> Result<(Vec<RuntimeEvent>, Vec<Message>), RuntimeError> {
         let mut sink = VecEventSink::default();
         let messages = run_loop(
@@ -140,7 +141,7 @@ impl<P: LLMProvider, T: ToolExecutor> AgentRuntime<P, T> {
             RunRequest {
                 model: model.to_string(),
                 initial_messages,
-                user_input: user_input.to_string(),
+                user_input: user_input.into(),
             },
             None,
             &mut sink,
@@ -182,7 +183,7 @@ impl RuntimeEventSink for ChannelEventSink {
 struct RunRequest {
     model: String,
     initial_messages: Vec<Message>,
-    user_input: String,
+    user_input: UserMessage,
 }
 
 async fn emit_finished<S>(
@@ -232,7 +233,7 @@ where
     for msg in initial_messages {
         history.messages_mut().push(msg);
     }
-    history.push_user(user_input);
+    history.push_user_message(user_input);
 
     telemetry.emit(RuntimeTelemetryEvent::RunStarted {
         model: model.clone(),

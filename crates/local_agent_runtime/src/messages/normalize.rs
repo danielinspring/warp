@@ -3,7 +3,7 @@
 //! Handles truncation, merging, and other transformations needed
 //! before sending messages to the LLM provider.
 
-use super::{ConversationHistory, Message, SystemMessage};
+use super::{ContentPart, ConversationHistory, Message, SystemMessage, UserMessage};
 use crate::config::ContextBudget;
 use crate::error::RuntimeError;
 use crate::tools::schema::ToolSchema;
@@ -143,7 +143,7 @@ fn summarize_turn(turn: &[Message]) -> String {
                     assistant = message.content.clone();
                 }
             }
-            Message::User(message) => user = message.content.clone(),
+            Message::User(message) => user = message.text_content(),
             Message::Assistant(message) => {
                 if !message.content.is_empty() {
                     assistant = message.content.clone();
@@ -194,7 +194,7 @@ fn message_chars(messages: &[Message]) -> usize {
 fn message_char_count(message: &Message) -> usize {
     match message {
         Message::System(message) => message.content.chars().count(),
-        Message::User(message) => message.content.chars().count(),
+        Message::User(message) => user_message_char_count(message),
         Message::Assistant(message) => {
             message.content.chars().count()
                 + message
@@ -211,6 +211,21 @@ fn message_char_count(message: &Message) -> usize {
             message.call_id.chars().count() + message.result.content.chars().count()
         }
     }
+}
+
+/// Approximate context cost of a user message: text chars plus a rough
+/// per-image estimate derived from base64 payload size (base64 inflates
+/// bytes by ~4/3, so `len / 4` approximates the token-relevant character cost).
+fn user_message_char_count(message: &UserMessage) -> usize {
+    message.text_content().chars().count()
+        + message
+            .parts
+            .iter()
+            .filter_map(|part| match part {
+                ContentPart::Image { data_base64, .. } => Some(data_base64.len() / 4),
+                ContentPart::Text(_) => None,
+            })
+            .sum::<usize>()
 }
 
 fn estimate_tokens(chars: usize, chars_per_token: usize) -> usize {

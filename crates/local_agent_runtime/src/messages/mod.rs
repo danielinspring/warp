@@ -21,9 +21,61 @@ pub struct SystemMessage {
     pub content: String,
 }
 
+/// A single piece of user-provided content within a [`UserMessage`].
+#[derive(Debug, Clone)]
+pub enum ContentPart {
+    Text(String),
+    Image {
+        mime_type: String,
+        data_base64: String,
+        file_name: Option<String>,
+    },
+}
+
+/// A user message, which may contain text and/or image content parts.
 #[derive(Debug, Clone)]
 pub struct UserMessage {
-    pub content: String,
+    pub parts: Vec<ContentPart>,
+}
+
+impl UserMessage {
+    /// Build a text-only user message.
+    pub fn text(content: impl Into<String>) -> Self {
+        Self {
+            parts: vec![ContentPart::Text(content.into())],
+        }
+    }
+
+    /// Concatenated text from all text parts (image parts are omitted).
+    pub fn text_content(&self) -> String {
+        self.parts
+            .iter()
+            .filter_map(|part| match part {
+                ContentPart::Text(text) => Some(text.as_str()),
+                ContentPart::Image { .. } => None,
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    /// True when this message carries at least one image part.
+    pub fn has_images(&self) -> bool {
+        self.parts
+            .iter()
+            .any(|part| matches!(part, ContentPart::Image { .. }))
+    }
+}
+
+impl From<String> for UserMessage {
+    fn from(content: String) -> Self {
+        Self::text(content)
+    }
+}
+
+impl From<&str> for UserMessage {
+    fn from(content: &str) -> Self {
+        Self::text(content)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -62,11 +114,15 @@ impl ConversationHistory {
         }
     }
 
-    /// Add a user message.
+    /// Add a text-only user message.
     pub fn push_user(&mut self, content: impl Into<String>) {
-        self.messages.push(Message::User(UserMessage {
-            content: content.into(),
-        }));
+        self.messages
+            .push(Message::User(UserMessage::text(content)));
+    }
+
+    /// Add a user message, which may include image content parts.
+    pub fn push_user_message(&mut self, message: UserMessage) {
+        self.messages.push(Message::User(message));
     }
 
     /// Add an assistant message.
