@@ -391,6 +391,48 @@ fn publish_pty_bytes_reaches_joined_guest() {
 }
 
 #[test]
+fn publish_command_started_event_reaches_joined_guest() {
+    use session_sharing_protocol::common::OrderedTerminalEventType;
+
+    let mut hub = LocalSessionShareHub::new();
+    let handle = hub.start(loopback_ip(), 0).expect("start should succeed");
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let (mut socket, _) = join_as_viewer(guest_ws_url(&handle)).await;
+
+        hub.publish_event(OrderedTerminalEventType::CommandExecutionStarted {
+            participant_id: session_sharing_protocol::common::ParticipantId::new(),
+            ai_metadata: None,
+        })
+        .expect("publish should succeed");
+
+        let message = socket
+            .next()
+            .await
+            .expect("hub should broadcast")
+            .expect("broadcast should not error");
+        let Message::Text(text) = message else {
+            panic!("expected text OrderedTerminalEvent, got {message:?}");
+        };
+        let DownstreamMessage::OrderedTerminalEvent(event) =
+            DownstreamMessage::from_json(text.as_ref()).expect("parse event")
+        else {
+            panic!("expected OrderedTerminalEvent");
+        };
+        assert!(matches!(
+            event.event_type,
+            OrderedTerminalEventType::CommandExecutionStarted { .. }
+        ));
+    });
+
+    hub.stop();
+}
+
+#[test]
 fn write_to_pty_from_guest_is_rejected() {
     let mut hub = LocalSessionShareHub::new();
     let handle = hub.start(loopback_ip(), 0).expect("start should succeed");

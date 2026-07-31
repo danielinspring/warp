@@ -700,6 +700,28 @@
         "./script/format --check"
       ],
       "evidence": "2026-07-31: Hub set_scrollback + JoinedSuccessfully serves snapshot; host start uses SharedSessionScrollbackType::All; LOCAL_SHARE_MAX_SCROLLBACK_BYTES=10MiB with oldest-block capping. local_session_share: 28 passed; format --check passed."
+    },
+    {
+      "id": "feat-031",
+      "name": "Local LAN share agent/event best-effort fan-out",
+      "description": "Forward AgentResponseEvent, command lifecycle, and related ordered terminal events into the local share hub when active (PRODUCT.md P24 best-effort), without requiring cloud share status.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-026",
+        "feat-028"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "TerminalModel fans AgentResponseEvent to LocalShareEventPublisher when local share is active.",
+        "CommandExecutionStarted/Finished also fan to the local hub when active.",
+        "Cloud-only ordered-event path remains intact when only cloud share is active.",
+        "Focused unit tests and format check pass."
+      ],
+      "verification": [
+        "cargo test -p warp local_session_share --lib",
+        "./script/format --check"
+      ],
+      "evidence": "2026-08-01: fanout_ordered_terminal_event sends AgentResponse/replay/setup/command lifecycle/Resize to local hub when LocalShareEventPublisher is set (independent of cloud ActiveSharer). local_session_share: 29 passed; format --check passed."
     }
   ],
   "future_phases": [
@@ -716,7 +738,7 @@
     {
       "phase": "Phase D",
       "scope": [],
-      "note": "Phase D complete (feat-025–030). Optional: bind picker UI / agent best-effort (TECH PR5)."
+      "note": "Phase D complete (feat-025–031). Optional: bind picker UI / dogfood."
     }
   ]
 }

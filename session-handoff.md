@@ -2,11 +2,11 @@
 
 ## Current Objective
 
-Phase D local LAN session share complete through join scrollback (feat-030). No active harness feature.
+Phase D local LAN session share complete through agent/event fan-out (feat-031). No active harness feature.
 
 ## Last Updated
 
-2026-07-31
+2026-08-01
 
 ## Active Feature
 
@@ -18,14 +18,14 @@ Phase D local LAN session share complete through join scrollback (feat-030). No 
 
 ## Current State
 
-- **feat-025–029 done:** hub, protocol, WASM/WebIntent, host UX, banners/overflow/rotate.
-- **feat-030 done:** host snapshots `SharedSessionScrollbackType::All` into hub at start; guests receive it in `JoinedSuccessfully`; oversized snapshots capped at `LOCAL_SHARE_MAX_SCROLLBACK_BYTES` (10 MiB).
+- **feat-025–030 done:** hub, protocol, WASM/WebIntent, host UX, scrollback.
+- **feat-031 done:** `TerminalModel::fanout_ordered_terminal_event` forwards AgentResponse, replay markers, command lifecycle, and Resize to the local hub whenever `LocalShareEventPublisher` is set (not gated on cloud `ActiveSharer`).
 
-## Verification (feat-030)
+## Verification (feat-031)
 
-- local_session_share: 28 passed  
+- local_session_share: 29 passed  
 - format --check: passed  
 
 ## Recommended Next Step
 
-Dogfood on desktop with `WARP_LOCAL_SHARE_WASM_DIR`, or optional TECH PR5 (agent best-effort) / bind-address picker UI.
+Dogfood on desktop with `WARP_LOCAL_SHARE_WASM_DIR`, or optional bind-address picker UI (PRODUCT P6).
