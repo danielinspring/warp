@@ -2,7 +2,7 @@
 
 ## Current Objective
 
-Phase D local LAN session share is complete through feat-028. No active harness feature.
+Phase D local LAN session share UX polish (feat-029) complete. No further required Phase D work.
 
 ## Last Updated
 
@@ -10,7 +10,7 @@ Phase D local LAN session share is complete through feat-028. No active harness 
 
 ## Active Feature
 
-(none)
+(none after feat-029 commit)
 
 ## Branch
 
@@ -18,14 +18,14 @@ Phase D local LAN session share is complete through feat-028. No active harness 
 
 ## Current State
 
-- **feat-025–027 done:** hub, protocol, WASM/WebIntent boot.
-- **feat-028 done:** Command Palette start/stop/copy; `LocalSessionShareHub` on `TerminalView`; `LocalShareEventPublisher` PTY+Resize fan-in on `TerminalModel`; mutual exclusion with cloud share.
+- **feat-025–028 done:** hub, protocol, WASM/WebIntent, palette + PTY fan-in + mutual exclusion.
+- **feat-029 done:** inline “Local network share active/ended” banners; pane overflow Start/Copy/Rotate/Stop; Command Palette rotate.
 
-## Verification (feat-028)
+## Verification (feat-029)
 
 - local_session_share: 25 passed  
-- format applied  
+- format --check: applied  
 
 ## Recommended Next Step
 
-Dogfood on desktop: start local network share from Command Palette, open the copied URL in Chrome with `WARP_LOCAL_SHARE_WASM_DIR` set, confirm live view-only output. Optional polish: pane banner / overflow rotate UI.
+Dogfood on desktop with `WARP_LOCAL_SHARE_WASM_DIR`, or optional TECH PR5 agent best-effort / bind-address picker UI.

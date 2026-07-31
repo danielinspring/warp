@@ -91,7 +91,8 @@ pub use init::{
 use init::{INPUT_BOX_VISIBLE_KEY, TOGGLE_BLOCK_FILTER_KEYBINDING};
 use inline_banner::{
     render_alias_expansion_banner, render_aws_bedrock_login_banner,
-    render_aws_cli_not_installed_banner, render_inline_notifications_discovery_banner,
+    render_aws_cli_not_installed_banner, render_inline_local_lan_share_ended_banner,
+    render_inline_local_lan_share_started_banner, render_inline_notifications_discovery_banner,
     render_inline_notifications_error_banner, render_inline_shared_session_ended_banner,
     render_inline_shared_session_started_banner, render_open_in_warp_banner,
     render_shell_process_terminated_banner, render_vim_mode_banner, AliasExpansionBanner,
@@ -990,6 +991,8 @@ pub enum InlineBannerType {
     AliasExpansion,
     SharedSessionStart,
     SharedSessionEnd,
+    LocalLanShareStart,
+    LocalLanShareEnd,
     ShellProcessTerminated,
     OpenInWarp,
     VimMode,
@@ -1018,6 +1021,8 @@ impl InlineBannerType {
             | Self::AliasExpansion
             | Self::SharedSessionStart
             | Self::SharedSessionEnd
+            | Self::LocalLanShareStart
+            | Self::LocalLanShareEnd
             | Self::ShellProcessTerminated
             | Self::OpenInWarp
             | Self::VimMode => false,
@@ -1055,6 +1060,10 @@ struct InlineBannersState {
     alias_expansion_banner: AliasExpansionBanner,
 
     shared_session_banner_state: SharedSessionBanners,
+
+    /// Inline banners for local LAN / Tailscale session share (desktop host).
+    #[cfg(not(target_family = "wasm"))]
+    local_lan_share_banner_state: SharedSessionBanners,
 
     /// Information for a banner which notifies the user that the
     /// shell process has terminated, or None if there is no
@@ -23623,6 +23632,43 @@ impl TerminalView {
             }
         }
 
+        #[cfg(not(target_family = "wasm"))]
+        if FeatureFlag::LocalLanSessionShare.is_enabled() {
+            match &self.inline_banners_state.local_lan_share_banner_state {
+                SharedSessionBanners::ActiveShare {
+                    started_banner_id,
+                    started_at,
+                    ..
+                } => {
+                    inline_banners.insert(
+                        *started_banner_id,
+                        render_inline_local_lan_share_started_banner(true, *started_at, appearance),
+                    );
+                }
+                SharedSessionBanners::LastShared {
+                    started_at,
+                    ended_at,
+                    started_banner_id,
+                    ended_banner_id,
+                    ..
+                } => {
+                    inline_banners.insert(
+                        *started_banner_id,
+                        render_inline_local_lan_share_started_banner(
+                            false,
+                            *started_at,
+                            appearance,
+                        ),
+                    );
+                    inline_banners.insert(
+                        *ended_banner_id,
+                        render_inline_local_lan_share_ended_banner(*ended_at, appearance),
+                    );
+                }
+                SharedSessionBanners::None => {}
+            }
+        }
+
         if let Some(open_in_warp_banner) = &self.inline_banners_state.open_in_warp_banner {
             inline_banners.insert(
                 open_in_warp_banner.id,
@@ -26133,6 +26179,7 @@ impl TypedActionView for TerminalView {
             | StartLocalLanShare
             | StopLocalLanShare
             | CopyLocalLanShareLink
+            | RotateLocalLanShareLink
             | RequestSharedSessionRole(_)
             | OnboardingFlow(_)
             | ImportSettings
@@ -26201,6 +26248,7 @@ impl TypedActionView for TerminalView {
             | StartLocalLanShare
             | StopLocalLanShare
             | CopyLocalLanShareLink
+            | RotateLocalLanShareLink
             | OpenSharedSessionOnDesktop { .. }
             | MakeAllParticipantsReaders { .. }
             | AskAIAssistant { .. }
@@ -26696,6 +26744,10 @@ impl TypedActionView for TerminalView {
             CopyLocalLanShareLink => {
                 #[cfg(not(target_family = "wasm"))]
                 self.copy_local_lan_share_link(ctx);
+            }
+            RotateLocalLanShareLink => {
+                #[cfg(not(target_family = "wasm"))]
+                self.rotate_local_lan_share_link(ctx);
             }
             ToggleSnackbarInActivePane => self.toggle_snackbar_in_active_pane(ctx),
             MakeAllParticipantsReaders { reason } => {

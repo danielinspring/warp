@@ -656,6 +656,28 @@
         "./script/format --check"
       ],
       "evidence": "2026-07-31: Palette Start/Stop/Copy local network share; TerminalView owns LocalSessionShareHub; TerminalModel LocalShareEventPublisher fans PTY+Resize; cloud share blocked while local active and vice versa. local_session_share: 25 passed; format applied."
+    },
+    {
+      "id": "feat-029",
+      "name": "Local LAN share pane banner + overflow + rotate",
+      "description": "Show an inline sharing-active banner on the host pane; expose Copy/Stop/Rotate in the pane header overflow menu; Command Palette rotate for secret rotation (PRODUCT.md P4, P9–P12).",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-028"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "Starting a local LAN share inserts an active inline banner on the host pane.",
+        "Stopping local share transitions the banner to an ended state.",
+        "Pane header overflow exposes Copy link, Stop, and Rotate link while local share is active.",
+        "Command Palette includes Rotate local network share link when active.",
+        "Focused unit tests and format check pass."
+      ],
+      "verification": [
+        "cargo test -p warp local_session_share --lib",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-31: Inline LocalLanShareStart/End banners; pane overflow Start/Copy/Rotate/Stop; palette rotate; rotate copies new URL. local_session_share: 25 passed; format --check passed."
     }
   ],
   "future_phases": [
@@ -672,7 +694,7 @@
     {
       "phase": "Phase D",
       "scope": [],
-      "note": "Phase D complete (feat-025–028). Optional polish: pane banner/overflow rotate UI."
+      "note": "Phase D complete (feat-025–029). Optional: bind picker UI / agent best-effort (TECH PR5)."
     }
   ]
 }

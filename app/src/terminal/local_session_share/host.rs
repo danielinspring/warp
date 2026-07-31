@@ -14,6 +14,8 @@ pub const LOCAL_SHARE_CLOUD_BLOCK_TOAST: &str =
     "Stop cloud session sharing before starting a local network share";
 pub const LOCAL_SHARE_BLOCKS_CLOUD_TOAST: &str =
     "Stop local network share before starting a cloud shared session";
+pub const LOCAL_SHARE_ROTATED_TOAST: &str =
+    "Local share link rotated — previous guests must use the new link";
 
 /// Keymap / palette gating for whether this pane has an active local share.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

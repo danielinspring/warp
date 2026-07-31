@@ -19,7 +19,7 @@ pub use bind::{is_all_interfaces, non_loopback_candidates, BindCandidate};
 pub use host::{
     preferred_bind_ip, HostUxError, LocalLanShareStatus, COPY_LOCAL_SHARE_LINK_TEXT,
     LOCAL_SHARE_ACTIVE_TOAST, LOCAL_SHARE_BLOCKS_CLOUD_TOAST, LOCAL_SHARE_CLOUD_BLOCK_TOAST,
-    LOCAL_SHARE_START_FAILED_TOAST,
+    LOCAL_SHARE_ROTATED_TOAST, LOCAL_SHARE_START_FAILED_TOAST,
 };
 pub use hub::{
     HubError, LocalSessionShareHub, LocalShareEventPublisher, ShareHandle, WASM_BUNDLE_DIR_ENV,

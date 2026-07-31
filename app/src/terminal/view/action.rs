@@ -312,6 +312,8 @@ pub enum TerminalAction {
     StopLocalLanShare,
     /// Copy the current local LAN share URL without rotating the secret.
     CopyLocalLanShareLink,
+    /// Rotate the local LAN share secret and copy the new URL.
+    RotateLocalLanShareLink,
     VimModeBanner(VimModeBannerAction),
     ToggleSnackbarInActivePane,
     MakeAllParticipantsReaders {
@@ -645,6 +647,7 @@ impl fmt::Debug for TerminalAction {
             StartLocalLanShare => f.write_str("StartLocalLanShare"),
             StopLocalLanShare => f.write_str("StopLocalLanShare"),
             CopyLocalLanShareLink => f.write_str("CopyLocalLanShareLink"),
+            RotateLocalLanShareLink => f.write_str("RotateLocalLanShareLink"),
             VimModeBanner(action) => write!(f, "VimModeBanner({action:?})"),
             ToggleSnackbarInActivePane => write!(f, "ToggleSnackbarInActivePane"),
             MakeAllParticipantsReaders { reason } => {

@@ -1,14 +1,16 @@
 //! TerminalView host UX for local LAN session share (desktop only).
 
+use chrono::Local;
 use session_sharing_protocol::common::WindowSize;
 use warpui::clipboard::ClipboardContent;
 use warpui::{SingletonEntity, ViewContext};
 
-use super::TerminalView;
+use super::{InlineBannerItem, InlineBannerType, SharedSessionBanners, TerminalView};
 use crate::features::FeatureFlag;
 use crate::terminal::local_session_share::{
     preferred_bind_ip, LocalSessionShareHub, COPY_LOCAL_SHARE_LINK_TEXT, LOCAL_SHARE_ACTIVE_TOAST,
-    LOCAL_SHARE_BLOCKS_CLOUD_TOAST, LOCAL_SHARE_CLOUD_BLOCK_TOAST, LOCAL_SHARE_START_FAILED_TOAST,
+    LOCAL_SHARE_BLOCKS_CLOUD_TOAST, LOCAL_SHARE_CLOUD_BLOCK_TOAST, LOCAL_SHARE_ROTATED_TOAST,
+    LOCAL_SHARE_START_FAILED_TOAST,
 };
 use crate::view_components::DismissibleToast;
 
@@ -61,9 +63,12 @@ impl TerminalView {
             self.model.lock().set_local_share_event_publisher(publisher);
         }
 
+        self.insert_local_lan_share_started_banner(ctx);
+
         ctx.clipboard()
             .write(ClipboardContent::plain_text(handle.url));
         self.show_local_share_toast(LOCAL_SHARE_ACTIVE_TOAST, ctx);
+        self.refresh_local_share_pane_header(ctx);
         ctx.notify();
     }
 
@@ -73,6 +78,8 @@ impl TerminalView {
         }
         self.local_session_share_hub.stop();
         self.model.lock().clear_local_share_event_publisher();
+        self.insert_local_lan_share_ended_banner(ctx);
+        self.refresh_local_share_pane_header(ctx);
         ctx.notify();
     }
 
@@ -83,6 +90,89 @@ impl TerminalView {
         ctx.clipboard()
             .write(ClipboardContent::plain_text(handle.url));
         self.show_local_share_toast(COPY_LOCAL_SHARE_LINK_TEXT, ctx);
+    }
+
+    pub(crate) fn rotate_local_lan_share_link(&mut self, ctx: &mut ViewContext<Self>) {
+        if !FeatureFlag::LocalLanSessionShare.is_enabled() {
+            return;
+        }
+        match self.local_session_share_hub.rotate_secret() {
+            Ok(handle) => {
+                ctx.clipboard()
+                    .write(ClipboardContent::plain_text(handle.url));
+                self.show_local_share_toast(LOCAL_SHARE_ROTATED_TOAST, ctx);
+            }
+            Err(err) => {
+                log::warn!("Failed to rotate local LAN share secret: {err}");
+            }
+        }
+    }
+
+    fn insert_local_lan_share_started_banner(&mut self, ctx: &mut ViewContext<Self>) {
+        let banner_id = self.inline_banners_state.next_banner_id();
+        let started_at = Local::now();
+
+        let mut model = self.model.lock();
+        if let SharedSessionBanners::LastShared {
+            started_banner_id,
+            ended_banner_id,
+            ..
+        } = self.inline_banners_state.local_lan_share_banner_state
+        {
+            model
+                .block_list_mut()
+                .remove_inline_banner(started_banner_id);
+            model.block_list_mut().remove_inline_banner(ended_banner_id);
+        }
+
+        self.inline_banners_state.local_lan_share_banner_state =
+            SharedSessionBanners::ActiveShare {
+                started_banner_id: banner_id,
+                started_at,
+                is_remote_control: false,
+            };
+
+        model
+            .block_list_mut()
+            .append_inline_banner(InlineBannerItem::new(
+                banner_id,
+                InlineBannerType::LocalLanShareStart,
+            ));
+        ctx.notify();
+    }
+
+    fn insert_local_lan_share_ended_banner(&mut self, ctx: &mut ViewContext<Self>) {
+        let banner_id = self.inline_banners_state.next_banner_id();
+        let banner = InlineBannerItem::new(banner_id, InlineBannerType::LocalLanShareEnd);
+
+        if let SharedSessionBanners::ActiveShare {
+            started_banner_id,
+            started_at,
+            is_remote_control,
+        } = self.inline_banners_state.local_lan_share_banner_state
+        {
+            self.inline_banners_state.local_lan_share_banner_state =
+                SharedSessionBanners::LastShared {
+                    started_banner_id,
+                    started_at,
+                    is_remote_control,
+                    ended_at: Local::now(),
+                    ended_banner_id: banner_id,
+                };
+        }
+
+        self.model
+            .lock()
+            .block_list_mut()
+            .append_inline_banner(banner);
+        ctx.notify();
+    }
+
+    fn refresh_local_share_pane_header(&mut self, ctx: &mut ViewContext<Self>) {
+        self.pane_configuration.update(ctx, |pane_config, ctx| {
+            pane_config.refresh_pane_header_overflow_menu_items(ctx);
+            pane_config.notify_header_content_changed(ctx);
+        });
     }
 
     fn show_local_share_toast(&self, message: &str, ctx: &mut ViewContext<Self>) {

@@ -987,6 +987,15 @@ pub fn init(app: &mut AppContext) {
                 id!("Terminal") & id!(LocalLanShareStatus::Active.as_keymap_context()),
             )
             .with_enabled(|| FeatureFlag::LocalLanSessionShare.is_enabled()),
+            EditableBinding::new(
+                "terminal:rotate_local_network_share_link",
+                "Rotate local network share link",
+                TerminalAction::RotateLocalLanShareLink,
+            )
+            .with_context_predicate(
+                id!("Terminal") & id!(LocalLanShareStatus::Active.as_keymap_context()),
+            )
+            .with_enabled(|| FeatureFlag::LocalLanSessionShare.is_enabled()),
         ]);
     }
 
