@@ -20,6 +20,9 @@ pub enum ProviderError {
     #[error("Provider rate limited")]
     RateLimited,
 
+    #[error("Authentication failed: {message}")]
+    Unauthorized { message: String },
+
     #[error("Transient provider failure: {message}")]
     Transient { message: String },
 
@@ -39,6 +42,10 @@ impl ProviderError {
 
     pub fn is_context_window_exceeded(&self) -> bool {
         matches!(self, ProviderError::ContextWindowExceeded { .. })
+    }
+
+    pub fn is_unauthorized(&self) -> bool {
+        matches!(self, ProviderError::Unauthorized { .. })
     }
 }
 

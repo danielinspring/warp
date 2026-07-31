@@ -4,7 +4,8 @@
 //! analytics. The runtime never depends on Warp telemetry types.
 
 use std::sync::Arc;
-use std::time::Instant;
+
+use instant::Instant;
 
 use crate::events::FinishReason;
 use crate::hooks::{LifecycleHooks, PreToolDecision};

@@ -21,7 +21,7 @@ tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 tracing.workspace = true
 reqwest = { workspace = true, features = ["json", "stream"] }
 uuid.workspace = true
+instant.workspace = true
 
 [dev-dependencies]
-instant.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

@@ -4,11 +4,11 @@
 //! testable and extractable to a separate service later.
 
 use std::sync::Arc;
-use std::time::Instant;
 
 use futures::channel::mpsc;
 use futures::future::join_all;
 use futures::SinkExt;
+use instant::Instant;
 use tokio::sync::watch;
 
 use crate::config::RuntimeConfig;
@@ -202,6 +202,7 @@ async fn emit_finished<S>(
     sink.send(RuntimeEvent::Finished { reason }).await;
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_loop<P, T, S>(
     provider: Arc<P>,
     executor: Arc<T>,

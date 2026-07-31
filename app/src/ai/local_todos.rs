@@ -674,27 +674,29 @@ mod tests {
                     server_message_data: String::new(),
                     citations: vec![],
                     fetched_memories: vec![],
-                    message: Some(api::message::Message::UpdateTodos(api::message::UpdateTodos {
-                        operation: Some(Operation::CreateTodoList(api::CreateTodoList {
-                            initial_todos: vec![
-                                api::TodoItem {
-                                    id: "t1".into(),
-                                    title: "Read config".into(),
-                                    description: "check settings".into(),
-                                },
-                                api::TodoItem {
-                                    id: "t2".into(),
-                                    title: "Write patch".into(),
-                                    description: String::new(),
-                                },
-                                api::TodoItem {
-                                    id: "t3".into(),
-                                    title: "Run tests".into(),
-                                    description: String::new(),
-                                },
-                            ],
-                        })),
-                    })),
+                    message: Some(api::message::Message::UpdateTodos(
+                        api::message::UpdateTodos {
+                            operation: Some(Operation::CreateTodoList(api::CreateTodoList {
+                                initial_todos: vec![
+                                    api::TodoItem {
+                                        id: "t1".into(),
+                                        title: "Read config".into(),
+                                        description: "check settings".into(),
+                                    },
+                                    api::TodoItem {
+                                        id: "t2".into(),
+                                        title: "Write patch".into(),
+                                        description: String::new(),
+                                    },
+                                    api::TodoItem {
+                                        id: "t3".into(),
+                                        title: "Run tests".into(),
+                                        description: String::new(),
+                                    },
+                                ],
+                            })),
+                        },
+                    )),
                 },
                 api::Message {
                     id: "m2".into(),
@@ -704,22 +706,26 @@ mod tests {
                     server_message_data: String::new(),
                     citations: vec![],
                     fetched_memories: vec![],
-                    message: Some(api::message::Message::UpdateTodos(api::message::UpdateTodos {
-                        operation: Some(Operation::UpdatePendingTodos(api::UpdatePendingTodos {
-                            updated_pending_todos: vec![
-                                api::TodoItem {
-                                    id: "t2".into(),
-                                    title: "Write patch (v2)".into(),
-                                    description: String::new(),
+                    message: Some(api::message::Message::UpdateTodos(
+                        api::message::UpdateTodos {
+                            operation: Some(Operation::UpdatePendingTodos(
+                                api::UpdatePendingTodos {
+                                    updated_pending_todos: vec![
+                                        api::TodoItem {
+                                            id: "t2".into(),
+                                            title: "Write patch (v2)".into(),
+                                            description: String::new(),
+                                        },
+                                        api::TodoItem {
+                                            id: "t3".into(),
+                                            title: "Run tests".into(),
+                                            description: String::new(),
+                                        },
+                                    ],
                                 },
-                                api::TodoItem {
-                                    id: "t3".into(),
-                                    title: "Run tests".into(),
-                                    description: String::new(),
-                                },
-                            ],
-                        })),
-                    })),
+                            )),
+                        },
+                    )),
                 },
                 api::Message {
                     id: "m3".into(),
@@ -729,11 +735,15 @@ mod tests {
                     server_message_data: String::new(),
                     citations: vec![],
                     fetched_memories: vec![],
-                    message: Some(api::message::Message::UpdateTodos(api::message::UpdateTodos {
-                        operation: Some(Operation::MarkTodosCompleted(api::MarkTodosCompleted {
-                            todo_ids: vec!["t2".into()],
-                        })),
-                    })),
+                    message: Some(api::message::Message::UpdateTodos(
+                        api::message::UpdateTodos {
+                            operation: Some(Operation::MarkTodosCompleted(
+                                api::MarkTodosCompleted {
+                                    todo_ids: vec!["t2".into()],
+                                },
+                            )),
+                        },
+                    )),
                 },
             ],
         }];
@@ -764,9 +774,20 @@ mod tests {
                     Some(api::message::update_todos::Operation::UpdatePendingTodos(_))
                 )
         ));
-        assert_eq!(state.completed.len(), 1, "completed must survive pending replace");
+        assert_eq!(
+            state.completed.len(),
+            1,
+            "completed must survive pending replace"
+        );
         assert_eq!(state.completed[0].id, "t2");
-        assert_eq!(state.pending.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), vec!["t3", "t4"]);
+        assert_eq!(
+            state
+                .pending
+                .iter()
+                .map(|t| t.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["t3", "t4"]
+        );
     }
 
     /// Replay a primary-model probe file through the shipped `execute_todo_tool` path.
@@ -785,8 +806,8 @@ mod tests {
         if path.trim().is_empty() {
             return;
         }
-        let raw = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("read probe {path}: {e}"));
+        let raw =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read probe {path}: {e}"));
         let probe: serde_json::Value =
             serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parse probe: {e}"));
         let steps = probe["steps"]
@@ -842,19 +863,13 @@ mod tests {
         let snap = last_snap.expect("at least one step");
         if let Some(ids) = probe["assert_pending_ids"].as_array() {
             let pending = snap["pending"].as_array().expect("pending");
-            let got: Vec<&str> = pending
-                .iter()
-                .filter_map(|p| p["id"].as_str())
-                .collect();
+            let got: Vec<&str> = pending.iter().filter_map(|p| p["id"].as_str()).collect();
             let want: Vec<&str> = ids.iter().filter_map(|v| v.as_str()).collect();
             assert_eq!(got, want, "pending ids mismatch: snap={snap}");
         }
         if let Some(ids) = probe["assert_completed_ids"].as_array() {
             let completed = snap["completed"].as_array().expect("completed");
-            let got: Vec<&str> = completed
-                .iter()
-                .filter_map(|p| p["id"].as_str())
-                .collect();
+            let got: Vec<&str> = completed.iter().filter_map(|p| p["id"].as_str()).collect();
             let want: Vec<&str> = ids.iter().filter_map(|v| v.as_str()).collect();
             assert_eq!(got, want, "completed ids mismatch: snap={snap}");
         }

@@ -31,6 +31,25 @@ pub fn normalize_base_url(url: &str) -> String {
     }
 }
 
+/// True when the user-entered URL ends with `/v1`, signalling an
+/// OpenAI-compatible proxy (LiteLLM, LM Studio, Groq, etc.).
+pub fn url_prefers_openai_discovery(url: &str) -> bool {
+    url.trim().trim_end_matches('/').ends_with("/v1")
+}
+
+/// True when the host does not look like a stock local Ollama server.
+///
+/// Used after `/v1` has already been stripped from a persisted URL so discovery
+/// still prefers `/v1/models` for LiteLLM / LM Studio / remote proxies.
+pub fn host_prefers_openai_discovery(url: &str) -> bool {
+    let normalized = normalize_base_url(url).to_ascii_lowercase();
+    !(normalized.contains(":11434")
+        || normalized == "http://localhost"
+        || normalized == "https://localhost"
+        || normalized == "http://127.0.0.1"
+        || normalized == "https://127.0.0.1")
+}
+
 /// Configuration for connecting to an Ollama or OpenAI-compatible server.
 #[derive(Debug, Clone)]
 pub struct OllamaProviderConfig {
@@ -42,6 +61,9 @@ pub struct OllamaProviderConfig {
     pub api_key: Option<String>,
     /// Request timeout in seconds.
     pub timeout_secs: u64,
+    /// Prefer `/v1/models` before Ollama `/api/tags` during discovery.
+    /// Set automatically when the input URL ends with `/v1`.
+    pub prefer_openai_discovery: bool,
 }
 
 impl Default for OllamaProviderConfig {
@@ -50,6 +72,7 @@ impl Default for OllamaProviderConfig {
             base_url: "http://localhost:11434".to_string(),
             api_key: None,
             timeout_secs: 300,
+            prefer_openai_discovery: false,
         }
     }
 }
@@ -62,10 +85,19 @@ pub struct OllamaProvider {
 
 impl OllamaProvider {
     pub fn new(config: OllamaProviderConfig) -> Self {
+        let prefer_openai_discovery = config.prefer_openai_discovery
+            || url_prefers_openai_discovery(&config.base_url)
+            || host_prefers_openai_discovery(&config.base_url);
+        let api_key = config
+            .api_key
+            .filter(|key| !key.trim().is_empty())
+            .map(|key| key.trim().to_string());
         Self {
             config: OllamaProviderConfig {
                 base_url: normalize_base_url(&config.base_url),
-                ..config
+                api_key,
+                prefer_openai_discovery,
+                timeout_secs: config.timeout_secs,
             },
             client: reqwest::Client::new(),
         }
@@ -73,20 +105,68 @@ impl OllamaProvider {
 
     /// Fetch available models from an Ollama or OpenAI-compatible server.
     ///
-    /// Tries Ollama's native `/api/tags` first, then falls back to the
-    /// OpenAI-compatible `/v1/models` endpoint used by LiteLLM and similar
-    /// proxies.
+    /// Local Ollama typically uses `/api/tags` first. When an API key is set or
+    /// the user entered a `/v1` base URL, prefer OpenAI-compatible `/v1/models`
+    /// (LiteLLM, LM Studio, Groq, etc.) and fall back to `/api/tags`.
     pub async fn list_models(&self) -> Result<Vec<String>, ProviderError> {
+        if self.prefers_openai_discovery() {
+            self.list_models_openai_then_tags().await
+        } else {
+            self.list_models_tags_then_openai().await
+        }
+    }
+
+    fn prefers_openai_discovery(&self) -> bool {
+        self.config.prefer_openai_discovery || self.config.api_key.is_some()
+    }
+
+    async fn list_models_tags_then_openai(&self) -> Result<Vec<String>, ProviderError> {
         match self.list_models_via_ollama_tags().await {
             Ok(models) => Ok(models),
             Err(ollama_err) => match self.list_models_via_openai().await {
                 Ok(models) => Ok(models),
-                Err(openai_err) => Err(ProviderError::RequestFailed(anyhow!(
-                    "Could not list models from {} via /api/tags ({ollama_err}) or /v1/models ({openai_err})",
-                    self.base_url()
-                ))),
+                Err(openai_err) => Err(Self::combine_list_models_errors(ollama_err, openai_err)),
             },
         }
+    }
+
+    async fn list_models_openai_then_tags(&self) -> Result<Vec<String>, ProviderError> {
+        match self.list_models_via_openai().await {
+            Ok(models) => Ok(models),
+            Err(openai_err) => match self.list_models_via_ollama_tags().await {
+                Ok(models) => Ok(models),
+                Err(ollama_err) => Err(Self::combine_list_models_errors(ollama_err, openai_err)),
+            },
+        }
+    }
+
+    fn combine_list_models_errors(
+        ollama_err: ProviderError,
+        openai_err: ProviderError,
+    ) -> ProviderError {
+        if openai_err.is_unauthorized() {
+            return openai_err;
+        }
+        if ollama_err.is_unauthorized() {
+            return ollama_err;
+        }
+        ProviderError::RequestFailed(anyhow!(
+            "Could not list models via /api/tags ({ollama_err}) or /v1/models ({openai_err})"
+        ))
+    }
+
+    fn map_list_models_status(status: reqwest::StatusCode, body: &str) -> ProviderError {
+        let code = status.as_u16();
+        if code == 401 || code == 403 {
+            return ProviderError::Unauthorized {
+                message: if body.trim().is_empty() {
+                    "check the API key for this OpenAI-compatible server".to_string()
+                } else {
+                    body.to_string()
+                },
+            };
+        }
+        ProviderError::RequestFailed(anyhow!("server returned status {status}"))
     }
 
     async fn list_models_via_ollama_tags(&self) -> Result<Vec<String>, ProviderError> {
@@ -104,10 +184,9 @@ impl OllamaProvider {
             .map_err(|e| ProviderError::RequestFailed(anyhow!("Could not reach server: {}", e)))?;
 
         if !resp.status().is_success() {
-            return Err(ProviderError::RequestFailed(anyhow!(
-                "server returned status {}",
-                resp.status()
-            )));
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Self::map_list_models_status(status, &body));
         }
 
         let tags: TagsResponse = resp
@@ -132,10 +211,9 @@ impl OllamaProvider {
             .map_err(|e| ProviderError::RequestFailed(anyhow!("Could not reach server: {}", e)))?;
 
         if !resp.status().is_success() {
-            return Err(ProviderError::RequestFailed(anyhow!(
-                "server returned status {}",
-                resp.status()
-            )));
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Self::map_list_models_status(status, &body));
         }
 
         let models: OpenAiModelsResponse = resp
@@ -292,41 +370,60 @@ impl OllamaProvider {
                 }
             } else if e.is_connect() || e.is_request() {
                 ProviderError::Transient {
-                    message: format!("Ollama request failed: {e}"),
+                    message: format!("OpenAI-compatible request failed: {e}"),
                 }
             } else {
-                ProviderError::RequestFailed(anyhow!("Ollama request failed: {e}"))
+                ProviderError::RequestFailed(anyhow!("OpenAI-compatible request failed: {e}"))
             }
         })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body_text = resp.text().await.unwrap_or_default();
-            let body_lower = body_text.to_ascii_lowercase();
-            if status.as_u16() == 429 {
-                return Err(ProviderError::RateLimited);
-            }
-            if status.as_u16() == 404 {
-                return Err(ProviderError::ModelNotFound { model });
-            }
-            if status.as_u16() == 408 || status.is_server_error() {
-                return Err(ProviderError::Transient {
-                    message: format!("Ollama returned {status}: {body_text}"),
-                });
-            }
-            if status.as_u16() == 400
-                && ["context", "token limit", "too many tokens"]
-                    .iter()
-                    .any(|needle| body_lower.contains(needle))
-            {
-                return Err(ProviderError::ContextWindowExceeded { message: body_text });
-            }
-            return Err(ProviderError::RequestFailed(anyhow!(
-                "Ollama returned {status}: {body_text}"
-            )));
+            return Err(Self::map_chat_http_error(status, body_text, &model));
         }
 
         Ok(resp)
+    }
+
+    /// Map non-success HTTP statuses from `/v1/chat/completions`.
+    pub fn map_chat_http_error(
+        status: reqwest::StatusCode,
+        body_text: String,
+        model: &str,
+    ) -> ProviderError {
+        let body_lower = body_text.to_ascii_lowercase();
+        let code = status.as_u16();
+        if code == 401 || code == 403 {
+            return ProviderError::Unauthorized {
+                message: if body_text.trim().is_empty() {
+                    "check the API key for this OpenAI-compatible server".to_string()
+                } else {
+                    body_text
+                },
+            };
+        }
+        if code == 429 {
+            return ProviderError::RateLimited;
+        }
+        if code == 404 {
+            return ProviderError::ModelNotFound {
+                model: model.to_string(),
+            };
+        }
+        if code == 408 || status.is_server_error() {
+            return ProviderError::Transient {
+                message: format!("Server returned {status}: {body_text}"),
+            };
+        }
+        if code == 400
+            && ["context", "token limit", "too many tokens"]
+                .iter()
+                .any(|needle| body_lower.contains(needle))
+        {
+            return ProviderError::ContextWindowExceeded { message: body_text };
+        }
+        ProviderError::RequestFailed(anyhow!("Server returned {status}: {body_text}"))
     }
 
     async fn process_stream_line(
@@ -425,7 +522,7 @@ impl LLMProvider for OllamaProvider {
 
         while let Some(chunk) = byte_stream.next().await {
             let chunk = chunk.map_err(|e| {
-                ProviderError::RequestFailed(anyhow!("Ollama stream failed: {}", e))
+                ProviderError::RequestFailed(anyhow!("OpenAI-compatible stream failed: {}", e))
             })?;
             buffer.push_str(&String::from_utf8_lossy(&chunk));
 
@@ -469,7 +566,7 @@ impl LLMProvider for OllamaProvider {
     }
 
     fn name(&self) -> &str {
-        "ollama"
+        "openai-compatible"
     }
 }
 
@@ -814,6 +911,71 @@ mod tests {
             normalize_base_url("http://100.95.111.65:4000/v1/"),
             "http://100.95.111.65:4000"
         );
+    }
+
+    #[test]
+    fn url_prefers_openai_discovery_detects_v1_suffix() {
+        assert!(url_prefers_openai_discovery("http://host:4000/v1"));
+        assert!(url_prefers_openai_discovery("http://host:4000/v1/"));
+        assert!(url_prefers_openai_discovery(
+            "  https://api.groq.com/openai/v1  "
+        ));
+        assert!(!url_prefers_openai_discovery("http://localhost:11434"));
+        assert!(!url_prefers_openai_discovery("http://host:4000/v1/chat"));
+    }
+
+    #[test]
+    fn empty_api_key_is_filtered_and_v1_url_prefers_openai_discovery() {
+        let provider = OllamaProvider::new(OllamaProviderConfig {
+            base_url: "http://host:4000/v1".to_string(),
+            api_key: Some("   ".to_string()),
+            ..Default::default()
+        });
+        assert!(provider.config.api_key.is_none());
+        assert!(provider.prefers_openai_discovery());
+    }
+
+    #[test]
+    fn api_key_prefers_openai_discovery_even_without_v1_url() {
+        let provider = OllamaProvider::new(OllamaProviderConfig {
+            base_url: "https://api.groq.com/openai".to_string(),
+            api_key: Some("secret".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(provider.config.api_key.as_deref(), Some("secret"));
+        assert!(provider.prefers_openai_discovery());
+    }
+
+    #[test]
+    fn non_ollama_host_prefers_openai_discovery_after_v1_strip() {
+        assert!(host_prefers_openai_discovery("http://localhost:1234"));
+        assert!(host_prefers_openai_discovery("http://100.95.111.65:4000"));
+        assert!(!host_prefers_openai_discovery("http://localhost:11434/v1"));
+        let provider = OllamaProvider::new(OllamaProviderConfig {
+            base_url: "http://localhost:1234".to_string(),
+            ..Default::default()
+        });
+        assert!(provider.prefers_openai_discovery());
+    }
+
+    #[test]
+    fn map_chat_http_error_maps_unauthorized() {
+        let err = OllamaProvider::map_chat_http_error(
+            reqwest::StatusCode::UNAUTHORIZED,
+            "invalid api key".to_string(),
+            "qwen",
+        );
+        assert!(err.is_unauthorized());
+        assert!(!err.is_retryable());
+        assert!(err.to_string().contains("invalid api key"));
+
+        let forbidden = OllamaProvider::map_chat_http_error(
+            reqwest::StatusCode::FORBIDDEN,
+            String::new(),
+            "qwen",
+        );
+        assert!(forbidden.is_unauthorized());
+        assert!(forbidden.to_string().contains("check the API key"));
     }
 
     #[test]

@@ -2,15 +2,15 @@
 
 ## Current Objective
 
-Begin next Phase C item after todos (OpenAI-compat polish or model prompt packs).
+Begin next Phase C item (model-specific prompt packs, multimodal, or Git workflow helpers).
 
 ## Last Updated
 
-2026-07-30
+2026-07-31
 
 ## Active Feature
 
-`feat-020` — Durable local plan and todo state (`done`)
+`feat-021` — OpenAI-compatible provider polish (`done`)
 
 ## Branch
 
@@ -18,18 +18,18 @@ Begin next Phase C item after todos (OpenAI-compat polish or model prompt packs)
 
 ## Current State
 
-- **feat-019 done:** local web_search / web_fetch.
-- **feat-020 done:** `app/src/ai/local_todos.rs` + registry/event mapper wiring.
-  - Tools: `update_todos`, `mark_todos_completed` (always on, ReadOnly, kept in plan mode).
-  - In-process state + `Message::UpdateTodos` for existing UI/derive.
-  - Hydrate from prior task messages; prompt shows current list.
+- **feat-021 done:** polished shared OpenAI-compatible path for LiteLLM / LM Studio / Groq-style hosts.
+  - Auth 401/403 → clear non-retryable errors
+  - Empty-key hygiene; smarter `/v1/models` discovery order
+  - Settings branding + live editor persist for Test Connection
+  - Object-form tool args on legacy client
 
 ## Verification
 
-- local_todos: 2 passed  
-- local_runtime: 44 passed  
-- format --check: passed  
+- local_agent_runtime: 24 unit + 23 integration passed  
+- warp ollama: 5 passed  
+- clippy / format: passed  
 
 ## Recommended Next Step
 
-Promote Phase C **OpenAI-compatible provider polish** or **model-specific prompt packs** to `feat-021` (either unblocks weaker local models / multi-provider UX).
+Promote Phase C **model-specific prompt packs** to `feat-022` (helps weaker local models / Qwen–DeepSeek–Llama tool discipline).

@@ -2,7 +2,7 @@
   "roadmap": {
     "name": "Local Ollama Agent Runtime",
     "source": "dan_docs/reports/local_agent_runtime_competitive_gap_report.md",
-    "active_feature": "feat-020",
+      "active_feature": "feat-021",
     "status_values": [
       "not-started",
       "in-progress",
@@ -463,6 +463,35 @@
         "./script/format --check"
       ],
       "evidence": "2026-07-30: Added app/src/ai/local_todos.rs (state, update_todos/mark_todos_completed schemas+execute). Registry always advertises both tools (ReadOnly, plan mode kept). Hydrate from task UpdateTodos. EventMapper emits UpdateTodos + ToolCallResult on ToolResult when pending persistence is set. Prompt injects current todos. cargo test local_todos: 2 passed. cargo test local_runtime: 44 passed. format --check: passed."
+    },
+    {
+      "id": "feat-021",
+      "name": "OpenAI-compatible provider polish",
+      "description": "Polish the existing Ollama OpenAI-compatible client path for LiteLLM, LM Studio, Groq-style /v1 hosts, and other bearer-auth proxies: auth errors, empty-key hygiene, Test Connection editor flush, quieter discovery, and de-Ollama branding. Does not add new provider crates or merge cloud CustomEndpoint routing.",
+      "phase": "Phase C",
+      "dependencies": [
+        "feat-009",
+        "feat-010",
+        "feat-011"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "Settings section and model picker labels treat the path as Ollama / OpenAI-compatible (not hard-coded Ollama-only for remote /v1 hosts).",
+        "Test Connection sees live Base URL and API Key values (editors persist on edit, not only Blur/Enter).",
+        "Empty API keys are never sent as Authorization headers from OllamaClient or OllamaProvider.",
+        "HTTP 401/403 map to a clear non-retryable auth error in the provider and Test Connection UI.",
+        "Model discovery prefers /v1/models when an API key is set (or input URL ends with /v1), otherwise keeps /api/tags-first for local Ollama.",
+        "Legacy OllamaClient accepts tool-call arguments as JSON string or object.",
+        "Settings copy documents LM Studio and Groq-style OpenAI-compatible base URL examples.",
+        "Focused unit tests cover normalize, empty-key filtering, 401 mapping, discovery preference, and object tool args."
+      ],
+      "verification": [
+        "cargo test -p local_agent_runtime",
+        "cargo test -p warp ollama --lib --features local_ollama_runtime_tool_use",
+        "cargo clippy -p local_agent_runtime --all-targets --tests -- -D warnings",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-31: ProviderError::Unauthorized (non-retryable) for 401/403; empty API keys filtered; discovery prefers /v1/models for keyed hosts, /v1 URLs, and non-:11434 hosts; Settings branded Ollama / OpenAI-compatible with LM Studio/Groq examples; editors persist on Edited; model picker uses Ollama vs OpenAI-compatible label; legacy client accepts string/object tool args. Also fixed local_agent_runtime clippy Instant→instant::Instant. cargo test -p local_agent_runtime: 24 unit + 23 integration passed (1 ignored live). cargo test -p warp ollama: 5 passed. clippy -D warnings passed. format --check passed."
     }
   ],
   "future_phases": [
@@ -474,12 +503,11 @@
     {
       "phase": "Phase C",
       "scope": [
-        "remaining generic OpenAI-compatible provider polish",
         "model-specific prompt packs",
         "multimodal provider support",
         "Git workflow helpers"
       ],
-      "note": "feat-019 and feat-020 done. Next: OpenAI-compat polish / model prompt packs."
+      "note": "feat-021 done. Remaining: model-specific prompt packs, multimodal, Git helpers."
     }
   ]
 }

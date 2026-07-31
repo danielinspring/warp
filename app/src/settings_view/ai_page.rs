@@ -9504,21 +9504,38 @@ impl OllamaWidget {
                 ..Default::default()
             };
             let mut editor = EditorView::single_line(options, ctx);
-            editor.set_placeholder_text("http://localhost:11434 or http://host:4000/v1", ctx);
+            editor.set_placeholder_text(
+                "http://localhost:11434, http://localhost:1234/v1, or https://api.groq.com/openai/v1",
+                ctx,
+            );
             editor.set_buffer_text(&current_url, ctx);
             editor
         });
         ctx.subscribe_to_view(&base_url_editor, |_, editor, event, ctx| {
-            if matches!(event, EditorEvent::Blurred | EditorEvent::Enter) {
+            // Persist on edit as well as Blur/Enter so Test Connection sees live
+            // buffer values without requiring the field to lose focus first.
+            if matches!(
+                event,
+                EditorEvent::Blurred | EditorEvent::Enter | EditorEvent::Edited(_)
+            ) {
                 let text = editor.as_ref(ctx).buffer_text(ctx);
+                let normalize_now = matches!(event, EditorEvent::Blurred | EditorEvent::Enter);
                 let normalized = (!text.trim().is_empty())
-                    .then(|| crate::ai::ollama::normalize_base_url(&text))
+                    .then(|| {
+                        if normalize_now {
+                            crate::ai::ollama::normalize_base_url(&text)
+                        } else {
+                            text.trim().to_string()
+                        }
+                    })
                     .filter(|u| !u.is_empty());
-                if let Some(normalized) = normalized.as_ref() {
-                    if normalized != &text {
-                        editor.update(ctx, |editor, ctx| {
-                            editor.set_buffer_text(normalized, ctx);
-                        });
+                if normalize_now {
+                    if let Some(normalized) = normalized.as_ref() {
+                        if normalized != &text {
+                            editor.update(ctx, |editor, ctx| {
+                                editor.set_buffer_text(normalized, ctx);
+                            });
+                        }
                     }
                 }
                 ApiKeyManager::handle(ctx).update(ctx, |mgr, ctx| {
@@ -9562,7 +9579,12 @@ impl OllamaWidget {
             editor
         });
         ctx.subscribe_to_view(&api_key_editor, |_, editor, event, ctx| {
-            if matches!(event, EditorEvent::Blurred | EditorEvent::Enter) {
+            // Persist on edit as well as Blur/Enter so Test Connection sees live
+            // buffer values without requiring the field to lose focus first.
+            if matches!(
+                event,
+                EditorEvent::Blurred | EditorEvent::Enter | EditorEvent::Edited(_)
+            ) {
                 let text = editor.as_ref(ctx).buffer_text(ctx);
                 let key = (!text.trim().is_empty()).then_some(text);
                 ApiKeyManager::handle(ctx).update(ctx, |mgr, ctx| {
@@ -9801,7 +9823,7 @@ impl OllamaWidget {
         Flex::column()
             .with_spacing(16.)
             .with_child(render_ai_setting_description(
-                "Run AI dialogue against an Ollama server or an OpenAI-compatible proxy such as LiteLLM — local (http://localhost:11434) or remote (e.g. http://host:4000 or http://host:4000/v1). Requests go directly to the server, so no Warp credits are used. Provide an API key if your remote server requires bearer-token auth. Agent Mode requires a model that supports tool calling (for example qwen3-coder); models without tools will return a provider error.",
+                "Run AI dialogue against Ollama or any OpenAI-compatible server — LiteLLM (http://host:4000/v1), LM Studio (http://localhost:1234/v1), Groq (https://api.groq.com/openai/v1), and similar proxies. Requests go directly to the server, so no Warp credits are used. Provide an API key when the server requires bearer-token auth. Agent Mode requires a model that supports tool calling (for example qwen3-coder); models without tools will return a provider error.",
                 true,
                 app,
             ))
@@ -9841,7 +9863,7 @@ impl SettingsWidget for OllamaWidget {
     type View = AISettingsPageView;
 
     fn search_terms(&self) -> &str {
-        "ollama litellm openai compatible local model llm inference"
+        "ollama litellm lm studio groq openai compatible local model llm inference"
     }
 
     fn render(
@@ -9857,7 +9879,7 @@ impl SettingsWidget for OllamaWidget {
             .with_child(
                 build_sub_header(
                     appearance,
-                    "Ollama / LiteLLM (Local Models)",
+                    "Ollama / OpenAI-compatible",
                     Some(styles::header_font_color(is_any_ai_enabled, app)),
                 )
                 .with_padding_bottom(HEADER_PADDING)

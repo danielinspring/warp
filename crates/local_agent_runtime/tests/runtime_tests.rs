@@ -1216,6 +1216,7 @@ async fn manual_live_ollama_fifteen_tool_call_parity() {
         base_url,
         api_key: None,
         timeout_secs: 120,
+        ..Default::default()
     });
     let calls = Default::default();
     let executor = LiveParityExecutor {

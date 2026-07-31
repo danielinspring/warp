@@ -88,6 +88,7 @@ async fn run_runtime(
         base_url: cfg.base_url,
         api_key: cfg.api_key,
         timeout_secs: 300,
+        ..Default::default()
     });
 
     // Determine IDs for event mapping and tool execution.

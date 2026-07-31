@@ -155,7 +155,7 @@ impl LLMProvider {
             LLMProvider::Anthropic => "Anthropic",
             LLMProvider::Google => "Google",
             LLMProvider::Xai => "xAI",
-            LLMProvider::Ollama => "Ollama",
+            LLMProvider::Ollama => "Ollama / OpenAI-compatible",
             LLMProvider::Unknown => "this provider",
         }
     }
@@ -1659,7 +1659,13 @@ fn ollama_available_from_config(
         model_names.insert(0, selected_model.to_string());
     }
 
-    let choices = model_names.into_iter().map(ollama_llm_info).collect();
+    let provider_label = crate::ai::ollama::openai_compatible_provider_label(
+        keys.ollama_base_url.as_deref().unwrap_or_default(),
+    );
+    let choices = model_names
+        .into_iter()
+        .map(|model_name| ollama_llm_info(model_name, provider_label))
+        .collect();
     Some(AvailableLLMs {
         default_id: ollama_model_id(selected_model),
         choices,
@@ -1667,9 +1673,9 @@ fn ollama_available_from_config(
     })
 }
 
-fn ollama_llm_info(model_name: String) -> LLMInfo {
+fn ollama_llm_info(model_name: String, provider_label: &str) -> LLMInfo {
     LLMInfo {
-        display_name: format!("{model_name} (Ollama)"),
+        display_name: format!("{model_name} ({provider_label})"),
         base_model_name: model_name.clone(),
         id: ollama_model_id(&model_name),
         reasoning_level: None,

@@ -226,8 +226,9 @@ async fn emit_assistant_turn(
                 &fallback_id,
                 request_id,
                 &format!(
-                    "[Ollama wanted to call `{}` with arguments: {}]",
-                    tc.function.name, tc.function.arguments
+                    "[Local model wanted to call `{}` with arguments: {}]",
+                    tc.function.name,
+                    tc.function.arguments.as_json_string()
                 ),
             ));
         }
@@ -333,8 +334,9 @@ fn tool_call_to_action(
 
     let proto_tool = match tc.function.name.as_str() {
         "run_shell_command" => {
-            let args: serde_json::Value = serde_json::from_str(&tc.function.arguments)
-                .unwrap_or_else(|_| serde_json::json!({ "command": tc.function.arguments }));
+            let args_str = tc.function.arguments.as_json_string();
+            let args: serde_json::Value = serde_json::from_str(&args_str)
+                .unwrap_or_else(|_| serde_json::json!({ "command": args_str }));
             let command = args.get("command")?.as_str()?.to_string();
             let is_read_only = args
                 .get("is_read_only")

@@ -16,9 +16,40 @@ pub fn normalize_base_url(url: &str) -> String {
     }
 }
 
+/// True when the user-entered URL ends with `/v1`, signalling an
+/// OpenAI-compatible proxy (LiteLLM, LM Studio, Groq, etc.).
+pub fn url_prefers_openai_discovery(url: &str) -> bool {
+    url.trim().trim_end_matches('/').ends_with("/v1")
+}
+
+/// True when the host does not look like a stock local Ollama server.
+pub fn host_prefers_openai_discovery(url: &str) -> bool {
+    let normalized = normalize_base_url(url).to_ascii_lowercase();
+    !(normalized.contains(":11434")
+        || normalized == "http://localhost"
+        || normalized == "https://localhost"
+        || normalized == "http://127.0.0.1"
+        || normalized == "https://127.0.0.1")
+}
+
+/// Short label for model picker / settings based on the configured base URL.
+pub fn openai_compatible_provider_label(base_url: &str) -> &'static str {
+    let normalized = normalize_base_url(base_url).to_ascii_lowercase();
+    if normalized.contains("localhost:11434")
+        || normalized.contains("127.0.0.1:11434")
+        || normalized.ends_with("://localhost")
+        || normalized.ends_with("://127.0.0.1")
+    {
+        "Ollama"
+    } else {
+        "OpenAI-compatible"
+    }
+}
+
 pub struct OllamaClient {
     base_url: String,
     api_key: Option<String>,
+    prefer_openai_discovery: bool,
     client: reqwest::Client,
 }
 
@@ -132,8 +163,32 @@ pub struct ToolCallParsed {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ToolCallFunctionParsed {
     pub name: String,
-    /// JSON-encoded string per OpenAI spec.
-    pub arguments: String,
+    /// OpenAI encodes arguments as a JSON string; some proxies send an object.
+    #[serde(default)]
+    pub arguments: ToolCallArguments,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ToolCallArguments {
+    String(String),
+    Value(Value),
+}
+
+impl Default for ToolCallArguments {
+    fn default() -> Self {
+        Self::String("{}".to_string())
+    }
+}
+
+impl ToolCallArguments {
+    pub fn as_json_string(&self) -> String {
+        match self {
+            Self::String(arguments) => arguments.clone(),
+            Self::Value(Value::String(arguments)) => arguments.clone(),
+            Self::Value(arguments) => arguments.to_string(),
+        }
+    }
 }
 
 /// Result of a single Ollama chat completion.
@@ -165,30 +220,76 @@ struct OpenAiModel {
 
 impl OllamaClient {
     pub fn new(base_url: String, api_key: Option<String>) -> Self {
+        let prefer_openai_discovery =
+            url_prefers_openai_discovery(&base_url) || host_prefers_openai_discovery(&base_url);
+        let api_key = api_key
+            .filter(|key| !key.trim().is_empty())
+            .map(|key| key.trim().to_string());
         Self {
             base_url: normalize_base_url(&base_url),
-            api_key: api_key.filter(|k| !k.is_empty()),
+            prefer_openai_discovery: prefer_openai_discovery || api_key.is_some(),
+            api_key,
             client: reqwest::Client::new(),
         }
     }
 
     /// Fetch available models from an Ollama or OpenAI-compatible server
-    /// (including LiteLLM).
+    /// (including LiteLLM / LM Studio / Groq-style proxies).
     ///
-    /// Tries Ollama's native `/api/tags` first, then falls back to the
-    /// OpenAI-compatible `/v1/models` endpoint used by LiteLLM and similar
-    /// proxies.
+    /// Prefers `/v1/models` when an API key is set or the input URL ended with
+    /// `/v1`; otherwise tries Ollama `/api/tags` first.
     pub async fn list_models(&self) -> Result<Vec<String>> {
-        match self.list_models_via_ollama_tags().await {
-            Ok(models) => Ok(models),
-            Err(ollama_err) => match self.list_models_via_openai().await {
+        if self.prefer_openai_discovery {
+            match self.list_models_via_openai().await {
                 Ok(models) => Ok(models),
-                Err(openai_err) => Err(anyhow!(
-                    "Could not list models from {} via /api/tags ({ollama_err}) or /v1/models ({openai_err})",
-                    self.base_url
-                )),
-            },
+                Err(openai_err) => match self.list_models_via_ollama_tags().await {
+                    Ok(models) => Ok(models),
+                    Err(ollama_err) => {
+                        Err(Self::combine_list_models_errors(ollama_err, openai_err))
+                    }
+                },
+            }
+        } else {
+            match self.list_models_via_ollama_tags().await {
+                Ok(models) => Ok(models),
+                Err(ollama_err) => match self.list_models_via_openai().await {
+                    Ok(models) => Ok(models),
+                    Err(openai_err) => {
+                        Err(Self::combine_list_models_errors(ollama_err, openai_err))
+                    }
+                },
+            }
         }
+    }
+
+    fn combine_list_models_errors(
+        ollama_err: anyhow::Error,
+        openai_err: anyhow::Error,
+    ) -> anyhow::Error {
+        let openai_msg = openai_err.to_string();
+        let ollama_msg = ollama_err.to_string();
+        if openai_msg.contains("Authentication failed") {
+            return openai_err;
+        }
+        if ollama_msg.contains("Authentication failed") {
+            return ollama_err;
+        }
+        anyhow!("Could not list models via /api/tags ({ollama_err}) or /v1/models ({openai_err})")
+    }
+
+    fn map_list_models_status(status: reqwest::StatusCode, body: &str) -> anyhow::Error {
+        let code = status.as_u16();
+        if code == 401 || code == 403 {
+            return anyhow!(
+                "Authentication failed — check the API key for this OpenAI-compatible server{}",
+                if body.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", body.trim())
+                }
+            );
+        }
+        anyhow!("server returned status {status}")
     }
 
     async fn list_models_via_ollama_tags(&self) -> Result<Vec<String>> {
@@ -206,7 +307,9 @@ impl OllamaClient {
             .map_err(|e| anyhow!("Could not reach server at {}: {}", self.base_url, e))?;
 
         if !resp.status().is_success() {
-            return Err(anyhow!("server returned status {}", resp.status()));
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Self::map_list_models_status(status, &body));
         }
 
         let tags: TagsResponse = resp.json().await?;
@@ -228,7 +331,9 @@ impl OllamaClient {
             .map_err(|e| anyhow!("Could not reach server at {}: {}", self.base_url, e))?;
 
         if !resp.status().is_success() {
-            return Err(anyhow!("server returned status {}", resp.status()));
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Self::map_list_models_status(status, &body));
         }
 
         let models: OpenAiModelsResponse = resp.json().await?;
@@ -275,7 +380,18 @@ impl OllamaClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("Server returned {}: {}", status, body));
+            let code = status.as_u16();
+            if code == 401 || code == 403 {
+                return Err(anyhow!(
+                    "Authentication failed — check the API key for this OpenAI-compatible server{}",
+                    if body.trim().is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", body.trim())
+                    }
+                ));
+            }
+            return Err(anyhow!("Server returned {status}: {body}"));
         }
 
         let chat_resp: ChatResponse = resp.json().await?;
@@ -303,8 +419,10 @@ impl OllamaClient {
                         kind: "function".to_string(),
                         function: ToolCallFunctionParsed {
                             name: call.name,
-                            arguments: serde_json::to_string(&call.arguments)
-                                .unwrap_or_else(|_| "{}".to_string()),
+                            arguments: ToolCallArguments::String(
+                                serde_json::to_string(&call.arguments)
+                                    .unwrap_or_else(|_| "{}".to_string()),
+                            ),
                         },
                     })
                     .collect();

@@ -710,8 +710,9 @@ fn format_local_runtime_tool_call_message(server_message_data: &str) -> Option<S
 
 /// Pretty-print a local-runtime tool result from the transcript envelope in `server_message_data`.
 fn format_local_runtime_tool_result_message(server_message_data: &str) -> Option<String> {
-    let (call_id, result) =
-        crate::ai::local_runtime_bridge::decode_local_runtime_tool_result_data(server_message_data)?;
+    let (call_id, result) = crate::ai::local_runtime_bridge::decode_local_runtime_tool_result_data(
+        server_message_data,
+    )?;
     let status = if result.is_error { "error" } else { "ok" };
     let body = result.content.trim();
     let pretty = serde_json::from_str::<serde_json::Value>(body)
