@@ -2,7 +2,7 @@
   "roadmap": {
     "name": "Local Ollama Agent Runtime",
     "source": "dan_docs/reports/local_agent_runtime_competitive_gap_report.md",
-      "active_feature": "feat-021",
+      "active_feature": "feat-022",
     "status_values": [
       "not-started",
       "in-progress",
@@ -492,6 +492,30 @@
         "./script/format --check"
       ],
       "evidence": "2026-07-31: ProviderError::Unauthorized (non-retryable) for 401/403; empty API keys filtered; discovery prefers /v1/models for keyed hosts, /v1 URLs, and non-:11434 hosts; Settings branded Ollama / OpenAI-compatible with LM Studio/Groq examples; editors persist on Edited; model picker uses Ollama vs OpenAI-compatible label; legacy client accepts string/object tool args. Also fixed local_agent_runtime clippy Instant→instant::Instant. cargo test -p local_agent_runtime: 24 unit + 23 integration passed (1 ignored live). cargo test -p warp ollama: 5 passed. clippy -D warnings passed. format --check passed."
+    },
+    {
+      "id": "feat-022",
+      "name": "Model-specific prompt and tool-schema packs",
+      "description": "Detect Qwen / DeepSeek / Llama families from the configured local model id and apply short system-prompt addenda plus light tool-description tweaks so weaker local models follow OpenAI-compatible tool calling more reliably. Generic models keep the existing shared prompt unchanged.",
+      "phase": "Phase C",
+      "dependencies": [
+        "feat-011",
+        "feat-021"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "detect_model_family maps qwen*, deepseek*, llama*/codellama* model ids; unknown ids are Generic.",
+        "system_prompt_for_request_with_model appends a family addendum for Qwen/DeepSeek/Llama and none for Generic.",
+        "WarpToolExecutor applies pack description prefixes for edit_files, run_shell_command, and update_todos without changing parameter schemas.",
+        "Focused unit tests cover detection, prompt markers, and schema tweaks."
+      ],
+      "verification": [
+        "cargo test -p warp local_runtime_model_packs --lib --features local_ollama_runtime_tool_use",
+        "cargo test -p warp local_runtime_spec --lib --features local_ollama_runtime_tool_use",
+        "cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-31: Added app/src/ai/local_runtime_model_packs.rs (detect_model_family, prompt addenda, schema description prefixes). Wired via system_prompt_for_request_with_model + WarpToolExecutor::new_with_model_family. Generic models unchanged. cargo test -p warp local_runtime: 49 passed. format --check passed."
     }
   ],
   "future_phases": [
@@ -503,11 +527,10 @@
     {
       "phase": "Phase C",
       "scope": [
-        "model-specific prompt packs",
         "multimodal provider support",
         "Git workflow helpers"
       ],
-      "note": "feat-021 done. Remaining: model-specific prompt packs, multimodal, Git helpers."
+      "note": "feat-022 done. Remaining: multimodal, Git helpers."
     }
   ]
 }

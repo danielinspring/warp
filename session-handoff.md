@@ -2,7 +2,7 @@
 
 ## Current Objective
 
-Begin next Phase C item (model-specific prompt packs, multimodal, or Git workflow helpers).
+Begin next Phase C item (multimodal provider support or Git workflow helpers).
 
 ## Last Updated
 
@@ -10,7 +10,7 @@ Begin next Phase C item (model-specific prompt packs, multimodal, or Git workflo
 
 ## Active Feature
 
-`feat-021` — OpenAI-compatible provider polish (`done`)
+`feat-022` — Model-specific prompt and tool-schema packs (`done`)
 
 ## Branch
 
@@ -18,18 +18,17 @@ Begin next Phase C item (model-specific prompt packs, multimodal, or Git workflo
 
 ## Current State
 
-- **feat-021 done:** polished shared OpenAI-compatible path for LiteLLM / LM Studio / Groq-style hosts.
-  - Auth 401/403 → clear non-retryable errors
-  - Empty-key hygiene; smarter `/v1/models` discovery order
-  - Settings branding + live editor persist for Test Connection
-  - Object-form tool args on legacy client
+- **feat-021 done** (OpenAI-compat polish), committed.
+- **feat-022 done:** `app/src/ai/local_runtime_model_packs.rs`
+  - `detect_model_family` for qwen / deepseek / llama / generic
+  - Prompt addenda via `system_prompt_for_request_with_model`
+  - Schema description prefixes on `edit_files`, `run_shell_command`, `update_todos`
 
 ## Verification
 
-- local_agent_runtime: 24 unit + 23 integration passed  
-- warp ollama: 5 passed  
-- clippy / format: passed  
+- cargo test -p warp local_runtime: 49 passed  
+- format --check: passed  
 
 ## Recommended Next Step
 
-Promote Phase C **model-specific prompt packs** to `feat-022` (helps weaker local models / Qwen–DeepSeek–Llama tool discipline).
+Promote Phase C **multimodal provider support** or **Git workflow helpers** to `feat-023`.

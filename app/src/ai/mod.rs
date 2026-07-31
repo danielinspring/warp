@@ -67,6 +67,7 @@ pub(crate) mod loading;
 pub(crate) mod local_runtime_bridge;
 pub(crate) mod local_runtime_event_bus;
 pub(crate) mod local_runtime_integration;
+pub(crate) mod local_runtime_model_packs;
 pub(crate) mod local_runtime_spec;
 pub(crate) mod local_runtime_telemetry;
 pub(crate) mod local_todos;

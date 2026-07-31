@@ -626,20 +626,23 @@ pub struct WarpToolExecutor {
     request_tx: async_channel::Sender<ToolExecutionRequest>,
     task_id: TaskId,
     request_id: String,
+    model_family: crate::ai::local_runtime_model_packs::ModelFamily,
 }
 
 impl WarpToolExecutor {
-    pub fn new(
+    pub fn new_with_model_family(
         request_tx: async_channel::Sender<ToolExecutionRequest>,
         registry: Arc<LocalRuntimeToolRegistry>,
         task_id: TaskId,
         request_id: String,
+        model_family: crate::ai::local_runtime_model_packs::ModelFamily,
     ) -> Self {
         Self {
             registry,
             request_tx,
             task_id,
             request_id,
+            model_family,
         }
     }
 }
@@ -647,7 +650,10 @@ impl WarpToolExecutor {
 #[async_trait::async_trait]
 impl ToolExecutor for WarpToolExecutor {
     fn available_tools(&self) -> Vec<ToolSchema> {
-        self.registry.schemas()
+        crate::ai::local_runtime_model_packs::apply_schema_tweaks(
+            self.model_family,
+            self.registry.schemas(),
+        )
     }
 
     fn safety_class(&self, tool_name: &str) -> ToolSafetyClass {

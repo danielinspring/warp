@@ -113,16 +113,18 @@ async fn run_runtime(
     let registry = Arc::new(
         LocalRuntimeToolRegistry::from_request_with_available_skills(&params, &available_skills),
     );
-    let executor = WarpToolExecutor::new(
+    let model_family = crate::ai::local_runtime_model_packs::detect_model_family(&cfg.model);
+    let executor = WarpToolExecutor::new_with_model_family(
         tool_request_tx,
         Arc::clone(&registry),
         crate::ai::agent::task::TaskId::new(task_id.clone()),
         request_id.clone(),
+        model_family,
     );
 
     let runtime_config = RuntimeConfig {
-        system_prompt: Some(local_runtime_spec::system_prompt_for_request(
-            &params, &registry,
+        system_prompt: Some(local_runtime_spec::system_prompt_for_request_with_model(
+            &params, &registry, &cfg.model,
         )),
         context_budget: ContextBudget {
             max_input_tokens: params.context_window_limit.map(|limit| limit as usize),

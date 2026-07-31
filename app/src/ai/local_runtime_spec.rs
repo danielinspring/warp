@@ -13,6 +13,7 @@ use warpui::{AppContext, SingletonEntity};
 use crate::ai::agent::api::RequestParams;
 use crate::ai::agent::AIAgentContext;
 use crate::ai::local_runtime_bridge::{LocalRuntimePermissionMode, LocalRuntimeToolRegistry};
+use crate::ai::local_runtime_model_packs::{self, ModelFamily};
 use crate::ai::skills::SkillManager;
 
 pub const SYSTEM_PROMPT: &str = "You are a coding assistant running locally via Ollama, integrated into the Warp terminal. Reply concisely. When you need to take an action (run a command, read a file, etc.), prefer to call the matching tool; otherwise reply with plain text.\n\nIMPORTANT AFTER TOOLS: When you receive a tool result, treat it as ground truth. If status is completed (or exit_code is 0) and output answers the user, give that answer immediately — do not apologize, do not invent timeouts, and do not re-derive the answer with math unless the tool failed.\n\nIMPORTANT FOR SHELL: Prefer python3 over python on macOS. For quick calculations use run_shell_command with is_read_only=true, e.g. python3 -c 'print(sum(range(1, 101)))'. Only report command failure from the tool result exit_code/output — never invent timeouts or claim Python is missing unless the tool output says so.\n\nIMPORTANT FOR SEARCH: file_glob_v2 only searches under the current project/working directory and matches files. To locate a directory by name elsewhere, use run_shell_command with is_read_only=true and a FAST command. Prefer on macOS: mdfind 'kMDItemFSName == \"folder-name\"c' | head -20. Or scope find: find ~/codish -maxdepth 5 -type d -name 'folder-name' 2>/dev/null. Never run unbounded find ~ without -maxdepth (slow; blocks later tools). When a tool result includes exit_code/output, trust it and answer from that output — do not claim the environment is broken if the tool succeeded.\n\nIMPORTANT FOR EDITS: To change any file contents, you MUST call the 'edit_files' tool (never use shell commands like 'cat >', 'echo', or 'sed' to write files). Use 'edit_files' with an 'edits' array. Each edit is an object with 'type' ('replace', 'create', or 'delete'), 'file', and the relevant fields (search+replace for edits, or content for new files). The user will review the diff in the UI before it is applied. After reading a file, if the task requires a change, call edit_files in your next response instead of describing the change in text. Keep calling tools until the user's full request is satisfied.";
@@ -25,7 +26,18 @@ pub fn system_prompt_for_request(
     params: &RequestParams,
     registry: &LocalRuntimeToolRegistry,
 ) -> String {
-    format_system_prompt(&PromptBuildInput::from_request(params, registry))
+    system_prompt_for_request_with_model(params, registry, "")
+}
+
+/// Build the request system prompt, applying a model-family pack when `model` is set.
+pub fn system_prompt_for_request_with_model(
+    params: &RequestParams,
+    registry: &LocalRuntimeToolRegistry,
+    model: &str,
+) -> String {
+    let mut input = PromptBuildInput::from_request(params, registry);
+    input.model_family = local_runtime_model_packs::detect_model_family(model);
+    format_system_prompt(&input)
 }
 
 pub fn local_tools() -> Vec<ToolSchema> {
@@ -47,6 +59,7 @@ struct PromptBuildInput {
     mcp_resource_count: usize,
     context_lines: Vec<String>,
     todo_section: Option<String>,
+    model_family: ModelFamily,
 }
 
 impl PromptBuildInput {
@@ -222,6 +235,8 @@ Use mark_todos_completed to finish items. Keep ids stable when only titles chang
             .ok();
         }
     }
+
+    local_runtime_model_packs::append_prompt_addendum(&mut prompt, input.model_family);
 
     prompt
 }
@@ -515,5 +530,27 @@ mod tests {
 
         assert!(prompt.contains("MCP context visible: 2 servers, 3 tools, 4 resources"));
         assert!(prompt.contains("MCP execution is not connected to this local runtime"));
+    }
+
+    #[test]
+    fn qwen_model_prompt_includes_family_pack_addendum() {
+        let prompt = format_system_prompt(&PromptBuildInput {
+            model_family: ModelFamily::Qwen,
+            local_tool_names: vec!["edit_files".to_string()],
+            ..Default::default()
+        });
+        assert!(prompt.contains(SYSTEM_PROMPT));
+        assert!(prompt.contains("## Model Pack: Qwen"));
+        assert!(prompt.contains("edit_files"));
+    }
+
+    #[test]
+    fn generic_model_prompt_omits_family_pack_markers() {
+        let prompt = format_system_prompt(&PromptBuildInput {
+            model_family: ModelFamily::Generic,
+            ..Default::default()
+        });
+        assert!(prompt.contains(SYSTEM_PROMPT));
+        assert!(!prompt.contains("## Model Pack:"));
     }
 }
