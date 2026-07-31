@@ -1,5 +1,12 @@
 use std::net::{IpAddr, Ipv4Addr};
 
+use futures_util::{SinkExt, StreamExt};
+use session_sharing_protocol::common::{
+    Role, UserID, WindowSize, WriteToPtyFailureReason, WriteToPtyRequestId, WriteToPtySeqNo,
+};
+use session_sharing_protocol::viewer::{DownstreamMessage, InitPayload, UpstreamMessage};
+use tokio_tungstenite::tungstenite::Message;
+
 use super::*;
 
 fn loopback_ip() -> IpAddr {
@@ -28,6 +35,54 @@ fn try_get(url: &str) -> Option<(reqwest::StatusCode, String)> {
         let body = response.text().await.unwrap_or_default();
         Some((status, body))
     })
+}
+
+fn guest_ws_url(handle: &ShareHandle) -> String {
+    format!(
+        "ws://{}/local-session/{}/ws",
+        handle.addr,
+        handle.secret.as_str()
+    )
+}
+
+fn initialize_payload() -> UpstreamMessage {
+    UpstreamMessage::Initialize(InitPayload {
+        viewer_id: None,
+        user_id: UserID::default(),
+        last_received_event_no: None,
+        latest_block_id: None,
+        telemetry_context: None,
+        feature_support: Default::default(),
+    })
+}
+
+async fn join_as_viewer(
+    ws_url: String,
+) -> (
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    DownstreamMessage,
+) {
+    let (mut socket, response) = tokio_tungstenite::connect_async(ws_url)
+        .await
+        .expect("guest should connect with the correct secret");
+    assert_eq!(response.status().as_u16(), 101);
+
+    let init = initialize_payload().to_json().unwrap();
+    socket
+        .send(Message::Text(init.into()))
+        .await
+        .expect("initialize should send");
+
+    let message = socket
+        .next()
+        .await
+        .expect("hub should reply")
+        .expect("reply should not error");
+    let Message::Text(text) = message else {
+        panic!("expected text JoinedSuccessfully, got {message:?}");
+    };
+    let joined = DownstreamMessage::from_json(text.as_ref()).expect("parse JoinedSuccessfully");
+    (socket, joined)
 }
 
 #[test]
@@ -188,37 +243,126 @@ fn websocket_upgrade_rejects_wrong_secret() {
 }
 
 #[test]
-fn websocket_upgrade_accepts_correct_secret_and_sends_hello() {
-    use futures_util::StreamExt;
-    use tokio_tungstenite::tungstenite::Message;
-
+fn initialize_receives_joined_successfully_as_reader() {
     let mut hub = LocalSessionShareHub::new();
-    let handle = hub.start(loopback_ip(), 0).expect("start should succeed");
+    hub.set_window_size(WindowSize {
+        num_rows: 24,
+        num_cols: 80,
+    })
+    .expect_err("set_window_size requires an active share");
 
-    let ws_url = format!(
-        "ws://{}/local-session/{}/ws",
-        handle.addr,
-        handle.secret.as_str()
-    );
+    let handle = hub.start(loopback_ip(), 0).expect("start should succeed");
+    hub.set_window_size(WindowSize {
+        num_rows: 24,
+        num_cols: 80,
+    })
+    .expect("set_window_size should work while active");
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
-    rt.block_on(async move {
-        let (mut socket, response) = tokio_tungstenite::connect_async(ws_url)
-            .await
-            .expect("guest should be able to connect with the correct secret");
-        assert_eq!(response.status().as_u16(), 101);
+    rt.block_on(async {
+        let (_socket, joined) = join_as_viewer(guest_ws_url(&handle)).await;
+        let DownstreamMessage::JoinedSuccessfully {
+            scrollback,
+            window_size,
+            participant_list,
+            ..
+        } = joined
+        else {
+            panic!("expected JoinedSuccessfully");
+        };
+        assert!(scrollback.blocks.is_empty());
+        assert_eq!(window_size.num_rows, 24);
+        assert_eq!(window_size.num_cols, 80);
+        assert!(participant_list
+            .viewers
+            .iter()
+            .all(|viewer| viewer.role == Role::Reader));
+    });
+
+    hub.stop();
+}
+
+#[test]
+fn publish_pty_bytes_reaches_joined_guest() {
+    let mut hub = LocalSessionShareHub::new();
+    let handle = hub.start(loopback_ip(), 0).expect("start should succeed");
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let (mut socket, _) = join_as_viewer(guest_ws_url(&handle)).await;
+
+        hub.publish_pty_bytes(b"hello guest")
+            .expect("publish should succeed");
 
         let message = socket
             .next()
             .await
-            .expect("hub should send a hello message")
-            .expect("hello message should not be an error");
-        assert_eq!(message, Message::Text(server::WS_HELLO_MESSAGE.into()));
+            .expect("hub should broadcast")
+            .expect("broadcast should not error");
+        let Message::Text(text) = message else {
+            panic!("expected text OrderedTerminalEvent, got {message:?}");
+        };
+        let DownstreamMessage::OrderedTerminalEvent(event) =
+            DownstreamMessage::from_json(text.as_ref()).expect("parse event")
+        else {
+            panic!("expected OrderedTerminalEvent");
+        };
+        let session_sharing_protocol::common::OrderedTerminalEventType::PtyBytesRead { bytes } =
+            event.event_type
+        else {
+            panic!("expected PtyBytesRead");
+        };
+        let decoded = lz4_flex::block::decompress_size_prepended(&bytes).unwrap();
+        assert_eq!(decoded, b"hello guest");
+    });
 
-        let _ = socket.close(None).await;
+    hub.stop();
+}
+
+#[test]
+fn write_to_pty_from_guest_is_rejected() {
+    let mut hub = LocalSessionShareHub::new();
+    let handle = hub.start(loopback_ip(), 0).expect("start should succeed");
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let (mut socket, _) = join_as_viewer(guest_ws_url(&handle)).await;
+
+        let request = UpstreamMessage::WriteToPty {
+            request_id: WriteToPtyRequestId {
+                participant_id: session_sharing_protocol::common::ParticipantId::new(),
+                op_no: WriteToPtySeqNo::zero(),
+            },
+            bytes: b"intrusion".to_vec(),
+        };
+        socket
+            .send(Message::Text(request.to_json().unwrap().into()))
+            .await
+            .expect("write request should send");
+
+        let message = socket
+            .next()
+            .await
+            .expect("hub should reply")
+            .expect("reply should not error");
+        let Message::Text(text) = message else {
+            panic!("expected text failure, got {message:?}");
+        };
+        assert!(matches!(
+            DownstreamMessage::from_json(text.as_ref()).unwrap(),
+            DownstreamMessage::WriteToPtyRequestFailed {
+                reason: WriteToPtyFailureReason::InsufficientPermissions
+            }
+        ));
     });
 
     hub.stop();

@@ -1,11 +1,17 @@
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
+use session_sharing_protocol::common::{OrderedTerminalEventType, WindowSize};
+use session_sharing_protocol::viewer::DownstreamMessage;
 use tokio::net::TcpListener;
-use tokio::sync::oneshot;
+use tokio::sync::{broadcast, oneshot};
 
+use super::protocol::{compress_pty_bytes, ordered_event_downstream};
 use super::secret::ShareSecret;
 use super::server;
+
+const EVENT_BROADCAST_CAPACITY: usize = 256;
 
 /// A live local session share, returned by [`LocalSessionShareHub::start`]
 /// and [`LocalSessionShareHub::rotate_secret`]. Holding onto this is not
@@ -33,6 +39,8 @@ pub enum HubError {
     },
     #[error("failed to start local session share runtime: {0}")]
     Runtime(#[source] std::io::Error),
+    #[error("failed to serialize session-sharing-protocol message: {0}")]
+    Serialize(#[source] serde_json::Error),
 }
 
 /// Shared, mutable state read by the axum handlers on every request. Kept
@@ -40,12 +48,19 @@ pub enum HubError {
 /// the router without exposing hub lifecycle methods to request handlers.
 pub(crate) struct ShareState {
     secret: RwLock<Option<ShareSecret>>,
+    window_size: RwLock<WindowSize>,
+    next_event_no: AtomicUsize,
+    event_tx: broadcast::Sender<String>,
 }
 
 impl ShareState {
     fn new(secret: ShareSecret) -> Self {
+        let (event_tx, _) = broadcast::channel(EVENT_BROADCAST_CAPACITY);
         Self {
             secret: RwLock::new(Some(secret)),
+            window_size: RwLock::new(WindowSize::default()),
+            next_event_no: AtomicUsize::new(0),
+            event_tx,
         }
     }
 
@@ -69,6 +84,36 @@ impl ShareState {
             .secret
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
+    pub(crate) fn window_size(&self) -> WindowSize {
+        *self
+            .window_size
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn set_window_size(&self, size: WindowSize) {
+        *self
+            .window_size
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = size;
+    }
+
+    pub(crate) fn subscribe_events(&self) -> broadcast::Receiver<String> {
+        self.event_tx.subscribe()
+    }
+
+    fn publish_downstream(&self, message: DownstreamMessage) -> Result<(), HubError> {
+        let json = message.to_json().map_err(HubError::Serialize)?;
+        // No active subscribers is fine — host may publish before guests join.
+        let _ = self.event_tx.send(json);
+        Ok(())
+    }
+
+    fn publish_event_type(&self, event_type: OrderedTerminalEventType) -> Result<(), HubError> {
+        let event_no = self.next_event_no.fetch_add(1, Ordering::SeqCst);
+        self.publish_downstream(ordered_event_downstream(event_no, event_type))
     }
 }
 
@@ -217,6 +262,27 @@ impl LocalSessionShareHub {
             secret: new_secret,
             addr: active.addr,
         })
+    }
+
+    /// Updates the window size advertised to guests on join and used for
+    /// subsequent Resize events the host may publish.
+    pub fn set_window_size(&self, size: WindowSize) -> Result<(), HubError> {
+        let active = self.active.as_ref().ok_or(HubError::NotActive)?;
+        active.state.set_window_size(size);
+        Ok(())
+    }
+
+    /// Publishes raw host PTY output to connected guests. Bytes are LZ4
+    /// size-prepended to match the cloud sharer path.
+    pub fn publish_pty_bytes(&self, bytes: &[u8]) -> Result<(), HubError> {
+        let compressed = compress_pty_bytes(bytes);
+        self.publish_event(OrderedTerminalEventType::PtyBytesRead { bytes: compressed })
+    }
+
+    /// Publishes an ordered terminal event to connected guests.
+    pub fn publish_event(&self, event_type: OrderedTerminalEventType) -> Result<(), HubError> {
+        let active = self.active.as_ref().ok_or(HubError::NotActive)?;
+        active.state.publish_event_type(event_type)
     }
 }
 

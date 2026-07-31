@@ -596,7 +596,7 @@
       "dependencies": [
         "feat-025"
       ],
-      "status": "not-started",
+      "status": "done",
       "acceptance_criteria": [
         "Local hub speaks session-sharing-protocol join/initialize dialect for viewers.",
         "Scrollback snapshot and live PtyBytesRead (and Resize) stream to connected guests.",
@@ -607,7 +607,7 @@
         "cargo test -p warp local_session_share --lib",
         "./script/format --check"
       ],
-      "evidence": ""
+      "evidence": "2026-07-31: Local WS speaks viewer Initialize→JoinedSuccessfully (empty scrollback, Role::Reader); publish_pty_bytes LZ4+OrderedTerminalEvent broadcast; WriteToPty/Execute/Agent/Control → InsufficientPermissions. cargo test local_session_share: 22 passed. format --check passed."
     }
   ],
   "future_phases": [
@@ -624,11 +624,10 @@
     {
       "phase": "Phase D",
       "scope": [
-        "feat-026 local LAN share protocol shim (next)",
         "WASM viewer + WebIntent/boot overrides",
-        "Host UX (palette, banners, mutual exclusion with cloud share)"
+        "Host UX (palette, banners, TerminalModel fan-in, mutual exclusion with cloud share)"
       ],
-      "note": "feat-025 hub done. Next: protocol shim then WASM viewer."
+      "note": "feat-025 hub + feat-026 protocol shim done. Next: WASM serve + host wiring."
     }
   ]
 }

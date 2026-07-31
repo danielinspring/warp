@@ -2,7 +2,7 @@
 
 ## Current Objective
 
-Implement feat-026: fan host PTY/scrollback into the local LAN share hub via session-sharing-protocol (Reader-only).
+Next Phase D slice: serve Warp WASM from the local hub and fix WebIntent/boot for LAN origins.
 
 ## Last Updated
 
@@ -10,7 +10,7 @@ Implement feat-026: fan host PTY/scrollback into the local LAN share hub via ses
 
 ## Active Feature
 
-`feat-026` — Local LAN share protocol shim (`not-started` → promote when starting)
+`feat-026` — Local LAN share protocol shim (`done`)
 
 ## Branch
 
@@ -18,14 +18,14 @@ Implement feat-026: fan host PTY/scrollback into the local LAN share hub via ses
 
 ## Current State
 
-- **feat-025 done:** `app/src/terminal/local_session_share/` hub with secret, bind, HTTP placeholder, WS hello stub.
-- Specs: `specs/local-lan-session-share/{PRODUCT,TECH}.md`
+- **feat-025 done** (`a0c9ffb6`): hub + secret + bind + HTTP placeholder.
+- **feat-026 done:** viewer protocol over local WS — Initialize→JoinedSuccessfully (Reader), `publish_pty_bytes`, permissions failures for mutate ops.
 
 ## Verification
 
-- local_session_share: 17 passed  
+- local_session_share: 22 passed  
 - format --check: passed  
 
 ## Recommended Next Step
 
-Promote feat-026 to in-progress and implement local WS protocol shim (JoinedSuccessfully + OrderedTerminalEvent, Role::Reader).
+Add feat-027: serve Warp WASM assets from the hub + LAN WebIntent/boot overrides so Chrome can open the share URL as a real Warp viewer.

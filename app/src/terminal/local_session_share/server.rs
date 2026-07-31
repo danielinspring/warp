@@ -6,13 +6,11 @@ use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
+use futures_util::{SinkExt, StreamExt};
+use session_sharing_protocol::viewer::{DownstreamMessage, UpstreamMessage};
 
 use super::hub::ShareState;
-
-/// Sent as the first message on a freshly-upgraded WebSocket connection so
-/// guests (or tests) can confirm the hub is alive. The real event stream
-/// protocol is added in a follow-up PR.
-pub(crate) const WS_HELLO_MESSAGE: &str = "warp-local-session-share:hello";
+use super::protocol::{joined_successfully, reply_for_upstream};
 
 const PLACEHOLDER_HTML: &str = r#"<!doctype html>
 <html lang="en">
@@ -63,21 +61,72 @@ async fn ws_upgrade(
     if !state.check_secret(&secret) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    ws.on_upgrade(handle_socket)
+    ws.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
-async fn handle_socket(mut socket: WebSocket) {
-    if socket
-        .send(Message::Text(WS_HELLO_MESSAGE.into()))
-        .await
-        .is_err()
-    {
-        return;
-    }
+async fn handle_socket(socket: WebSocket, state: Arc<ShareState>) {
+    let (mut sink, mut stream) = socket.split();
+    let mut events = state.subscribe_events();
+    let mut joined = false;
 
-    // Protocol shim (scrollback + ordered terminal events) lands in a
-    // follow-up PR. For now we just keep the connection open and drain
-    // inbound messages, ignoring any content sent by the guest since v1
-    // guests are view-only (PRODUCT.md P15).
-    while let Some(Ok(_message)) = socket.recv().await {}
+    loop {
+        tokio::select! {
+            inbound = stream.next() => {
+                match inbound {
+                    Some(Ok(Message::Text(text))) => {
+                        let Ok(message) = UpstreamMessage::from_json(text.as_ref()) else {
+                            continue;
+                        };
+                        if !joined {
+                            if let UpstreamMessage::Initialize(_) = &message {
+                                let reply = joined_successfully(state.window_size());
+                                if send_downstream(&mut sink, reply).await.is_err() {
+                                    return;
+                                }
+                                joined = true;
+                            }
+                            continue;
+                        }
+                        if let Some(reply) = reply_for_upstream(message) {
+                            if send_downstream(&mut sink, reply).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Ping(payload))) => {
+                        if sink.send(Message::Pong(payload)).await.is_err() {
+                            return;
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => return,
+                    Some(Ok(_)) => {}
+                    Some(Err(_)) => return,
+                }
+            }
+            event = events.recv(), if joined => {
+                match event {
+                    Ok(json) => {
+                        if sink.send(Message::Text(json.into())).await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        // Skip lagged frames; a follow-up may send SessionEnded.
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        }
+    }
+}
+
+async fn send_downstream(
+    sink: &mut (impl SinkExt<Message> + Unpin),
+    message: DownstreamMessage,
+) -> Result<(), ()> {
+    let Ok(json) = message.to_json() else {
+        return Err(());
+    };
+    sink.send(Message::Text(json.into())).await.map_err(|_| ())
 }
