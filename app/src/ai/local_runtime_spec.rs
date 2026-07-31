@@ -214,6 +214,15 @@ Use mark_todos_completed to finish items. Keep ids stable when only titles chang
         );
     }
 
+    if input.local_tool_names.iter().any(|n| n == "git_status") {
+        prompt.push_str(
+            "\n## Git\n\
+Prefer git_status, draft_commit_message_context, and draft_pr_summary_context over \
+run_shell_command for git status/diff/commit-message/PR context. These are read-only \
+and never commit, push, or open a PR.\n",
+        );
+    }
+
     if let Some(todo_section) = &input.todo_section {
         prompt.push('\n');
         prompt.push_str(todo_section);

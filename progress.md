@@ -4,18 +4,17 @@
 
 **Last Updated:** 2026-07-31  
 **Active Feature:** `feat-024` — Git workflow helpers  
-**Status:** In progress  
+**Status:** Done  
 
 ## What's Done
 
-- Through feat-023 multimodal provider support.
+- Through feat-024. **Phase C is complete.**
 
-## Current Work
+## Verification
 
-- **feat-024:** First-class `git_status`, `draft_commit_message_context`, `draft_pr_summary_context` in-process tools.
+- feat-023: local_agent_runtime 30+23; warp local_runtime 56; format ok  
+- feat-024: local_git 12; local_runtime 57; format ok  
 
-## Verification (feat-023)
+## Next
 
-- local_agent_runtime: 30 unit + 23 integration passed  
-- warp local_runtime: 56 passed  
-- format --check: passed  
+No Phase C items remain. Pick next roadmap work from gap report / future phases when defined.

@@ -2,7 +2,7 @@
 
 ## Current Objective
 
-Implement `feat-024` Git workflow helpers for the local Ollama runtime.
+Phase C complete. Await next roadmap feature selection.
 
 ## Last Updated
 
@@ -10,7 +10,7 @@ Implement `feat-024` Git workflow helpers for the local Ollama runtime.
 
 ## Active Feature
 
-`feat-024` — Git workflow helpers (`in-progress`)
+`feat-024` — Git workflow helpers (`done`)
 
 ## Branch
 
@@ -18,9 +18,16 @@ Implement `feat-024` Git workflow helpers for the local Ollama runtime.
 
 ## Current State
 
-- **feat-023 done:** multimodal ContentPart + Ollama image_url + vision gating + ImageContext extraction.
-- **feat-024 next:** `local_git` tools registered like local_todos/local_web.
+- **feat-023 done** (commit `df0f4fe0`): multimodal ContentPart + Ollama vision image_url + ImageContext extract.
+- **feat-024 done:** `git_status`, `draft_commit_message_context`, `draft_pr_summary_context` in-process ReadOnly tools.
+- Phase C scope in `feature_list.json` is empty / complete.
+
+## Verification
+
+- local_git: 12 passed  
+- local_runtime: 57 passed  
+- format --check: passed  
 
 ## Recommended Next Step
 
-Add `app/src/ai/local_git.rs` with three ReadOnly tools wired through LocalRuntimeToolRegistry, verify, commit.
+Select the next post–Phase C feature (or close the local-agent roadmap slice) and promote it to `in-progress` in `feature_list.json`.

@@ -551,7 +551,7 @@
         "feat-007",
         "feat-019"
       ],
-      "status": "in-progress",
+      "status": "done",
       "acceptance_criteria": [
         "Three git tools are advertised on local registries, ReadOnly, and retained in plan mode.",
         "Tools execute in-process and return structured JSON; never queued as AIAgentAction.",
@@ -564,7 +564,7 @@
         "cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use",
         "./script/format --check"
       ],
-      "evidence": ""
+      "evidence": "2026-07-31: Added app/src/ai/local_git.rs (git_status, draft_commit_message_context, draft_pr_summary_context) using util/git helpers. Registry always advertises LocalGit ReadOnly tools; in-process execute; plan mode kept; prompt ## Git blurb. cargo test local_git: 12 passed. cargo test local_runtime: 57 passed. format --check passed."
     }
   ],
   "future_phases": [
@@ -575,10 +575,8 @@
     },
     {
       "phase": "Phase C",
-      "scope": [
-        "feat-024 Git workflow helpers (in-progress)"
-      ],
-      "note": "feat-023 multimodal done. Remaining: Git helpers."
+      "scope": [],
+      "note": "Phase C complete (feat-009–012, feat-019–024)."
     }
   ]
 }

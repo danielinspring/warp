@@ -146,6 +146,9 @@ pub struct LocalRuntimeToolRegistry {
     todo_state: Arc<Mutex<crate::ai::local_todos::LocalTodoState>>,
     /// call_id → side effects to emit when the runtime reports ToolResult.
     pending_local_persistence: Arc<Mutex<HashMap<String, LocalToolPersistence>>>,
+    /// Session default working directory, used to resolve local git tool
+    /// calls that omit an explicit `repo_path`.
+    working_directory: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,6 +181,8 @@ enum LocalRuntimeToolRouteKind {
     LocalWeb,
     /// Local durable todos (in-process + UpdateTodos task messages).
     LocalTodo,
+    /// Local read-only git workflow tools (in-process; no cloud action).
+    LocalGit,
 }
 
 impl LocalRuntimeToolRegistry {
@@ -192,6 +197,11 @@ impl LocalRuntimeToolRegistry {
     ) -> Self {
         let mut registry = Self::built_ins();
         registry.permission_mode = LocalRuntimePermissionMode::from_request(params);
+        registry.working_directory = params
+            .session_context
+            .current_working_directory()
+            .clone()
+            .map(PathBuf::from);
 
         if let Some(context) = &params.mcp_context {
             registry.add_mcp_context(context);
@@ -265,6 +275,8 @@ impl LocalRuntimeToolRegistry {
         }
         // Durable todos: always available locally (UI + transcript replay).
         registry.add_todo_tools();
+        // Read-only git workflow tools: always available locally, like todos.
+        registry.add_git_tools();
         {
             let mut todos = registry
                 .todo_state
@@ -287,6 +299,7 @@ impl LocalRuntimeToolRegistry {
             skill_catalog: Vec::new(),
             todo_state: Arc::new(Mutex::new(crate::ai::local_todos::LocalTodoState::default())),
             pending_local_persistence: Arc::new(Mutex::new(HashMap::new())),
+            working_directory: None,
         };
 
         for schema in build_tool_schemas() {
@@ -546,6 +559,24 @@ impl LocalRuntimeToolRegistry {
         );
     }
 
+    fn add_git_tools(&mut self) {
+        self.add_tool(
+            crate::ai::local_git::git_status_schema(),
+            ToolSafetyClass::ReadOnly,
+            LocalRuntimeToolRouteKind::LocalGit,
+        );
+        self.add_tool(
+            crate::ai::local_git::draft_commit_message_context_schema(),
+            ToolSafetyClass::ReadOnly,
+            LocalRuntimeToolRouteKind::LocalGit,
+        );
+        self.add_tool(
+            crate::ai::local_git::draft_pr_summary_context_schema(),
+            ToolSafetyClass::ReadOnly,
+            LocalRuntimeToolRouteKind::LocalGit,
+        );
+    }
+
     pub fn todo_prompt_section(&self) -> Option<String> {
         self.todo_state
             .lock()
@@ -711,6 +742,23 @@ impl ToolExecutor for WarpToolExecutor {
                 });
             }
             return crate::ai::local_web::execute_web_tool(call).await;
+        }
+
+        // Local git workflow tools execute in-process (no Warp action card, no mutation).
+        if call.name == "git_status"
+            || call.name == "draft_commit_message_context"
+            || call.name == "draft_pr_summary_context"
+        {
+            if !self.registry.contains_tool(&call.name) {
+                return Err(ToolExecutionError::NotFound {
+                    name: call.name.clone(),
+                });
+            }
+            return crate::ai::local_git::execute_git_tool(
+                call,
+                self.registry.working_directory.as_deref(),
+            )
+            .await;
         }
 
         // Local durable todos: update session state + queue UpdateTodos for the event mapper.
@@ -1142,6 +1190,12 @@ pub fn tool_call_to_ai_action_with_registry(
             )));
         }
         LocalRuntimeToolRouteKind::LocalTodo => {
+            return Err(ToolExecutionError::ExecutionFailed(anyhow::anyhow!(
+                "{} is handled in-process and should not be queued as a Warp action",
+                call.name
+            )));
+        }
+        LocalRuntimeToolRouteKind::LocalGit => {
             return Err(ToolExecutionError::ExecutionFailed(anyhow::anyhow!(
                 "{} is handled in-process and should not be queued as a Warp action",
                 call.name
@@ -2597,6 +2651,12 @@ pub fn tool_call_to_proto_tool_with_registry(
                 call.name
             ),
         }),
+        LocalRuntimeToolRouteKind::LocalGit => Err(ToolExecutionError::InvalidInput {
+            reason: format!(
+                "{} has no wire proto tool form; results stay in the runtime transcript envelope",
+                call.name
+            ),
+        }),
         LocalRuntimeToolRouteKind::McpTool { server_id, name } => {
             let arguments = arguments_object(&call.arguments, &call.name)?;
             Ok(Tool::CallMcpTool(api::message::tool_call::CallMcpTool {
@@ -2771,6 +2831,7 @@ pub fn proto_tool_call_to_runtime_with_registry(
                     | LocalRuntimeToolRouteKind::ListSkills
                     | LocalRuntimeToolRouteKind::LocalWeb
                     | LocalRuntimeToolRouteKind::LocalTodo
+                    | LocalRuntimeToolRouteKind::LocalGit
                     | LocalRuntimeToolRouteKind::McpTool { .. }
                     | LocalRuntimeToolRouteKind::ReadMcpResource
                     | LocalRuntimeToolRouteKind::ReadSkill { .. } => None,
@@ -3814,6 +3875,55 @@ mod tests {
             arguments: serde_json::json!({
                 "todos": [{"id": "1", "title": "Ship feat-020"}]
             }),
+        };
+        let err = tool_call_to_ai_action_with_registry(
+            &call,
+            &TaskId::new("task_1".to_string()),
+            &registry,
+        )
+        .unwrap_err();
+        assert!(matches!(err, ToolExecutionError::ExecutionFailed(_)));
+    }
+
+    #[test]
+    fn git_tools_are_always_available_and_kept_in_plan_mode() {
+        let registry = LocalRuntimeToolRegistry::from_request(&RequestParams::new_for_test());
+        assert!(registry.contains_tool("git_status"));
+        assert!(registry.contains_tool("draft_commit_message_context"));
+        assert!(registry.contains_tool("draft_pr_summary_context"));
+        assert_eq!(
+            registry.safety_class("git_status"),
+            ToolSafetyClass::ReadOnly
+        );
+        assert_eq!(
+            registry.safety_class("draft_commit_message_context"),
+            ToolSafetyClass::ReadOnly
+        );
+        assert_eq!(
+            registry.safety_class("draft_pr_summary_context"),
+            ToolSafetyClass::ReadOnly
+        );
+
+        let mut plan_params = RequestParams::new_for_test();
+        plan_params.input = vec![AIAgentInput::UserQuery {
+            query: "Plan".to_string(),
+            context: std::sync::Arc::from([]),
+            static_query_type: None,
+            referenced_attachments: std::collections::HashMap::new(),
+            user_query_mode: crate::ai::agent::UserQueryMode::Plan,
+            running_command: None,
+            intended_agent: None,
+        }];
+        let plan = LocalRuntimeToolRegistry::from_request(&plan_params);
+        assert!(plan.contains_tool("git_status"));
+        assert!(plan.contains_tool("draft_commit_message_context"));
+        assert!(plan.contains_tool("draft_pr_summary_context"));
+        assert!(!plan.contains_tool("edit_files"));
+
+        let call = ToolCall {
+            id: "git_call_1".to_string(),
+            name: "git_status".to_string(),
+            arguments: serde_json::json!({}),
         };
         let err = tool_call_to_ai_action_with_registry(
             &call,

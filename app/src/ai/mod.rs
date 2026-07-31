@@ -64,6 +64,7 @@ pub mod facts;
 pub(crate) mod generate_block_title;
 pub(crate) mod generate_code_review_content;
 pub(crate) mod loading;
+pub(crate) mod local_git;
 pub(crate) mod local_runtime_bridge;
 pub(crate) mod local_runtime_event_bus;
 pub(crate) mod local_runtime_integration;
