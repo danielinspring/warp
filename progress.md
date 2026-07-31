@@ -3,18 +3,18 @@
 ## Current State
 
 **Last Updated:** 2026-07-31  
-**Active Feature:** `feat-024` — Git workflow helpers  
-**Status:** Done  
+**Active Feature:** `feat-026` — Local LAN share protocol shim  
+**Status:** Not started (feat-025 hub done)  
 
 ## What's Done
 
-- Through feat-024. **Phase C is complete.**
+- Through feat-025 local LAN session share hub (PR1).
 
-## Verification
+## Verification (feat-025)
 
-- feat-023: local_agent_runtime 30+23; warp local_runtime 56; format ok  
-- feat-024: local_git 12; local_runtime 57; format ok  
+- `cargo test -p warp local_session_share --lib`: 17 passed  
+- `./script/format --check`: passed  
 
 ## Next
 
-No Phase C items remain. Pick next roadmap work from gap report / future phases when defined.
+Implement feat-026: session-sharing-protocol over local WS (Reader-only, scrollback + PtyBytesRead).

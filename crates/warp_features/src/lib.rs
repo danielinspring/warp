@@ -57,6 +57,12 @@ pub enum FeatureFlag {
     /// Enables the joining / viewing of shared sessions (_not_ creation).
     ViewingSharedSessions,
 
+    /// Enables sharing a live terminal pane over the local network (LAN or
+    /// Tailscale) via a host-local HTTP+WS hub, gated by a URL secret.
+    /// Distinct from `CreatingSharedSessions` / `ViewingSharedSessions`,
+    /// which are for Warp's cloud-relayed shared sessions.
+    LocalLanSessionShare,
+
     /// Enabling context chips functionality for prompt
     ContextChips,
 
@@ -974,6 +980,7 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
     FeatureFlag::ContextWindowUsageBreakdown,
     FeatureFlag::CloudRunners,
     FeatureFlag::WaitForEventsParentRegistration,
+    FeatureFlag::LocalLanSessionShare,
 ];
 
 /// Features enabled for feature preview build users (e.g.: Friends of Warp).
@@ -1091,6 +1098,9 @@ impl FeatureFlag {
             ),
             AsyncFind => Some(
                 "Runs terminal find on a background thread to keep the UI responsive while searching large outputs.",
+            ),
+            LocalLanSessionShare => Some(
+                "Enables sharing a live terminal pane over the local network (LAN or Tailscale) via a URL secret, without Warp cloud as the relay.",
             ),
             _ => None,
         }

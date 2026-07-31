@@ -2,7 +2,7 @@
   "roadmap": {
     "name": "Local Ollama Agent Runtime",
     "source": "dan_docs/reports/local_agent_runtime_competitive_gap_report.md",
-      "active_feature": "feat-024",
+      "active_feature": "feat-026",
     "status_values": [
       "not-started",
       "in-progress",
@@ -565,6 +565,49 @@
         "./script/format --check"
       ],
       "evidence": "2026-07-31: Added app/src/ai/local_git.rs (git_status, draft_commit_message_context, draft_pr_summary_context) using util/git helpers. Registry always advertises LocalGit ReadOnly tools; in-process execute; plan mode kept; prompt ## Git blurb. cargo test local_git: 12 passed. cargo test local_runtime: 57 passed. format --check passed."
+    },
+    {
+      "id": "feat-025",
+      "name": "Local LAN session share hub",
+      "description": "Host-local HTTP+WS hub for sharing one live terminal pane over LAN/Tailscale with a URL secret. PR1: start/stop/rotate, bind candidates, secret-gated placeholder HTML and WS stub. Full WASM viewer and protocol fan-out are follow-ups (specs/local-lan-session-share).",
+      "phase": "Phase D",
+      "dependencies": [],
+      "status": "done",
+      "acceptance_criteria": [
+        "FeatureFlag::LocalLanSessionShare exists and is enabled for dogfood.",
+        "LocalSessionShareHub can start/stop/rotate a share on a chosen bind address.",
+        "Share URL embeds a high-entropy secret; wrong/revoked secrets return no session content.",
+        "GET /health works without a secret; GET /local-session/{secret} serves placeholder HTML when valid.",
+        "WebSocket /local-session/{secret}/ws accepts only a matching secret and sends a hello stub.",
+        "non_loopback_candidates lists LAN/Tailscale addresses and excludes loopback.",
+        "Focused unit tests pass."
+      ],
+      "verification": [
+        "cargo test -p warp local_session_share --lib",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-31: FeatureFlag::LocalLanSessionShare in DOGFOOD_FLAGS. app/src/terminal/local_session_share/ (secret, bind, hub, server). Hub start/stop/rotate; URL http://host:port/local-session/{secret}; health + placeholder HTML; WS hello stub. cargo test -p warp local_session_share --lib: 17 passed. format --check passed."
+    },
+    {
+      "id": "feat-026",
+      "name": "Local LAN share protocol shim",
+      "description": "Fan host PTY/scrollback into the local session share hub as session-sharing-protocol events; force Role::Reader; guest WS receives JoinedSuccessfully + OrderedTerminalEvent stream without cloud relay.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-025"
+      ],
+      "status": "not-started",
+      "acceptance_criteria": [
+        "Local hub speaks session-sharing-protocol join/initialize dialect for viewers.",
+        "Scrollback snapshot and live PtyBytesRead (and Resize) stream to connected guests.",
+        "Guests are always Role::Reader; WriteToPty/Execute upstream is ignored or rejected.",
+        "Focused tests cover join auth, Reader role, and basic event fan-out."
+      ],
+      "verification": [
+        "cargo test -p warp local_session_share --lib",
+        "./script/format --check"
+      ],
+      "evidence": ""
     }
   ],
   "future_phases": [
@@ -577,6 +620,15 @@
       "phase": "Phase C",
       "scope": [],
       "note": "Phase C complete (feat-009–012, feat-019–024)."
+    },
+    {
+      "phase": "Phase D",
+      "scope": [
+        "feat-026 local LAN share protocol shim (next)",
+        "WASM viewer + WebIntent/boot overrides",
+        "Host UX (palette, banners, mutual exclusion with cloud share)"
+      ],
+      "note": "feat-025 hub done. Next: protocol shim then WASM viewer."
     }
   ]
 }

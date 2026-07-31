@@ -307,7 +307,7 @@ wgpu.workspace = true
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 app-installation-detection.workspace = true
 async-io.workspace = true
-axum.workspace = true
+axum = { workspace = true, features = ["ws"] }
 cloud_object_persistence.workspace = true
 comfy-table = "7.1.4"
 inquire = "0.9.1"
@@ -319,13 +319,14 @@ git2 = { version = "0.20.4", default-features = false, features = [
 ] }
 http_server.workspace = true
 hyper.workspace = true
+if-addrs.workspace = true
 libsqlite3-sys = { version = "0.33.0", features = ["bundled"] }
 mio = { version = "1.1.1", features = ["os-poll", "os-ext"] }
 opentelemetry.workspace = true
 opentelemetry-http.workspace = true
 opentelemetry-otlp.workspace = true
 opentelemetry_sdk.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "macros", "net", "time"] }
 tokio-util.workspace = true
 tracing-opentelemetry.workspace = true
 tracing-subscriber.workspace = true
@@ -448,6 +449,7 @@ repo_metadata = { workspace = true, features = ["test-util"] }
 
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", "time"] }
+tokio-tungstenite.workspace = true
 
 [build-dependencies]
 anyhow = "1.0"

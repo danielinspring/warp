@@ -50,6 +50,8 @@ pub mod keys_settings;
 pub mod ligature_settings;
 mod line_editor_status;
 pub mod links;
+#[cfg(not(target_family = "wasm"))]
+pub mod local_session_share;
 #[cfg(all(not(target_family = "wasm"), feature = "local_tty"))]
 pub mod local_shell;
 #[cfg(feature = "local_tty")]
