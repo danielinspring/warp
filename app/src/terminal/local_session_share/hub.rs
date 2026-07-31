@@ -130,6 +130,30 @@ impl ShareState {
     }
 }
 
+/// Cloneable handle for publishing host PTY/events into an active local share
+/// without holding the [`LocalSessionShareHub`] lock on the TerminalModel path.
+#[derive(Clone)]
+pub struct LocalShareEventPublisher {
+    state: Arc<ShareState>,
+}
+
+impl LocalShareEventPublisher {
+    /// Publishes raw host PTY output to connected guests (LZ4 size-prepended).
+    pub fn publish_pty_bytes(&self, bytes: &[u8]) -> Result<(), HubError> {
+        let compressed = compress_pty_bytes(bytes);
+        self.state
+            .publish_event_type(OrderedTerminalEventType::PtyBytesRead { bytes: compressed })
+    }
+
+    pub fn publish_event(&self, event_type: OrderedTerminalEventType) -> Result<(), HubError> {
+        self.state.publish_event_type(event_type)
+    }
+
+    pub fn set_window_size(&self, size: WindowSize) {
+        self.state.set_window_size(size);
+    }
+}
+
 /// The currently running share for a [`LocalSessionShareHub`], including the
 /// private tokio runtime that drives its axum server. Dropping (or explicitly
 /// tearing down) this struct stops accepting new connections.
@@ -301,17 +325,25 @@ impl LocalSessionShareHub {
         Ok(())
     }
 
+    /// Returns a cloneable publisher for the active share, if any. Used by
+    /// [`TerminalModel`] to fan PTY bytes into the hub without owning the hub.
+    pub fn event_publisher(&self) -> Option<LocalShareEventPublisher> {
+        self.active.as_ref().map(|active| LocalShareEventPublisher {
+            state: active.state.clone(),
+        })
+    }
+
     /// Publishes raw host PTY output to connected guests. Bytes are LZ4
     /// size-prepended to match the cloud sharer path.
     pub fn publish_pty_bytes(&self, bytes: &[u8]) -> Result<(), HubError> {
-        let compressed = compress_pty_bytes(bytes);
-        self.publish_event(OrderedTerminalEventType::PtyBytesRead { bytes: compressed })
+        let publisher = self.event_publisher().ok_or(HubError::NotActive)?;
+        publisher.publish_pty_bytes(bytes)
     }
 
     /// Publishes an ordered terminal event to connected guests.
     pub fn publish_event(&self, event_type: OrderedTerminalEventType) -> Result<(), HubError> {
-        let active = self.active.as_ref().ok_or(HubError::NotActive)?;
-        active.state.publish_event_type(event_type)
+        let publisher = self.event_publisher().ok_or(HubError::NotActive)?;
+        publisher.publish_event(event_type)
     }
 }
 

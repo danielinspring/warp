@@ -6,14 +6,22 @@
 //! without going through Warp cloud. See `specs/local-lan-session-share/`
 //! for the full product and technical specs.
 //!
-//! Host TerminalModel fan-in and share UX land in follow-up work (TECH.md PR4).
+//! Host TerminalModel fan-in and Command Palette UX live in `host.rs`.
 
 mod bind;
+mod host;
 mod hub;
 mod protocol;
 mod secret;
 mod server;
 
 pub use bind::{is_all_interfaces, non_loopback_candidates, BindCandidate};
-pub use hub::{HubError, LocalSessionShareHub, ShareHandle, WASM_BUNDLE_DIR_ENV};
+pub use host::{
+    preferred_bind_ip, HostUxError, LocalLanShareStatus, COPY_LOCAL_SHARE_LINK_TEXT,
+    LOCAL_SHARE_ACTIVE_TOAST, LOCAL_SHARE_BLOCKS_CLOUD_TOAST, LOCAL_SHARE_CLOUD_BLOCK_TOAST,
+    LOCAL_SHARE_START_FAILED_TOAST,
+};
+pub use hub::{
+    HubError, LocalSessionShareHub, LocalShareEventPublisher, ShareHandle, WASM_BUNDLE_DIR_ENV,
+};
 pub use secret::ShareSecret;

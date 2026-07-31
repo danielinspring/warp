@@ -32,6 +32,8 @@ use crate::ai::block_context::BlockContext;
 use crate::global_resource_handles::GlobalResourceHandlesProvider;
 pub(crate) mod docker_sandbox;
 mod link_detection;
+#[cfg(not(target_family = "wasm"))]
+mod local_session_share;
 mod open_in_warp;
 mod pane_impl;
 mod passive_suggestions;
@@ -2720,6 +2722,10 @@ pub struct TerminalView {
     // and [`SharedSessionKind::Viewer`] to store some common struct for common fields.
     shared_session: Option<SharedSessionAdapter>,
 
+    /// Host-local LAN/Tailscale session share hub for this pane (desktop only).
+    #[cfg(not(target_family = "wasm"))]
+    local_session_share_hub: crate::terminal::local_session_share::LocalSessionShareHub,
+
     /// Stashed source from `attempt_to_share_session` so `on_session_share_started`
     /// can decide whether to auto-copy the link vs open the sharing dialog.
     pending_share_source: Option<SharedSessionActionSource>,
@@ -4345,6 +4351,8 @@ impl TerminalView {
             ai_render_context,
             get_relevant_files_controller,
             shared_session: None,
+            #[cfg(not(target_family = "wasm"))]
+            local_session_share_hub: local_session_share::new_hub(),
             pending_share_source: None,
             auto_stop_sharing_on_cli_end: false,
             conversation_ended_tombstone_view_id: None,
@@ -26122,6 +26130,9 @@ impl TypedActionView for TerminalView {
             | VimModeBanner(_)
             | InsertMostRecentCommandCorrection
             | StopSharingCurrentSession { .. }
+            | StartLocalLanShare
+            | StopLocalLanShare
+            | CopyLocalLanShareLink
             | RequestSharedSessionRole(_)
             | OnboardingFlow(_)
             | ImportSettings
@@ -26187,6 +26198,9 @@ impl TypedActionView for TerminalView {
             | OpenShareSessionModal { .. }
             | OpenSharedSessionViewerRoleMenu
             | CopySharedSessionLink { .. }
+            | StartLocalLanShare
+            | StopLocalLanShare
+            | CopyLocalLanShareLink
             | OpenSharedSessionOnDesktop { .. }
             | MakeAllParticipantsReaders { .. }
             | AskAIAssistant { .. }
@@ -26671,6 +26685,18 @@ impl TypedActionView for TerminalView {
                 self.toggle_block_filter_on_selected_or_last_block(*source, ctx);
             }
             CopySharedSessionLink { source } => self.copy_shared_session_link(*source, ctx),
+            StartLocalLanShare => {
+                #[cfg(not(target_family = "wasm"))]
+                self.start_local_lan_share(ctx);
+            }
+            StopLocalLanShare => {
+                #[cfg(not(target_family = "wasm"))]
+                self.stop_local_lan_share(ctx);
+            }
+            CopyLocalLanShareLink => {
+                #[cfg(not(target_family = "wasm"))]
+                self.copy_local_lan_share_link(ctx);
+            }
             ToggleSnackbarInActivePane => self.toggle_snackbar_in_active_pane(ctx),
             MakeAllParticipantsReaders { reason } => {
                 self.make_all_shared_session_participants_readers(*reason, ctx)
@@ -28151,6 +28177,13 @@ impl View for TerminalView {
         context
             .set
             .insert(model_lock.shared_session_status().as_keymap_context());
+
+        #[cfg(not(target_family = "wasm"))]
+        {
+            context
+                .set
+                .insert(model_lock.local_lan_share_status().as_keymap_context());
+        }
 
         #[cfg(feature = "local_fs")]
         {

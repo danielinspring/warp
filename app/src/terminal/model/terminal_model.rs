@@ -496,6 +496,12 @@ pub struct TerminalModel {
     /// the state can technically diverge.
     ordered_terminal_events_for_shared_session_tx: Option<Sender<OrderedTerminalEventType>>,
 
+    /// Publisher into an active local LAN session share hub. Distinct from
+    /// cloud `ordered_terminal_events_for_shared_session_tx` (PRODUCT.md P31).
+    #[cfg(not(target_family = "wasm"))]
+    local_share_event_publisher:
+        Option<crate::terminal::local_session_share::LocalShareEventPublisher>,
+
     /// A sender for write to pty events for a shared session viewer.
     ///
     /// This field is only [`Some`] if this session is shared.
@@ -1081,6 +1087,8 @@ impl TerminalModel {
             is_dummy_cloud_mode_session,
             conversation_transcript_viewer_status: None,
             ordered_terminal_events_for_shared_session_tx: None,
+            #[cfg(not(target_family = "wasm"))]
+            local_share_event_publisher: None,
             write_to_pty_events_for_shared_session_tx: None,
             is_receiving_agent_conversation_replay: false,
             notify_on_end_of_ssh_login: None,
@@ -1236,6 +1244,41 @@ impl TerminalModel {
 
     pub fn clear_ordered_terminal_events_for_shared_session_tx(&mut self) {
         self.ordered_terminal_events_for_shared_session_tx = None;
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub fn set_local_share_event_publisher(
+        &mut self,
+        publisher: crate::terminal::local_session_share::LocalShareEventPublisher,
+    ) {
+        self.local_share_event_publisher = Some(publisher);
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub fn clear_local_share_event_publisher(&mut self) {
+        self.local_share_event_publisher = None;
+    }
+
+    pub fn has_active_local_lan_share(&self) -> bool {
+        #[cfg(not(target_family = "wasm"))]
+        {
+            self.local_share_event_publisher.is_some()
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            false
+        }
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub fn local_lan_share_status(
+        &self,
+    ) -> crate::terminal::local_session_share::LocalLanShareStatus {
+        if self.local_share_event_publisher.is_some() {
+            crate::terminal::local_session_share::LocalLanShareStatus::Active
+        } else {
+            crate::terminal::local_session_share::LocalLanShareStatus::Inactive
+        }
     }
 
     fn ai_metadata_to_protocol(metadata: &AgentInteractionMetadata) -> AICommandMetadata {
@@ -1944,6 +1987,17 @@ impl TerminalModel {
                     },
                 }) {
                     log::warn!("Failed to send OrderedTerminalEventType::Resize: {e}");
+                }
+            }
+            #[cfg(not(target_family = "wasm"))]
+            if let Some(publisher) = &self.local_share_event_publisher {
+                let window_size =
+                    session_sharing_protocol::common::WindowSize { num_rows, num_cols };
+                publisher.set_window_size(window_size);
+                if let Err(e) =
+                    publisher.publish_event(OrderedTerminalEventType::Resize { window_size })
+                {
+                    log::warn!("Failed to publish local LAN share Resize: {e}");
                 }
             }
         }
@@ -3034,6 +3088,15 @@ impl ansi::Handler for TerminalModel {
                     bytes: bytes.to_owned(),
                 }) {
                     log::warn!("Failed to send OrderedTerminalEventType::PtyBytesRead: {e}");
+                }
+            }
+        }
+
+        #[cfg(not(target_family = "wasm"))]
+        if !input.is_synchronized_output_frame() {
+            if let Some(publisher) = &self.local_share_event_publisher {
+                if let Err(e) = publisher.publish_pty_bytes(bytes) {
+                    log::warn!("Failed to publish local LAN share PtyBytesRead: {e}");
                 }
             }
         }

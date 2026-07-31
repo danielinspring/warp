@@ -16084,6 +16084,12 @@ impl View for Input {
         ctx.set
             .insert(model_lock.shared_session_status().as_keymap_context());
 
+        #[cfg(not(target_family = "wasm"))]
+        {
+            ctx.set
+                .insert(model_lock.local_lan_share_status().as_keymap_context());
+        }
+
         if model_lock
             .block_list()
             .active_block()

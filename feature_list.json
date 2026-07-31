@@ -2,7 +2,7 @@
   "roadmap": {
     "name": "Local Ollama Agent Runtime",
     "source": "dan_docs/reports/local_agent_runtime_competitive_gap_report.md",
-      "active_feature": "feat-028",
+      "active_feature": "",
     "status_values": [
       "not-started",
       "in-progress",
@@ -644,7 +644,7 @@
         "feat-026",
         "feat-027"
       ],
-      "status": "in-progress",
+      "status": "done",
       "acceptance_criteria": [
         "Host can start, copy URL, and stop a local LAN share from Command Palette when LocalLanSessionShare is enabled.",
         "Active terminal PTY bytes fan into publish_pty_bytes for joined guests.",
@@ -655,7 +655,7 @@
         "cargo test -p warp local_session_share --lib",
         "./script/format --check"
       ],
-      "evidence": ""
+      "evidence": "2026-07-31: Palette Start/Stop/Copy local network share; TerminalView owns LocalSessionShareHub; TerminalModel LocalShareEventPublisher fans PTY+Resize; cloud share blocked while local active and vice versa. local_session_share: 25 passed; format applied."
     }
   ],
   "future_phases": [
@@ -671,10 +671,8 @@
     },
     {
       "phase": "Phase D",
-      "scope": [
-        "Host UX (palette, banners, TerminalModel fan-in, mutual exclusion with cloud share)"
-      ],
-      "note": "feat-025/026/027 done. Active: feat-028 host UX + TerminalModel fan-in."
+      "scope": [],
+      "note": "Phase D complete (feat-025–028). Optional polish: pane banner/overflow rotate UI."
     }
   ]
 }

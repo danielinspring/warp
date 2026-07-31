@@ -3,19 +3,19 @@
 ## Current State
 
 **Last Updated:** 2026-07-31  
-**Active Feature:** `feat-028` — Local LAN share host UX + TerminalModel fan-in  
-**Status:** In progress (just started)  
+**Active Feature:** (none — Phase D complete)  
+**Status:** Idle  
 
 ## What's Done
 
-- Through feat-027 WASM serve + WebIntent boot.
+- Through feat-028 host UX + TerminalModel fan-in.
+- Phase D (local LAN session share) complete through palette + PTY fan-in + mutual exclusion.
 
-## Verification (feat-027)
+## Verification (feat-028)
 
-- `cargo test -p warp local_session_share --lib`: 24 passed  
-- `cargo test -p warp web_intent --lib`: 4 passed  
-- `./script/format --check`: passed  
+- `cargo test -p warp local_session_share --lib`: 25 passed  
+- `./script/format`: applied  
 
 ## Next
 
-Host UX: Command Palette start/copy/stop, TerminalModel → `publish_pty_bytes`, mutual exclusion with cloud share.
+Optional polish (not required for Phase D done): inline pane banner, overflow menu rotate, richer bind-address picker UI.

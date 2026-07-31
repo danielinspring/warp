@@ -561,6 +561,12 @@ impl TerminalView {
             return;
         }
 
+        #[cfg(not(target_family = "wasm"))]
+        if self.is_local_lan_share_active() {
+            self.toast_local_share_blocks_cloud(ctx);
+            return;
+        }
+
         // Check if we're trying to share without scrollback while agent shared sessions is enabled
         // and there are active conversations. This would break the viewer experience since they
         // wouldn't receive the conversation history they need to continue conversations.

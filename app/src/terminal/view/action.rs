@@ -306,6 +306,12 @@ pub enum TerminalAction {
     CopySharedSessionLink {
         source: SharedSessionActionSource,
     },
+    /// Start (or re-copy) a local LAN / Tailscale session share for this pane.
+    StartLocalLanShare,
+    /// Stop the active local LAN session share on this pane.
+    StopLocalLanShare,
+    /// Copy the current local LAN share URL without rotating the secret.
+    CopyLocalLanShareLink,
     VimModeBanner(VimModeBannerAction),
     ToggleSnackbarInActivePane,
     MakeAllParticipantsReaders {
@@ -636,6 +642,9 @@ impl fmt::Debug for TerminalAction {
             }
             OpenShareSessionModal { source } => write!(f, "OpenShareSessionModal({source:?})"),
             CopySharedSessionLink { .. } => f.write_str("CopySharedSessionLink"),
+            StartLocalLanShare => f.write_str("StartLocalLanShare"),
+            StopLocalLanShare => f.write_str("StopLocalLanShare"),
+            CopyLocalLanShareLink => f.write_str("CopyLocalLanShareLink"),
             VimModeBanner(action) => write!(f, "VimModeBanner({action:?})"),
             ToggleSnackbarInActivePane => write!(f, "ToggleSnackbarInActivePane"),
             MakeAllParticipantsReaders { reason } => {

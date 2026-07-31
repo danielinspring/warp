@@ -953,6 +953,43 @@ pub fn init(app: &mut AppContext) {
         ),
     ]);
 
+    #[cfg(not(target_family = "wasm"))]
+    {
+        use crate::terminal::local_session_share::LocalLanShareStatus;
+
+        app.register_editable_bindings([
+            EditableBinding::new(
+                "terminal:start_local_network_share",
+                "Start local network share",
+                TerminalAction::StartLocalLanShare,
+            )
+            .with_context_predicate(
+                id!("Terminal")
+                    & id!(SharedSessionStatus::NotShared.as_keymap_context())
+                    & id!(LocalLanShareStatus::Inactive.as_keymap_context()),
+            )
+            .with_enabled(|| FeatureFlag::LocalLanSessionShare.is_enabled()),
+            EditableBinding::new(
+                "terminal:stop_local_network_share",
+                "Stop local network share",
+                TerminalAction::StopLocalLanShare,
+            )
+            .with_context_predicate(
+                id!("Terminal") & id!(LocalLanShareStatus::Active.as_keymap_context()),
+            )
+            .with_enabled(|| FeatureFlag::LocalLanSessionShare.is_enabled()),
+            EditableBinding::new(
+                "terminal:copy_local_network_share_link",
+                "Copy local network share link",
+                TerminalAction::CopyLocalLanShareLink,
+            )
+            .with_context_predicate(
+                id!("Terminal") & id!(LocalLanShareStatus::Active.as_keymap_context()),
+            )
+            .with_enabled(|| FeatureFlag::LocalLanSessionShare.is_enabled()),
+        ]);
+    }
+
     app.register_editable_bindings([EditableBinding::new(
         TOGGLE_BLOCK_FILTER_KEYBINDING,
         "Toggle block filter on selected or last block",
