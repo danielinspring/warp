@@ -2,7 +2,8 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use futures_util::{SinkExt, StreamExt};
 use session_sharing_protocol::common::{
-    Role, UserID, WindowSize, WriteToPtyFailureReason, WriteToPtyRequestId, WriteToPtySeqNo,
+    Role, Scrollback, UserID, WindowSize, WriteToPtyFailureReason, WriteToPtyRequestId,
+    WriteToPtySeqNo,
 };
 use session_sharing_protocol::viewer::{DownstreamMessage, InitPayload, UpstreamMessage};
 use tokio_tungstenite::tungstenite::Message;
@@ -281,6 +282,70 @@ fn initialize_receives_joined_successfully_as_reader() {
             .iter()
             .all(|viewer| viewer.role == Role::Reader));
     });
+
+    hub.stop();
+}
+
+#[test]
+fn set_scrollback_is_served_on_join() {
+    use session_sharing_protocol::common::ScrollbackBlock;
+
+    let mut hub = LocalSessionShareHub::new();
+    let handle = hub.start(loopback_ip(), 0).expect("start should succeed");
+    hub.set_scrollback(Scrollback {
+        blocks: vec![ScrollbackBlock {
+            raw: br#"{"kind":"test-block"}"#.to_vec(),
+        }],
+        is_alt_screen_active: true,
+    })
+    .expect("set_scrollback should work while active");
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let (_socket, joined) = join_as_viewer(guest_ws_url(&handle)).await;
+        let DownstreamMessage::JoinedSuccessfully { scrollback, .. } = joined else {
+            panic!("expected JoinedSuccessfully");
+        };
+        assert_eq!(scrollback.blocks.len(), 1);
+        assert_eq!(scrollback.blocks[0].raw, br#"{"kind":"test-block"}"#);
+        assert!(scrollback.is_alt_screen_active);
+    });
+
+    hub.stop();
+}
+
+#[test]
+fn set_scrollback_caps_oversized_snapshot() {
+    use session_sharing_protocol::common::ScrollbackBlock;
+
+    let mut hub = LocalSessionShareHub::new();
+    let _handle = hub.start(loopback_ip(), 0).expect("start should succeed");
+
+    let block_size = 64 * 1024;
+    let block_count = 8;
+    let mut scrollback = Scrollback {
+        blocks: (0..block_count)
+            .map(|i| ScrollbackBlock {
+                raw: vec![b'a' + (i as u8 % 26); block_size],
+            })
+            .collect(),
+        is_alt_screen_active: false,
+    };
+    let original_bytes = scrollback.num_bytes().as_u64();
+    assert!(original_bytes > 200 * 1024);
+
+    // Cap well below the original size; oldest blocks should be dropped.
+    let max_bytes = 200 * 1024;
+    cap_scrollback(&mut scrollback, max_bytes);
+    assert!(scrollback.num_bytes().as_u64() <= max_bytes);
+    assert!(!scrollback.blocks.is_empty());
+    assert!(scrollback.blocks.len() < block_count);
+
+    hub.set_scrollback(scrollback)
+        .expect("capped scrollback should be accepted");
 
     hub.stop();
 }

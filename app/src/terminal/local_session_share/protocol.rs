@@ -9,10 +9,14 @@ use session_sharing_protocol::common::{
 use session_sharing_protocol::sharer::{LegacySessionSourceType, SessionSourceType};
 use session_sharing_protocol::viewer::{DownstreamMessage, UpstreamMessage};
 
-/// Builds a minimal view-only [`DownstreamMessage::JoinedSuccessfully`] for a
-/// newly connected guest (PRODUCT.md P15 — Reader only).
+/// Builds a view-only [`DownstreamMessage::JoinedSuccessfully`] for a newly
+/// connected guest (PRODUCT.md P15 — Reader only). `scrollback` is the host
+/// snapshot taken at share start (PRODUCT.md P20).
 #[allow(deprecated)]
-pub(crate) fn joined_successfully(window_size: WindowSize) -> DownstreamMessage {
+pub(crate) fn joined_successfully(
+    window_size: WindowSize,
+    scrollback: Scrollback,
+) -> DownstreamMessage {
     let viewer_id = ParticipantId::new();
     let input_replica_id = InputReplicaId::from(uuid::Uuid::new_v4().to_string());
     let mut profile = ProfileData::default();
@@ -25,10 +29,7 @@ pub(crate) fn joined_successfully(window_size: WindowSize) -> DownstreamMessage 
     };
 
     DownstreamMessage::JoinedSuccessfully {
-        scrollback: Box::new(Scrollback {
-            blocks: vec![],
-            is_alt_screen_active: false,
-        }),
+        scrollback: Box::new(scrollback),
         active_prompt: ActivePrompt::PS1,
         latest_event_no: None,
         window_size,
@@ -120,10 +121,16 @@ mod tests {
 
     #[test]
     fn joined_successfully_is_reader_with_empty_scrollback() {
-        let msg = joined_successfully(WindowSize {
-            num_rows: 24,
-            num_cols: 80,
-        });
+        let msg = joined_successfully(
+            WindowSize {
+                num_rows: 24,
+                num_cols: 80,
+            },
+            Scrollback {
+                blocks: vec![],
+                is_alt_screen_active: false,
+            },
+        );
         let DownstreamMessage::JoinedSuccessfully {
             scrollback,
             window_size,
@@ -144,6 +151,30 @@ mod tests {
             .present_viewers
             .iter()
             .all(|viewer| viewer.max_acl == Role::Reader));
+    }
+
+    #[test]
+    fn joined_successfully_preserves_provided_scrollback() {
+        use session_sharing_protocol::common::ScrollbackBlock;
+
+        let scrollback = Scrollback {
+            blocks: vec![ScrollbackBlock {
+                raw: br#"{"test":true}"#.to_vec(),
+            }],
+            is_alt_screen_active: true,
+        };
+        let msg = joined_successfully(
+            WindowSize {
+                num_rows: 24,
+                num_cols: 80,
+            },
+            scrollback,
+        );
+        let DownstreamMessage::JoinedSuccessfully { scrollback, .. } = msg else {
+            panic!("expected JoinedSuccessfully");
+        };
+        assert_eq!(scrollback.blocks.len(), 1);
+        assert!(scrollback.is_alt_screen_active);
     }
 
     #[test]

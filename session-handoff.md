@@ -2,7 +2,7 @@
 
 ## Current Objective
 
-Phase D local LAN session share UX polish (feat-029) complete. No further required Phase D work.
+Phase D local LAN session share complete through join scrollback (feat-030). No active harness feature.
 
 ## Last Updated
 
@@ -10,7 +10,7 @@ Phase D local LAN session share UX polish (feat-029) complete. No further requir
 
 ## Active Feature
 
-(none after feat-029 commit)
+(none)
 
 ## Branch
 
@@ -18,14 +18,14 @@ Phase D local LAN session share UX polish (feat-029) complete. No further requir
 
 ## Current State
 
-- **feat-025–028 done:** hub, protocol, WASM/WebIntent, palette + PTY fan-in + mutual exclusion.
-- **feat-029 done:** inline “Local network share active/ended” banners; pane overflow Start/Copy/Rotate/Stop; Command Palette rotate.
+- **feat-025–029 done:** hub, protocol, WASM/WebIntent, host UX, banners/overflow/rotate.
+- **feat-030 done:** host snapshots `SharedSessionScrollbackType::All` into hub at start; guests receive it in `JoinedSuccessfully`; oversized snapshots capped at `LOCAL_SHARE_MAX_SCROLLBACK_BYTES` (10 MiB).
 
-## Verification (feat-029)
+## Verification (feat-030)
 
-- local_session_share: 25 passed  
-- format --check: applied  
+- local_session_share: 28 passed  
+- format --check: passed  
 
 ## Recommended Next Step
 
-Dogfood on desktop with `WARP_LOCAL_SHARE_WASM_DIR`, or optional TECH PR5 agent best-effort / bind-address picker UI.
+Dogfood on desktop with `WARP_LOCAL_SHARE_WASM_DIR`, or optional TECH PR5 (agent best-effort) / bind-address picker UI.

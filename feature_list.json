@@ -678,6 +678,28 @@
         "./script/format --check"
       ],
       "evidence": "2026-07-31: Inline LocalLanShareStart/End banners; pane overflow Start/Copy/Rotate/Stop; palette rotate; rotate copies new URL. local_session_share: 25 passed; format --check passed."
+    },
+    {
+      "id": "feat-030",
+      "name": "Local LAN share join scrollback snapshot",
+      "description": "Snapshot host terminal scrollback at local share start and serve it in JoinedSuccessfully so guests/reconnects get catch-up history (PRODUCT.md P20), with a documented size cap.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-026",
+        "feat-028"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "LocalSessionShareHub stores a Scrollback snapshot settable by the host.",
+        "JoinedSuccessfully includes that scrollback (not always empty).",
+        "Host start snapshots SharedSessionScrollbackType::All (capped/documented).",
+        "Focused unit tests cover non-empty join scrollback and format check passes."
+      ],
+      "verification": [
+        "cargo test -p warp local_session_share --lib",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-31: Hub set_scrollback + JoinedSuccessfully serves snapshot; host start uses SharedSessionScrollbackType::All; LOCAL_SHARE_MAX_SCROLLBACK_BYTES=10MiB with oldest-block capping. local_session_share: 28 passed; format --check passed."
     }
   ],
   "future_phases": [
@@ -694,7 +716,7 @@
     {
       "phase": "Phase D",
       "scope": [],
-      "note": "Phase D complete (feat-025–029). Optional: bind picker UI / agent best-effort (TECH PR5)."
+      "note": "Phase D complete (feat-025–030). Optional: bind picker UI / agent best-effort (TECH PR5)."
     }
   ]
 }

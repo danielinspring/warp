@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
-use session_sharing_protocol::common::{OrderedTerminalEventType, WindowSize};
+use session_sharing_protocol::common::{OrderedTerminalEventType, Scrollback, WindowSize};
 use session_sharing_protocol::viewer::DownstreamMessage;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, oneshot};
@@ -15,6 +15,10 @@ use super::server;
 /// Environment variable consulted when [`LocalSessionShareHub::start`] is
 /// called without an explicit WASM bundle directory.
 pub const WASM_BUNDLE_DIR_ENV: &str = "WARP_LOCAL_SHARE_WASM_DIR";
+
+/// Maximum scrollback snapshot size served to local-share guests on join
+/// (PRODUCT.md P20). Older blocks are dropped from the front when capping.
+pub const LOCAL_SHARE_MAX_SCROLLBACK_BYTES: u64 = 10 * 1024 * 1024;
 
 const EVENT_BROADCAST_CAPACITY: usize = 256;
 
@@ -54,6 +58,7 @@ pub enum HubError {
 pub(crate) struct ShareState {
     secret: RwLock<Option<ShareSecret>>,
     window_size: RwLock<WindowSize>,
+    scrollback: RwLock<Scrollback>,
     next_event_no: AtomicUsize,
     event_tx: broadcast::Sender<String>,
     /// Optional directory containing `index.html`, `wasm/`, and `assets/` for
@@ -67,6 +72,10 @@ impl ShareState {
         Self {
             secret: RwLock::new(Some(secret)),
             window_size: RwLock::new(WindowSize::default()),
+            scrollback: RwLock::new(Scrollback {
+                blocks: vec![],
+                is_alt_screen_active: false,
+            }),
             next_event_no: AtomicUsize::new(0),
             event_tx,
             wasm_bundle_dir,
@@ -111,6 +120,20 @@ impl ShareState {
             .window_size
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = size;
+    }
+
+    pub(crate) fn scrollback(&self) -> Scrollback {
+        self.scrollback
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn set_scrollback(&self, scrollback: Scrollback) {
+        *self
+            .scrollback
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = scrollback;
     }
 
     pub(crate) fn subscribe_events(&self) -> broadcast::Receiver<String> {
@@ -325,6 +348,17 @@ impl LocalSessionShareHub {
         Ok(())
     }
 
+    /// Sets the scrollback snapshot served to guests on
+    /// [`DownstreamMessage::JoinedSuccessfully`]. Oversized snapshots are
+    /// capped by dropping oldest blocks until under
+    /// [`LOCAL_SHARE_MAX_SCROLLBACK_BYTES`] (PRODUCT.md P20).
+    pub fn set_scrollback(&self, mut scrollback: Scrollback) -> Result<(), HubError> {
+        let active = self.active.as_ref().ok_or(HubError::NotActive)?;
+        cap_scrollback(&mut scrollback, LOCAL_SHARE_MAX_SCROLLBACK_BYTES);
+        active.state.set_scrollback(scrollback);
+        Ok(())
+    }
+
     /// Returns a cloneable publisher for the active share, if any. Used by
     /// [`TerminalModel`] to fan PTY bytes into the hub without owning the hub.
     pub fn event_publisher(&self) -> Option<LocalShareEventPublisher> {
@@ -363,6 +397,13 @@ fn build_url(addr: SocketAddr, secret: &ShareSecret) -> String {
 
 fn resolve_wasm_bundle_dir(explicit: Option<PathBuf>) -> Option<PathBuf> {
     explicit.or_else(|| std::env::var_os(WASM_BUNDLE_DIR_ENV).map(PathBuf::from))
+}
+
+/// Drops oldest scrollback blocks until `scrollback` fits under `max_bytes`.
+pub(crate) fn cap_scrollback(scrollback: &mut Scrollback, max_bytes: u64) {
+    while scrollback.num_bytes().as_u64() > max_bytes && !scrollback.blocks.is_empty() {
+        scrollback.blocks.remove(0);
+    }
 }
 
 #[cfg(test)]

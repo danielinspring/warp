@@ -22,6 +22,7 @@ pub use host::{
     LOCAL_SHARE_ROTATED_TOAST, LOCAL_SHARE_START_FAILED_TOAST,
 };
 pub use hub::{
-    HubError, LocalSessionShareHub, LocalShareEventPublisher, ShareHandle, WASM_BUNDLE_DIR_ENV,
+    HubError, LocalSessionShareHub, LocalShareEventPublisher, ShareHandle,
+    LOCAL_SHARE_MAX_SCROLLBACK_BYTES, WASM_BUNDLE_DIR_ENV,
 };
 pub use secret::ShareSecret;

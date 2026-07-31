@@ -134,7 +134,8 @@ async fn handle_socket(socket: WebSocket, state: Arc<ShareState>) {
                         };
                         if !joined {
                             if let UpstreamMessage::Initialize(_) = &message {
-                                let reply = joined_successfully(state.window_size());
+                                let reply =
+                                    joined_successfully(state.window_size(), state.scrollback());
                                 if send_downstream(&mut sink, reply).await.is_err() {
                                     return;
                                 }

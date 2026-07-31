@@ -59,6 +59,14 @@ impl TerminalView {
             log::warn!("Failed to set local LAN share window size: {err}");
         }
 
+        {
+            let scrollback = crate::terminal::shared_session::SharedSessionScrollbackType::All
+                .to_scrollback(&self.model.lock());
+            if let Err(err) = self.local_session_share_hub.set_scrollback(scrollback) {
+                log::warn!("Failed to set local LAN share scrollback: {err}");
+            }
+        }
+
         if let Some(publisher) = self.local_session_share_hub.event_publisher() {
             self.model.lock().set_local_share_event_publisher(publisher);
         }
