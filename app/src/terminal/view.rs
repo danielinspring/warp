@@ -26177,6 +26177,7 @@ impl TypedActionView for TerminalView {
             | InsertMostRecentCommandCorrection
             | StopSharingCurrentSession { .. }
             | StartLocalLanShare
+            | StartLocalLanShareWithBind { .. }
             | StopLocalLanShare
             | CopyLocalLanShareLink
             | RotateLocalLanShareLink
@@ -26246,6 +26247,7 @@ impl TypedActionView for TerminalView {
             | OpenSharedSessionViewerRoleMenu
             | CopySharedSessionLink { .. }
             | StartLocalLanShare
+            | StartLocalLanShareWithBind { .. }
             | StopLocalLanShare
             | CopyLocalLanShareLink
             | RotateLocalLanShareLink
@@ -26736,6 +26738,10 @@ impl TypedActionView for TerminalView {
             StartLocalLanShare => {
                 #[cfg(not(target_family = "wasm"))]
                 self.start_local_lan_share(ctx);
+            }
+            StartLocalLanShareWithBind { bind_ip } => {
+                #[cfg(not(target_family = "wasm"))]
+                self.start_local_lan_share_with_bind(*bind_ip, None, ctx);
             }
             StopLocalLanShare => {
                 #[cfg(not(target_family = "wasm"))]

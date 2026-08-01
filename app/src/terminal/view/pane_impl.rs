@@ -712,14 +712,13 @@ impl BackingView for TerminalView {
                         .into_item(),
                 );
             } else if !shared_session_status.is_sharer_or_viewer() {
-                if !items.is_empty() {
-                    items.push(MenuItem::Separator);
+                let bind_items = Self::local_lan_share_bind_menu_items();
+                if !bind_items.is_empty() {
+                    if !items.is_empty() {
+                        items.push(MenuItem::Separator);
+                    }
+                    items.extend(bind_items);
                 }
-                items.push(
-                    MenuItemFields::new("Start local network share")
-                        .with_on_select_action(TerminalAction::StartLocalLanShare)
-                        .into_item(),
-                );
             }
         }
 

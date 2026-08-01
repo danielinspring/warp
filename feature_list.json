@@ -722,6 +722,28 @@
         "./script/format --check"
       ],
       "evidence": "2026-08-01: fanout_ordered_terminal_event sends AgentResponse/replay/setup/command lifecycle/Resize to local hub when LocalShareEventPublisher is set (independent of cloud ActiveSharer). local_session_share: 29 passed; format --check passed."
+    },
+    {
+      "id": "feat-032",
+      "name": "Local LAN share bind address picker",
+      "description": "Let the host choose a non-loopback LAN/Tailscale bind address (or all-interfaces with warning) when starting a local share (PRODUCT.md P6–P8, P28).",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-028"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "Pane overflow lists per-interface Start actions from non_loopback_candidates.",
+        "All-interfaces (0.0.0.0) is offered with an explicit warning toast.",
+        "Start with no candidates fails clearly; single candidate auto-starts.",
+        "Command Palette Start uses preferred bind (or sole candidate) and reports the chosen interface.",
+        "Focused unit tests and format check pass."
+      ],
+      "verification": [
+        "cargo test -p warp local_session_share --lib",
+        "./script/format --check"
+      ],
+      "evidence": "2026-08-01: Pane overflow lists bind candidates + 0.0.0.0 with warning toast; StartLocalLanShareWithBind; palette resolve_palette_bind_ip with interface toast. local_session_share: 31 passed; format --check passed."
     }
   ],
   "future_phases": [
@@ -738,7 +760,7 @@
     {
       "phase": "Phase D",
       "scope": [],
-      "note": "Phase D complete (feat-025–031). Optional: bind picker UI / dogfood."
+      "note": "Phase D complete (feat-025–032). Next: desktop dogfood."
     }
   ]
 }

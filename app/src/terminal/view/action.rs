@@ -307,7 +307,12 @@ pub enum TerminalAction {
         source: SharedSessionActionSource,
     },
     /// Start (or re-copy) a local LAN / Tailscale session share for this pane.
+    /// Uses the preferred bind address when started from the Command Palette.
     StartLocalLanShare,
+    /// Start a local LAN share bound to a specific interface address.
+    StartLocalLanShareWithBind {
+        bind_ip: std::net::IpAddr,
+    },
     /// Stop the active local LAN session share on this pane.
     StopLocalLanShare,
     /// Copy the current local LAN share URL without rotating the secret.
@@ -645,6 +650,9 @@ impl fmt::Debug for TerminalAction {
             OpenShareSessionModal { source } => write!(f, "OpenShareSessionModal({source:?})"),
             CopySharedSessionLink { .. } => f.write_str("CopySharedSessionLink"),
             StartLocalLanShare => f.write_str("StartLocalLanShare"),
+            StartLocalLanShareWithBind { bind_ip } => {
+                write!(f, "StartLocalLanShareWithBind({bind_ip})")
+            }
             StopLocalLanShare => f.write_str("StopLocalLanShare"),
             CopyLocalLanShareLink => f.write_str("CopyLocalLanShareLink"),
             RotateLocalLanShareLink => f.write_str("RotateLocalLanShareLink"),

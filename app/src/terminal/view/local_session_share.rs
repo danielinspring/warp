@@ -1,21 +1,56 @@
 //! TerminalView host UX for local LAN session share (desktop only).
 
+use std::net::{IpAddr, Ipv4Addr};
+
 use chrono::Local;
 use session_sharing_protocol::common::WindowSize;
 use warpui::clipboard::ClipboardContent;
 use warpui::{SingletonEntity, ViewContext};
 
-use super::{InlineBannerItem, InlineBannerType, SharedSessionBanners, TerminalView};
+use super::{
+    InlineBannerItem, InlineBannerType, SharedSessionBanners, TerminalAction, TerminalView,
+};
 use crate::features::FeatureFlag;
+use crate::menu::{MenuItem, MenuItemFields};
 use crate::terminal::local_session_share::{
-    preferred_bind_ip, LocalSessionShareHub, COPY_LOCAL_SHARE_LINK_TEXT, LOCAL_SHARE_ACTIVE_TOAST,
-    LOCAL_SHARE_BLOCKS_CLOUD_TOAST, LOCAL_SHARE_CLOUD_BLOCK_TOAST, LOCAL_SHARE_ROTATED_TOAST,
-    LOCAL_SHARE_START_FAILED_TOAST,
+    all_interfaces_label, bind_candidate_label, is_all_interfaces, non_loopback_candidates,
+    resolve_palette_bind_ip, LocalSessionShareHub, COPY_LOCAL_SHARE_LINK_TEXT,
+    LOCAL_SHARE_ACTIVE_TOAST, LOCAL_SHARE_ALL_INTERFACES_WARNING, LOCAL_SHARE_BLOCKS_CLOUD_TOAST,
+    LOCAL_SHARE_CLOUD_BLOCK_TOAST, LOCAL_SHARE_ROTATED_TOAST, LOCAL_SHARE_START_FAILED_TOAST,
 };
 use crate::view_components::DismissibleToast;
 
 impl TerminalView {
+    /// Command Palette entry: resolve a bind address and start (or re-copy).
     pub(crate) fn start_local_lan_share(&mut self, ctx: &mut ViewContext<Self>) {
+        if !FeatureFlag::LocalLanSessionShare.is_enabled() {
+            return;
+        }
+
+        if self.local_session_share_hub.is_active() {
+            self.copy_local_lan_share_link(ctx);
+            return;
+        }
+
+        let (bind_ip, label) = match resolve_palette_bind_ip() {
+            Ok(resolved) => resolved,
+            Err(err) => {
+                log::warn!("Local LAN share start failed: {err}");
+                self.show_local_share_toast(LOCAL_SHARE_START_FAILED_TOAST, ctx);
+                return;
+            }
+        };
+
+        self.start_local_lan_share_with_bind(bind_ip, Some(label), ctx);
+    }
+
+    /// Start (or re-copy) using an explicit bind address from the pane menu.
+    pub(crate) fn start_local_lan_share_with_bind(
+        &mut self,
+        bind_ip: IpAddr,
+        bind_label: Option<String>,
+        ctx: &mut ViewContext<Self>,
+    ) {
         if !FeatureFlag::LocalLanSessionShare.is_enabled() {
             return;
         }
@@ -32,15 +67,6 @@ impl TerminalView {
                 return;
             }
         }
-
-        let bind_ip = match preferred_bind_ip() {
-            Ok(ip) => ip,
-            Err(err) => {
-                log::warn!("Local LAN share start failed: {err}");
-                self.show_local_share_toast(LOCAL_SHARE_START_FAILED_TOAST, ctx);
-                return;
-            }
-        };
 
         let handle = match self.local_session_share_hub.start(bind_ip, 0) {
             Ok(handle) => handle,
@@ -75,7 +101,15 @@ impl TerminalView {
 
         ctx.clipboard()
             .write(ClipboardContent::plain_text(handle.url));
-        self.show_local_share_toast(LOCAL_SHARE_ACTIVE_TOAST, ctx);
+
+        if is_all_interfaces(bind_ip) {
+            self.show_local_share_toast(LOCAL_SHARE_ALL_INTERFACES_WARNING, ctx);
+        } else if let Some(label) = bind_label {
+            self.show_local_share_toast(&format!("Local network share active on {label}"), ctx);
+        } else {
+            self.show_local_share_toast(LOCAL_SHARE_ACTIVE_TOAST, ctx);
+        }
+
         self.refresh_local_share_pane_header(ctx);
         ctx.notify();
     }
@@ -114,6 +148,39 @@ impl TerminalView {
                 log::warn!("Failed to rotate local LAN share secret: {err}");
             }
         }
+    }
+
+    /// Pane-overflow menu items to start a share on a chosen interface.
+    pub(crate) fn local_lan_share_bind_menu_items() -> Vec<MenuItem<TerminalAction>> {
+        let mut items = Vec::new();
+        let candidates = non_loopback_candidates();
+        if candidates.is_empty() {
+            return items;
+        }
+
+        items.push(MenuItem::Header {
+            fields: MenuItemFields::new("Start local network share on…"),
+            clickable: false,
+            right_side_fields: None,
+        });
+        for candidate in &candidates {
+            items.push(
+                MenuItemFields::new(bind_candidate_label(candidate))
+                    .with_on_select_action(TerminalAction::StartLocalLanShareWithBind {
+                        bind_ip: candidate.addr,
+                    })
+                    .into_item(),
+            );
+        }
+        items.push(MenuItem::Separator);
+        items.push(
+            MenuItemFields::new(all_interfaces_label())
+                .with_on_select_action(TerminalAction::StartLocalLanShareWithBind {
+                    bind_ip: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                })
+                .into_item(),
+        );
+        items
     }
 
     fn insert_local_lan_share_started_banner(&mut self, ctx: &mut ViewContext<Self>) {
