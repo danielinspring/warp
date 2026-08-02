@@ -2,8 +2,7 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use futures_util::{SinkExt, StreamExt};
 use session_sharing_protocol::common::{
-    Role, Scrollback, UserID, WindowSize, WriteToPtyFailureReason, WriteToPtyRequestId,
-    WriteToPtySeqNo,
+    Role, Scrollback, UserID, WindowSize, WriteToPtyRequestId, WriteToPtySeqNo,
 };
 use session_sharing_protocol::viewer::{DownstreamMessage, InitPayload, UpstreamMessage};
 use tokio_tungstenite::tungstenite::Message;
@@ -275,7 +274,7 @@ fn websocket_upgrade_rejects_wrong_secret() {
 }
 
 #[test]
-fn initialize_receives_joined_successfully_as_reader() {
+fn initialize_receives_joined_successfully_as_executor() {
     let mut hub = LocalSessionShareHub::new();
     hub.set_window_size(WindowSize {
         num_rows: 24,
@@ -311,7 +310,7 @@ fn initialize_receives_joined_successfully_as_reader() {
         assert!(participant_list
             .viewers
             .iter()
-            .all(|viewer| viewer.role == Role::Reader));
+            .all(|viewer| viewer.role == Role::Executor));
     });
 
     hub.stop();
@@ -612,9 +611,63 @@ fn publish_command_started_event_reaches_joined_guest() {
 }
 
 #[test]
-fn write_to_pty_from_guest_is_rejected() {
+fn execute_command_from_guest_is_enqueued_for_host() {
     let mut hub = LocalSessionShareHub::new();
     let handle = hub.start(loopback_ip(), 0).expect("start should succeed");
+    let guest_rx = hub
+        .take_guest_request_receiver()
+        .expect("guest request receiver");
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let (mut socket, _) = join_as_viewer(guest_ws_url(&handle)).await;
+
+        let request = UpstreamMessage::ExecuteCommand {
+            buffer_id: session_sharing_protocol::common::BufferId::from("buf".to_string()),
+            command: "echo from-guest".to_string(),
+        };
+        socket
+            .send(Message::Text(request.to_json().unwrap().into()))
+            .await
+            .expect("execute request should send");
+
+        let message = socket
+            .next()
+            .await
+            .expect("hub should ack")
+            .expect("ack should not error");
+        let Message::Text(text) = message else {
+            panic!("expected text InFlight ack, got {message:?}");
+        };
+        assert!(matches!(
+            DownstreamMessage::from_json(text.as_ref()).unwrap(),
+            DownstreamMessage::CommandExecutionRequestInFlight(_)
+        ));
+    });
+
+    let request = guest_rx
+        .try_recv()
+        .expect("host should receive the guest ExecuteCommand");
+    match request {
+        LocalShareGuestRequest::ExecuteCommand { command, .. } => {
+            assert_eq!(command, "echo from-guest");
+        }
+        other => panic!("unexpected guest request: {other:?}"),
+    }
+
+    hub.stop();
+}
+
+#[test]
+fn write_to_pty_from_guest_is_enqueued_for_host() {
+    let mut hub = LocalSessionShareHub::new();
+    let handle = hub.start(loopback_ip(), 0).expect("start should succeed");
+    let guest_rx = hub
+        .take_guest_request_receiver()
+        .expect("guest request receiver");
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -628,28 +681,26 @@ fn write_to_pty_from_guest_is_rejected() {
                 participant_id: session_sharing_protocol::common::ParticipantId::new(),
                 op_no: WriteToPtySeqNo::zero(),
             },
-            bytes: b"intrusion".to_vec(),
+            bytes: b"guest-bytes".to_vec(),
         };
         socket
             .send(Message::Text(request.to_json().unwrap().into()))
             .await
             .expect("write request should send");
 
-        let message = socket
-            .next()
-            .await
-            .expect("hub should reply")
-            .expect("reply should not error");
-        let Message::Text(text) = message else {
-            panic!("expected text failure, got {message:?}");
-        };
-        assert!(matches!(
-            DownstreamMessage::from_json(text.as_ref()).unwrap(),
-            DownstreamMessage::WriteToPtyRequestFailed {
-                reason: WriteToPtyFailureReason::InsufficientPermissions
-            }
-        ));
+        // WriteToPty has no ack; give the WS handler a moment to enqueue.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     });
+
+    let request = guest_rx
+        .try_recv()
+        .expect("host should receive the guest WriteToPty");
+    match request {
+        LocalShareGuestRequest::WriteToPty { bytes, .. } => {
+            assert_eq!(bytes, b"guest-bytes");
+        }
+        other => panic!("unexpected guest request: {other:?}"),
+    }
 
     hub.stop();
 }

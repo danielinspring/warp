@@ -12,7 +12,7 @@ use session_sharing_protocol::viewer::{DownstreamMessage, UpstreamMessage};
 use tower_http::services::ServeDir;
 
 use super::hub::{typed_input_message_json, ShareState};
-use super::protocol::{joined_successfully, reply_for_upstream};
+use super::protocol::{handle_upstream, joined_successfully, UpstreamDisposition};
 
 /// Guest page served when no Warp WASM bundle is staged. Speaks the real
 /// session-sharing-protocol WS dialect and rebuilds Warp's block UI in the
@@ -119,14 +119,15 @@ async fn handle_socket(socket: WebSocket, state: Arc<ShareState>) {
     // Join phase: nothing is streamed to a guest before it identifies itself,
     // so subscribing only once `Initialize` arrives loses nothing — and lets
     // the backlog snapshot and the subscription be taken atomically.
-    let mut events = loop {
+    let (mut events, viewer_id) = loop {
         match stream.next().await {
             Some(Ok(Message::Text(text))) => {
                 let Ok(UpstreamMessage::Initialize(_)) = UpstreamMessage::from_json(text.as_ref())
                 else {
                     continue;
                 };
-                let reply = joined_successfully(state.window_size(), state.scrollback());
+                let (reply, viewer_id) =
+                    joined_successfully(state.window_size(), state.scrollback());
                 if send_downstream(&mut sink, reply).await.is_err() {
                     return;
                 }
@@ -143,7 +144,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<ShareState>) {
                         return;
                     }
                 }
-                break events;
+                break (events, viewer_id);
             }
             Some(Ok(Message::Ping(payload))) => {
                 if sink.send(Message::Pong(payload)).await.is_err() {
@@ -164,9 +165,22 @@ async fn handle_socket(socket: WebSocket, state: Arc<ShareState>) {
                         let Ok(message) = UpstreamMessage::from_json(text.as_ref()) else {
                             continue;
                         };
-                        if let Some(reply) = reply_for_upstream(message) {
-                            if send_downstream(&mut sink, reply).await.is_err() {
-                                return;
+                        match handle_upstream(message, &viewer_id) {
+                            UpstreamDisposition::Ignore => {}
+                            UpstreamDisposition::Reply(reply) => {
+                                if send_downstream(&mut sink, reply).await.is_err() {
+                                    return;
+                                }
+                            }
+                            UpstreamDisposition::GuestRequest { request, ack } => {
+                                if let Err(err) = state.enqueue_guest_request(request) {
+                                    log::warn!("Failed to enqueue local-share guest request: {err}");
+                                }
+                                if let Some(ack) = ack {
+                                    if send_downstream(&mut sink, ack).await.is_err() {
+                                        return;
+                                    }
+                                }
                             }
                         }
                     }

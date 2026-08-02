@@ -12,7 +12,7 @@ const html = fs.readFileSync(path.join(__dirname, "lite_viewer.html"), "utf8");
 let script = /<script>([\s\S]*)<\/script>/.exec(html)[1];
 script = script.replace(
   "boot();",
-  "globalThis.__exports = { Screen: Screen, Terminal: Terminal, renderLineHtml: renderLineHtml, session: session, terminal: terminal, render: render, styleCss: styleCss, history: history, view: view, ingestScrollback: ingestScrollback, loadOlderHistory: loadOlderHistory, INITIAL_VISIBLE_BLOCKS: INITIAL_VISIBLE_BLOCKS, HISTORY_PAGE_SIZE: HISTORY_PAGE_SIZE, blocksEl: blocksEl };"
+  "globalThis.__exports = { Screen: Screen, Terminal: Terminal, renderLineHtml: renderLineHtml, session: session, terminal: terminal, render: render, styleCss: styleCss, history: history, view: view, ingestScrollback: ingestScrollback, loadOlderHistory: loadOlderHistory, INITIAL_VISIBLE_BLOCKS: INITIAL_VISIBLE_BLOCKS, HISTORY_PAGE_SIZE: HISTORY_PAGE_SIZE, blocksEl: blocksEl, sendExecuteCommand: sendExecuteCommand, sendWriteToPty: sendWriteToPty, transport: transport, submitGuestCommand: submitGuestCommand };"
 );
 
 function makeEl(tag) {
@@ -78,10 +78,21 @@ function makeEl(tag) {
       (this.listeners[type] || []).forEach((handler) => handler(event || {}));
     },
     select() {},
+    blur() {},
+    focus() {},
     getBoundingClientRect() {
       return { width: 600, height: 400 };
     },
   };
+  Object.defineProperty(el, "contentEditable", {
+    get() {
+      return this._contentEditable || "inherit";
+    },
+    set(v) {
+      this._contentEditable = String(v);
+    },
+    configurable: true,
+  });
   return el;
 }
 
@@ -94,6 +105,7 @@ const document = {
     return byId[id];
   },
   execCommand() {},
+  addEventListener() {},
 };
 
 const sandbox = {
@@ -125,12 +137,21 @@ const sandbox = {
   globalThis: null,
   addEventListener() {},
 };
+sandbox.WebSocket.OPEN = 1;
+sandbox.WebSocket.CLOSED = 3;
 sandbox.window = sandbox;
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
 vm.runInContext(script, sandbox);
 
-const { Screen, Terminal, renderLineHtml } = sandbox.__exports;
+const {
+  Screen,
+  Terminal,
+  renderLineHtml,
+  sendExecuteCommand,
+  sendWriteToPty,
+  transport,
+} = sandbox.__exports;
 
 /* --------------------------------------------------------------------- */
 
@@ -312,6 +333,35 @@ function driver(rows, cols) {
     (css) => css.indexOf("line-through") !== -1
   );
   check("SGR strikethrough still emits CSS", hasStrike, true);
+}
+
+// Guest execute / write-to-pty payloads.
+{
+  const sent = [];
+  transport.ws = {
+    readyState: 1, // OPEN
+    send(payload) {
+      sent.push(JSON.parse(payload));
+    },
+  };
+  transport.viewerId = "viewer-1";
+  transport.ptySeq = 0;
+  transport.bufferId = null;
+
+  check("ExecuteCommand refuses without buffer id", sendExecuteCommand("x"), false);
+  transport.bufferId = "buf-1";
+  check("ExecuteCommand sends when connected", sendExecuteCommand("echo hi"), true);
+  check("ExecuteCommand payload shape", sent[0], {
+    ExecuteCommand: { buffer_id: "buf-1", command: "echo hi" },
+  });
+
+  check("WriteToPty sends raw bytes", sendWriteToPty([0x0d, 0x41]), true);
+  check("WriteToPty payload shape", sent[1], {
+    WriteToPty: {
+      request_id: { participant_id: "viewer-1", op_no: 0 },
+      bytes: [13, 65],
+    },
+  });
 }
 
 // History pagination: mount a short tail, then page older blocks on demand.

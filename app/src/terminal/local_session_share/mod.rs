@@ -27,4 +27,5 @@ pub use hub::{
     HubError, LocalSessionShareHub, LocalShareEventPublisher, ShareHandle,
     LOCAL_SHARE_MAX_SCROLLBACK_BYTES, WASM_BUNDLE_DIR_ENV,
 };
+pub use protocol::LocalShareGuestRequest;
 pub use secret::ShareSecret;

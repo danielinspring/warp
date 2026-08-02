@@ -9,7 +9,7 @@ use session_sharing_protocol::viewer::DownstreamMessage;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, oneshot};
 
-use super::protocol::{compress_pty_bytes, ordered_event_downstream};
+use super::protocol::{compress_pty_bytes, ordered_event_downstream, LocalShareGuestRequest};
 use super::secret::ShareSecret;
 use super::server;
 
@@ -101,13 +101,19 @@ pub(crate) struct ShareState {
     next_event_no: AtomicUsize,
     event_tx: broadcast::Sender<String>,
     replay: Mutex<ReplayLog>,
+    /// Guest → host mutating requests (execute / write-to-pty).
+    guest_tx: async_channel::Sender<LocalShareGuestRequest>,
     /// Optional directory containing `index.html`, `wasm/`, and `assets/` for
     /// serving the Warp WASM viewer over the share URL.
     wasm_bundle_dir: Option<PathBuf>,
 }
 
 impl ShareState {
-    fn new(secret: ShareSecret, wasm_bundle_dir: Option<PathBuf>) -> Self {
+    fn new(
+        secret: ShareSecret,
+        wasm_bundle_dir: Option<PathBuf>,
+        guest_tx: async_channel::Sender<LocalShareGuestRequest>,
+    ) -> Self {
         let (event_tx, _) = broadcast::channel(EVENT_BROADCAST_CAPACITY);
         Self {
             secret: RwLock::new(Some(secret)),
@@ -119,6 +125,7 @@ impl ShareState {
             next_event_no: AtomicUsize::new(0),
             event_tx,
             replay: Mutex::new(ReplayLog::default()),
+            guest_tx,
             wasm_bundle_dir,
         }
     }
@@ -203,6 +210,17 @@ impl ShareState {
         (backlog, typed_input, events)
     }
 
+    /// Forwards a guest mutating request to the host pane. Fails only if the
+    /// host has already stopped listening (share ending).
+    pub(crate) fn enqueue_guest_request(
+        &self,
+        request: LocalShareGuestRequest,
+    ) -> Result<(), HubError> {
+        self.guest_tx
+            .try_send(request)
+            .map_err(|_| HubError::NotActive)
+    }
+
     fn publish_downstream(&self, message: DownstreamMessage) -> Result<(), HubError> {
         let json = message.to_json().map_err(HubError::Serialize)?;
         let mut replay = self
@@ -285,6 +303,9 @@ struct ActiveShare {
     state: Arc<ShareState>,
     addr: SocketAddr,
     secret: ShareSecret,
+    /// Receiver for guest execute / write-to-pty requests. Taken once by the
+    /// host TerminalView when the share starts.
+    guest_rx: Option<async_channel::Receiver<LocalShareGuestRequest>>,
     /// The tokio runtime driving the axum server for this share. We use a
     /// private runtime per hub, mirroring `crates/http_server`, because the
     /// local session share hub must be independently start/stoppable and is
@@ -379,7 +400,8 @@ impl LocalSessionShareHub {
             );
         }
         let secret = ShareSecret::generate();
-        let state = Arc::new(ShareState::new(secret.clone(), wasm_bundle_dir));
+        let (guest_tx, guest_rx) = async_channel::unbounded();
+        let state = Arc::new(ShareState::new(secret.clone(), wasm_bundle_dir, guest_tx));
         let router = server::build_router(state.clone());
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
 
@@ -413,6 +435,7 @@ impl LocalSessionShareHub {
             state,
             addr,
             secret,
+            guest_rx: Some(guest_rx),
             runtime,
             shutdown: shutdown_tx,
         });
@@ -477,6 +500,14 @@ impl LocalSessionShareHub {
         self.active.as_ref().map(|active| LocalShareEventPublisher {
             state: active.state.clone(),
         })
+    }
+
+    /// Takes the guest-request receiver for this share. Call once after
+    /// [`Self::start`] so the host pane can apply ExecuteCommand / WriteToPty.
+    pub fn take_guest_request_receiver(
+        &mut self,
+    ) -> Option<async_channel::Receiver<LocalShareGuestRequest>> {
+        self.active.as_mut()?.guest_rx.take()
     }
 
     /// Publishes raw host PTY output to connected guests. Bytes are LZ4

@@ -957,6 +957,33 @@
         "./script/format --check"
       ],
       "evidence": "2026-08-02: ingestScrollback keeps full serialized scrollback in history.older and mounts only the newest 3; loadOlderHistory prepends 5 on scroll-up with scroll-anchor preservation; marker updates until beginning. lite_viewer_tests.js: 32 checks passed including pagination (initial 3 of 12, +5, drain to start, chronological order). Follow-up: the guest showed nothing because the snapshot had only 1 block \u2014 SharedSessionScrollbackType::All excludes restored blocks, and after an app restart the host's visible history is entirely restored blocks. Added shared_session::local_share_scrollback, which keeps every non-hidden block (restored included) because a local share mirrors this window rather than replaying a cloud session. New test local_share_scrollback_includes_restored_blocks; cargo test -p warp scrollback --lib: 29 passed. Follow-up 2: scroll events only fire when the pane overflows, so with only 3 short blocks mounted the guest could never page. Added a wheel handler (deltaY<0 at scrollTop 0, throttled to one page per 120ms) and made the marker a clickable 'load N older blocks (M left)' control for touch/keyboard. lite_viewer_tests.js: 34 checks passed, including wheel-up and marker-click paging against a 30-block history."
+    },
+    {
+      "id": "feat-042",
+      "name": "Local share guest command execution",
+      "description": "Allow local-share browser guests to run commands on the host (not view-only): type at the prompt and Enter to ExecuteCommand, and send WriteToPty keys while alt-screen or long-running commands are active.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-035",
+        "feat-038",
+        "feat-039"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "Guests join as Role::Executor and the lite viewer footer is contenteditable at the host prompt.",
+        "Enter on the guest sends UpstreamMessage::ExecuteCommand; the hub enqueues LocalShareGuestRequest and acks CommandExecutionRequestInFlight.",
+        "Host TerminalView applies ExecuteCommand via try_execute_command_on_behalf_of_shared_session_participant when idle.",
+        "Guest keystrokes in alt-screen (and WriteToPty for long-running) are forwarded to the host PTY; idle-prompt WriteToPty is ignored.",
+        "Agent prompts and control actions remain rejected.",
+        "Host toasts disclose that link holders can run commands.",
+        "Focused hub/protocol tests, lite_viewer harness, and format check pass."
+      ],
+      "verification": [
+        "cargo test -p warp local_session_share --lib",
+        "node app/src/terminal/local_session_share/lite_viewer_tests.js",
+        "./script/format --check"
+      ],
+      "evidence": "2026-08-02: Guests join as Role::Executor. handle_upstream forwards ExecuteCommand/WriteToPty as LocalShareGuestRequest (agent/control still rejected). Hub guest_tx/rx reverse channel; TerminalView listen_for_local_share_guest_requests applies ExecuteCommand via try_execute_command_on_behalf_of_shared_session_participant and WriteToPty when alt-screen or long-running. Lite viewer: contenteditable #typed, Enter\to ExecuteCommand, alt-screen keydown\to WriteToPty; pill shows interactive; toasts disclose execute. cargo test -p warp local_session_share --lib: 37 passed. lite_viewer_tests.js: 39 checks passed. ./script/format --check passed."
     }
   ],
   "future_phases": [
@@ -973,7 +1000,7 @@
     {
       "phase": "Phase D",
       "scope": [],
-      "note": "Phase D complete through feat-035 (block-based local share guest viewer)."
+      "note": "Phase D complete through feat-042 (local share guest command execution)."
     }
   ]
 }

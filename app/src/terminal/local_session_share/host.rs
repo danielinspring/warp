@@ -8,9 +8,9 @@ use super::bind::{non_loopback_candidates, BindCandidate};
 
 pub const COPY_LOCAL_SHARE_LINK_TEXT: &str = "Local share link copied";
 pub const LOCAL_SHARE_ACTIVE_TOAST: &str =
-    "Local network share active — anyone with the link on this network can view";
+    "Local network share active — anyone with the link on this network can view and run commands";
 pub const LOCAL_SHARE_LITE_VIEWER_TOAST: &str =
-    "Local network share active — guests see a read-only block view of this session";
+    "Local network share active — guests can view this session and run commands from the browser";
 pub const LOCAL_SHARE_START_FAILED_TOAST: &str = "Could not start local network share";
 pub const LOCAL_SHARE_CLOUD_BLOCK_TOAST: &str =
     "Stop cloud session sharing before starting a local network share";
@@ -19,7 +19,7 @@ pub const LOCAL_SHARE_BLOCKS_CLOUD_TOAST: &str =
 pub const LOCAL_SHARE_ROTATED_TOAST: &str =
     "Local share link rotated — previous guests must use the new link";
 pub const LOCAL_SHARE_ALL_INTERFACES_WARNING: &str =
-    "Bound on all interfaces — anyone on any reachable network with the link can view this session";
+    "Bound on all interfaces — anyone on any reachable network with the link can view and run commands in this session";
 
 /// Keymap / palette gating for whether this pane has an active local share.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

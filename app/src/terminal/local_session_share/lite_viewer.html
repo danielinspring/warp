@@ -331,6 +331,15 @@
         white-space: pre-wrap;
         word-break: break-word;
         font-weight: 600;
+        color: var(--fg);
+        outline: none;
+        min-width: 1ch;
+      }
+      #typed[contenteditable="true"]:empty::before {
+        content: "";
+      }
+      #typed[contenteditable="false"] {
+        color: var(--muted);
       }
 
       #jump {
@@ -424,7 +433,7 @@
       <span class="grow"></span>
       <span class="pill hidden" id="mode">full-screen app</span>
       <span class="pill" id="size"></span>
-      <span class="pill">view-only</span>
+      <span class="pill" id="acl">interactive</span>
     </div>
 
     <div id="blocks"></div>
@@ -448,7 +457,16 @@
 
     <div id="footer" class="hidden">
       <div id="prompt"></div>
-      <span id="input"><span id="typed"></span><span id="caret"></span></span>
+      <span id="input"
+        ><span
+          id="typed"
+          contenteditable="true"
+          spellcheck="false"
+          role="textbox"
+          aria-label="Command input"
+        ></span
+        ><span id="caret"></span
+      ></span>
     </div>
 
     <button id="jump" type="button">↓ Jump to live</button>
@@ -2032,7 +2050,7 @@
           var buffer = session.promptBuffer;
           var atPrompt = session.state === "prompt";
           var hasPrompt = atPrompt && !buffer.isEmpty();
-          var hasTyped = session.typedInput.length > 0;
+          var hasTyped = session.typedInput.length > 0 || session.editing;
           if (!atPrompt && !hasTyped) {
             footerEl.className = "hidden";
             return;
@@ -2043,7 +2061,10 @@
           } else {
             promptEl.textContent = "";
           }
-          typedEl.textContent = session.typedInput;
+          if (!session.editing && typedEl.textContent !== session.typedInput) {
+            typedEl.textContent = session.typedInput;
+          }
+          typedEl.contentEditable = atPrompt && !session.altScreen ? "true" : "false";
           // The prompt renders as one block element per row, so the typed text
           // has to live inside the last row to continue on the same line as the
           // prompt instead of wrapping onto its own. Re-parent on every pass:
@@ -2110,6 +2131,16 @@
           screen: new Screen(24, 80),
           hooksSeen: false,
           typedInput: "",
+          // Guest-owned draft. Host LocalShareTypedInput only wins when the
+          // guest is not actively editing.
+          editing: false,
+        };
+
+        var transport = {
+          ws: null,
+          viewerId: null,
+          bufferId: null,
+          ptySeq: 0,
         };
 
         function currentBlock() {
@@ -2137,6 +2168,8 @@
           session.current = appendBlock(block);
           session.state = "running";
           session.typedInput = "";
+          session.editing = false;
+          typedEl.textContent = "";
           scheduleRender();
         }
 
@@ -2203,6 +2236,8 @@
           if (enabled) {
             session.screen.reset();
             fitScreen();
+            session.editing = false;
+            typedEl.blur();
           } else {
             screenEl.textContent = "";
             var block = session.current;
@@ -2424,12 +2459,108 @@
         var closedByServer = false;
         var retryDelay = 1000;
 
+        function sendJson(payload) {
+          if (!transport.ws || transport.ws.readyState !== WebSocket.OPEN) return false;
+          transport.ws.send(JSON.stringify(payload));
+          return true;
+        }
+
+        function sendExecuteCommand(command) {
+          if (!transport.bufferId) return false;
+          return sendJson({
+            ExecuteCommand: {
+              buffer_id: transport.bufferId,
+              command: command,
+            },
+          });
+        }
+
+        function sendWriteToPty(bytes) {
+          if (!transport.viewerId) return false;
+          var seq = transport.ptySeq++;
+          return sendJson({
+            WriteToPty: {
+              request_id: {
+                participant_id: transport.viewerId,
+                op_no: seq,
+              },
+              // serde for Vec<u8> accepts a number array.
+              bytes: Array.from(bytes),
+            },
+          });
+        }
+
+        function submitGuestCommand() {
+          var command = typedEl.textContent || "";
+          // contenteditable can insert NBSP / newlines; normalize to shell text.
+          command = command.replace(/\u00a0/g, " ").replace(/\n/g, "");
+          session.editing = false;
+          session.typedInput = "";
+          typedEl.textContent = "";
+          if (!sendExecuteCommand(command)) {
+            console.warn("could not send ExecuteCommand");
+          }
+          scheduleRender();
+        }
+
+        typedEl.addEventListener("focus", function () {
+          session.editing = true;
+        });
+        typedEl.addEventListener("blur", function () {
+          session.editing = false;
+          session.typedInput = typedEl.textContent || "";
+        });
+        typedEl.addEventListener("keydown", function (event) {
+          if (event.key === "Enter" && !event.shiftKey) {
+            event.preventDefault();
+            submitGuestCommand();
+          }
+        });
+        typedEl.addEventListener("input", function () {
+          session.editing = true;
+          session.typedInput = typedEl.textContent || "";
+        });
+
+        // Alt-screen / long-running apps need raw keystrokes on the host PTY.
+        document.addEventListener("keydown", function (event) {
+          if (!session.altScreen) return;
+          if (event.metaKey || event.ctrlKey || event.altKey) {
+            // Pass through a few common control chords.
+            if (event.ctrlKey && !event.metaKey && !event.altKey) {
+              var code = event.key.toLowerCase().charCodeAt(0);
+              if (code >= 97 && code <= 122) {
+                event.preventDefault();
+                sendWriteToPty([code - 96]);
+              }
+            }
+            return;
+          }
+          var bytes = null;
+          if (event.key === "Enter") bytes = [0x0d];
+          else if (event.key === "Backspace") bytes = [0x7f];
+          else if (event.key === "Tab") bytes = [0x09];
+          else if (event.key === "Escape") bytes = [0x1b];
+          else if (event.key === "ArrowUp") bytes = [0x1b, 0x5b, 0x41];
+          else if (event.key === "ArrowDown") bytes = [0x1b, 0x5b, 0x42];
+          else if (event.key === "ArrowRight") bytes = [0x1b, 0x5b, 0x43];
+          else if (event.key === "ArrowLeft") bytes = [0x1b, 0x5b, 0x44];
+          else if (event.key.length === 1) {
+            bytes = Array.from(new TextEncoder().encode(event.key));
+          }
+          if (!bytes) return;
+          event.preventDefault();
+          sendWriteToPty(bytes);
+        });
+
         function handleMessage(msg) {
           if (msg.LocalShareTypedInput) {
-            session.typedInput =
-              typeof msg.LocalShareTypedInput.text === "string"
-                ? msg.LocalShareTypedInput.text
-                : "";
+            // Don't clobber in-progress guest typing.
+            if (!session.editing) {
+              session.typedInput =
+                typeof msg.LocalShareTypedInput.text === "string"
+                  ? msg.LocalShareTypedInput.text
+                  : "";
+            }
             // Host typing implies the session is at the input editor even if we
             // have not yet seen a Precmd hook (e.g. joined mid-prompt).
             if (session.state !== "running") session.state = "prompt";
@@ -2443,6 +2574,8 @@
             setSize(size.num_cols, size.num_rows);
             setStatus("live", "ok");
             retryDelay = 1000;
+            transport.viewerId = joined.viewer_id || transport.viewerId;
+            transport.bufferId = joined.init_block_id || transport.bufferId;
             if (!joinedOnce) {
               joinedOnce = true;
               var totalHistory =
@@ -2521,6 +2654,9 @@
 
           if (event.CommandExecutionFinished && !session.hooksSeen) {
             finishCommandBlock(null);
+            if (event.CommandExecutionFinished.next_block_id) {
+              transport.bufferId = event.CommandExecutionFinished.next_block_id;
+            }
             return;
           }
 
@@ -2534,6 +2670,7 @@
 
         function connect(wsUrl) {
           var ws = new WebSocket(wsUrl);
+          transport.ws = ws;
 
           ws.addEventListener("open", function () {
             setStatus("joining…");

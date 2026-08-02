@@ -14,10 +14,10 @@ use crate::features::FeatureFlag;
 use crate::menu::{MenuItem, MenuItemFields};
 use crate::terminal::local_session_share::{
     all_interfaces_label, bind_candidate_label, is_all_interfaces, non_loopback_candidates,
-    resolve_palette_bind_ip, LocalSessionShareHub, COPY_LOCAL_SHARE_LINK_TEXT,
-    LOCAL_SHARE_ACTIVE_TOAST, LOCAL_SHARE_ALL_INTERFACES_WARNING, LOCAL_SHARE_BLOCKS_CLOUD_TOAST,
-    LOCAL_SHARE_CLOUD_BLOCK_TOAST, LOCAL_SHARE_LITE_VIEWER_TOAST, LOCAL_SHARE_ROTATED_TOAST,
-    LOCAL_SHARE_START_FAILED_TOAST,
+    resolve_palette_bind_ip, LocalSessionShareHub, LocalShareGuestRequest,
+    COPY_LOCAL_SHARE_LINK_TEXT, LOCAL_SHARE_ACTIVE_TOAST, LOCAL_SHARE_ALL_INTERFACES_WARNING,
+    LOCAL_SHARE_BLOCKS_CLOUD_TOAST, LOCAL_SHARE_CLOUD_BLOCK_TOAST, LOCAL_SHARE_LITE_VIEWER_TOAST,
+    LOCAL_SHARE_ROTATED_TOAST, LOCAL_SHARE_START_FAILED_TOAST,
 };
 use crate::view_components::DismissibleToast;
 
@@ -103,6 +103,10 @@ impl TerminalView {
 
         if let Some(publisher) = self.local_session_share_hub.event_publisher() {
             self.model.lock().set_local_share_event_publisher(publisher);
+        }
+
+        if let Some(guest_rx) = self.local_session_share_hub.take_guest_request_receiver() {
+            self.listen_for_local_share_guest_requests(guest_rx, ctx);
         }
 
         // Mirror whatever is already in the input editor so a guest that joins
@@ -290,6 +294,80 @@ impl TerminalView {
         let text = self.input().as_ref(ctx).buffer_text(ctx);
         if let Err(err) = publisher.publish_typed_input(text) {
             log::warn!("Failed to publish local LAN share typed input: {err}");
+        }
+    }
+
+    /// Spawns a recursive listener that applies guest ExecuteCommand / WriteToPty
+    /// requests on the UI thread. Ends when the share stops and the channel closes.
+    fn listen_for_local_share_guest_requests(
+        &mut self,
+        guest_rx: async_channel::Receiver<LocalShareGuestRequest>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let next_rx = guest_rx.clone();
+        ctx.spawn(
+            async move { guest_rx.recv().await },
+            move |me, result, ctx| {
+                let Ok(request) = result else {
+                    return;
+                };
+                me.apply_local_share_guest_request(request, ctx);
+                me.listen_for_local_share_guest_requests(next_rx, ctx);
+            },
+        );
+    }
+
+    fn apply_local_share_guest_request(
+        &mut self,
+        request: LocalShareGuestRequest,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if !self.local_session_share_hub.is_active() {
+            return;
+        }
+        match request {
+            LocalShareGuestRequest::ExecuteCommand {
+                participant_id,
+                command,
+            } => {
+                let is_long_running = self
+                    .model
+                    .lock()
+                    .block_list()
+                    .active_block()
+                    .is_active_and_long_running();
+                if is_long_running {
+                    log::info!(
+                        "Ignoring local-share ExecuteCommand while a long-running command is active"
+                    );
+                    return;
+                }
+                self.input().update(ctx, |input, ctx| {
+                    input.try_execute_command_on_behalf_of_shared_session_participant(
+                        &command,
+                        participant_id,
+                        false,
+                        ctx,
+                    );
+                });
+            }
+            LocalShareGuestRequest::WriteToPty { bytes, .. } => {
+                let allow_write = {
+                    let model = self.model.lock();
+                    model.is_alt_screen_active()
+                        || model
+                            .block_list()
+                            .active_block()
+                            .is_active_and_long_running()
+                };
+                if !allow_write {
+                    log::info!(
+                        "Ignoring local-share WriteToPty while the host is at an idle prompt"
+                    );
+                    return;
+                }
+                self.write_viewer_bytes_to_pty(bytes, ctx);
+            }
         }
     }
 
