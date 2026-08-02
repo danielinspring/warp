@@ -12,7 +12,7 @@ const html = fs.readFileSync(path.join(__dirname, "lite_viewer.html"), "utf8");
 let script = /<script>([\s\S]*)<\/script>/.exec(html)[1];
 script = script.replace(
   "boot();",
-  "globalThis.__exports = { Screen: Screen, Terminal: Terminal, renderLineHtml: renderLineHtml, session: session, terminal: terminal, render: render, styleCss: styleCss, history: history, view: view, ingestScrollback: ingestScrollback, loadOlderHistory: loadOlderHistory, INITIAL_VISIBLE_BLOCKS: INITIAL_VISIBLE_BLOCKS, HISTORY_PAGE_SIZE: HISTORY_PAGE_SIZE, blocksEl: blocksEl, sendExecuteCommand: sendExecuteCommand, sendWriteToPty: sendWriteToPty, transport: transport, submitGuestCommand: submitGuestCommand };"
+  "globalThis.__exports = { Screen: Screen, Terminal: Terminal, renderLineHtml: renderLineHtml, session: session, terminal: terminal, render: render, styleCss: styleCss, history: history, view: view, ingestScrollback: ingestScrollback, loadOlderHistory: loadOlderHistory, INITIAL_VISIBLE_BLOCKS: INITIAL_VISIBLE_BLOCKS, HISTORY_PAGE_SIZE: HISTORY_PAGE_SIZE, blocksEl: blocksEl, sendExecuteCommand: sendExecuteCommand, sendWriteToPty: sendWriteToPty, transport: transport, submitGuestCommand: submitGuestCommand, renderGuestBar: renderGuestBar, guest: guest, guestBarEl: guestBarEl, ginputEl: ginputEl };"
 );
 
 function makeEl(tag) {
@@ -118,6 +118,7 @@ const sandbox = {
   setInterval,
   clearInterval,
   TextDecoder,
+  TextEncoder,
   atob: (s) => Buffer.from(s, "base64").toString("binary"),
   Date,
   Math,
@@ -151,6 +152,11 @@ const {
   sendExecuteCommand,
   sendWriteToPty,
   transport,
+  submitGuestCommand,
+  renderGuestBar,
+  guest,
+  guestBarEl,
+  ginputEl,
 } = sandbox.__exports;
 
 /* --------------------------------------------------------------------- */
@@ -348,7 +354,14 @@ function driver(rows, cols) {
   transport.ptySeq = 0;
   transport.bufferId = null;
 
-  check("ExecuteCommand refuses without buffer id", sendExecuteCommand("x"), false);
+  // A buffer id we were never told must not silently swallow the command: the
+  // hub routes on the socket's participant, not the buffer.
+  check("ExecuteCommand sends without a known buffer id", sendExecuteCommand("x"), true);
+  check("ExecuteCommand falls back to a placeholder buffer", sent[0], {
+    ExecuteCommand: { buffer_id: "local-share", command: "x" },
+  });
+
+  sent.length = 0;
   transport.bufferId = "buf-1";
   check("ExecuteCommand sends when connected", sendExecuteCommand("echo hi"), true);
   check("ExecuteCommand payload shape", sent[0], {
@@ -362,6 +375,53 @@ function driver(rows, cols) {
       bytes: [13, 65],
     },
   });
+
+  // The guest's command line is its own element: a render pass must never move
+  // it (that blurs a focused contenteditable) and the host mirror must never
+  // overwrite it.
+  const { session, render } = sandbox.__exports;
+  guest.joined = false;
+  session.altScreen = false;
+  renderGuestBar();
+  check("guest bar is hidden before joining", guestBarEl.className, "off");
+
+  guest.joined = true;
+  renderGuestBar();
+  check("guest bar is enabled once joined", guestBarEl.className, "");
+
+  session.altScreen = true;
+  renderGuestBar();
+  check("guest bar is hidden in a full-screen app", guestBarEl.className, "off");
+  session.altScreen = false;
+
+  session.state = "prompt";
+  session.typedInput = "host is typing this";
+  ginputEl.textContent = "echo guest";
+  render();
+  check("host mirror does not overwrite the guest draft", ginputEl.textContent, "echo guest");
+  check(
+    "guest input is never re-parented by a render",
+    ginputEl.parentNode || null,
+    null
+  );
+
+  sent.length = 0;
+  submitGuestCommand();
+  check("Enter at the prompt runs the command", sent[0], {
+    ExecuteCommand: { buffer_id: "buf-1", command: "echo guest" },
+  });
+  check("submitting clears the draft", ginputEl.textContent, "");
+
+  sent.length = 0;
+  session.state = "running";
+  ginputEl.textContent = "yes";
+  submitGuestCommand();
+  check(
+    "Enter during a running command writes to its stdin",
+    sent[0].WriteToPty.bytes,
+    [121, 101, 115, 13]
+  );
+  session.state = "idle";
 }
 
 // History pagination: mount a short tail, then page older blocks on demand.

@@ -131,20 +131,27 @@ async fn handle_socket(socket: WebSocket, state: Arc<ShareState>) {
                 if send_downstream(&mut sink, reply).await.is_err() {
                     return;
                 }
-                let (backlog, typed_input, events) = state.join();
+                let snapshot = state.join();
                 // Typed-input snapshot first so the guest footer can update
                 // while a large scrollback backlog is still flushing.
-                if let Ok(json) = typed_input_message_json(&typed_input) {
+                if let Ok(json) = typed_input_message_json(&snapshot.typed_input) {
                     if sink.send(Message::Text(json.into())).await.is_err() {
                         return;
                     }
                 }
-                for frame in backlog {
+                for frame in snapshot.backlog {
                     if sink.send(Message::Text(frame.into())).await.is_err() {
                         return;
                     }
                 }
-                break (events, viewer_id);
+                // Agent turns last: they are appended to the end of the guest's
+                // block list, so they should land after the replayed PTY blocks.
+                for frame in snapshot.agent_exchanges {
+                    if sink.send(Message::Text(frame.into())).await.is_err() {
+                        return;
+                    }
+                }
+                break (snapshot.events, viewer_id);
             }
             Some(Ok(Message::Ping(payload))) => {
                 if sink.send(Message::Pong(payload)).await.is_err() {

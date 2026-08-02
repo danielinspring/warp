@@ -705,6 +705,79 @@ fn write_to_pty_from_guest_is_enqueued_for_host() {
     hub.stop();
 }
 
+#[test]
+fn agent_exchange_is_mirrored_live_and_on_late_join() {
+    let mut hub = LocalSessionShareHub::new();
+    let handle = hub.start(loopback_ip(), 0).expect("start should succeed");
+    let publisher = hub.event_publisher().expect("publisher");
+
+    // Published before anyone joins: an Agent Mode answer must still reach a
+    // guest that opens the link afterwards.
+    publisher
+        .publish_agent_exchange(LocalShareAgentExchange {
+            id: "exchange-1".to_string(),
+            query: "/agent what is this repo about?".to_string(),
+            output: "It is a terminal.".to_string(),
+            running: true,
+        })
+        .expect("publish should succeed");
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let (mut socket, _) = join_as_viewer(guest_ws_url(&handle)).await;
+
+        let replayed = next_agent_exchange(&mut socket).await;
+        assert_eq!(replayed["query"], "/agent what is this repo about?");
+        assert_eq!(replayed["output"], "It is a terminal.");
+        assert_eq!(replayed["running"], true);
+
+        // A streamed update replaces the same turn rather than adding another.
+        publisher
+            .publish_agent_exchange(LocalShareAgentExchange {
+                id: "exchange-1".to_string(),
+                query: "/agent what is this repo about?".to_string(),
+                output: "It is a terminal. Written in Rust.".to_string(),
+                running: false,
+            })
+            .expect("publish should succeed");
+
+        let updated = next_agent_exchange(&mut socket).await;
+        assert_eq!(updated["id"], "exchange-1");
+        assert_eq!(updated["output"], "It is a terminal. Written in Rust.");
+        assert_eq!(updated["running"], false);
+    });
+
+    hub.stop();
+}
+
+/// Reads frames until the next `LocalShareAgentExchange` payload, skipping the
+/// typed-input snapshot and any ordered events in between.
+async fn next_agent_exchange(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> serde_json::Value {
+    for _ in 0..16 {
+        let message = socket
+            .next()
+            .await
+            .expect("hub should send a frame")
+            .expect("frame should not error");
+        let Message::Text(text) = message else {
+            continue;
+        };
+        let json: serde_json::Value =
+            serde_json::from_str(text.as_ref()).expect("frame should be json");
+        if let Some(payload) = json.get("LocalShareAgentExchange") {
+            return payload.clone();
+        }
+    }
+    panic!("no LocalShareAgentExchange frame arrived");
+}
+
 fn write_fake_wasm_bundle(root: &std::path::Path) {
     std::fs::create_dir_all(root.join("wasm")).unwrap();
     std::fs::create_dir_all(root.join("assets")).unwrap();

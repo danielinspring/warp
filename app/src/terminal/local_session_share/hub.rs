@@ -28,6 +28,11 @@ pub const LOCAL_SHARE_MAX_REPLAY_BYTES: usize = 8 * 1024 * 1024;
 
 const EVENT_BROADCAST_CAPACITY: usize = 256;
 
+/// How many Agent Mode turns are retained for late joiners. Agent answers are
+/// mirrored as whole-text snapshots, so this bounds memory independently of the
+/// byte-capped PTY replay log.
+const LOCAL_SHARE_MAX_AGENT_EXCHANGES: usize = 64;
+
 /// Serialized downstream frames published since the share started.
 ///
 /// [`broadcast`] only delivers to receivers that already exist, so without this
@@ -38,11 +43,16 @@ const EVENT_BROADCAST_CAPACITY: usize = 256;
 /// `typed_input` is the host's current Warp input-editor text. It is kept here
 /// (under the same lock as join/publish) so late guests get the in-progress
 /// command without every keystroke bloating [`Self::frames`].
+///
+/// `agent_exchanges` holds the latest plain-text snapshot of each Agent Mode
+/// turn, newest last, for the same reason: an agent answer is re-published on
+/// every streamed token, so only the current text of each turn is retained.
 #[derive(Default)]
 struct ReplayLog {
     frames: VecDeque<String>,
     bytes: usize,
     typed_input: String,
+    agent_exchanges: Vec<(String, String)>,
 }
 
 impl ReplayLog {
@@ -55,6 +65,27 @@ impl ReplayLog {
                 self.bytes = self.bytes.saturating_sub(dropped.len());
             }
         }
+    }
+
+    /// Returns false when `json` is already the retained snapshot for `id`, so
+    /// the caller can skip a redundant broadcast.
+    fn record_agent_exchange(&mut self, id: &str, json: String) -> bool {
+        if let Some(entry) = self
+            .agent_exchanges
+            .iter_mut()
+            .find(|(existing, _)| existing == id)
+        {
+            if entry.1 == json {
+                return false;
+            }
+            entry.1 = json;
+            return true;
+        }
+        self.agent_exchanges.push((id.to_owned(), json));
+        while self.agent_exchanges.len() > LOCAL_SHARE_MAX_AGENT_EXCHANGES {
+            self.agent_exchanges.remove(0);
+        }
+        true
     }
 }
 
@@ -199,15 +230,21 @@ impl ShareState {
     /// Together with the scrollback snapshot (the session as of share start),
     /// this gives a late guest the complete history: scrollback covers
     /// everything before the share, the replay log everything after it.
-    pub(crate) fn join(&self) -> (Vec<String>, String, broadcast::Receiver<String>) {
+    pub(crate) fn join(&self) -> JoinSnapshot {
         let replay = self
             .replay
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let backlog = replay.frames.iter().cloned().collect();
-        let typed_input = replay.typed_input.clone();
-        let events = self.event_tx.subscribe();
-        (backlog, typed_input, events)
+        JoinSnapshot {
+            backlog: replay.frames.iter().cloned().collect(),
+            typed_input: replay.typed_input.clone(),
+            agent_exchanges: replay
+                .agent_exchanges
+                .iter()
+                .map(|(_, json)| json.clone())
+                .collect(),
+            events: self.event_tx.subscribe(),
+        }
     }
 
     /// Forwards a guest mutating request to the host pane. Fails only if the
@@ -255,6 +292,59 @@ impl ShareState {
         let _ = self.event_tx.send(json);
         Ok(())
     }
+
+    /// Publishes one Agent Mode turn as plain text. Agent conversations are not
+    /// PTY output — they are native Warp UI — so without this mirror a guest
+    /// sees nothing at all while the host runs `/agent`.
+    fn publish_agent_exchange(&self, exchange: LocalShareAgentExchange) -> Result<(), HubError> {
+        let json = agent_exchange_message_json(&exchange)?;
+        let mut replay = self
+            .replay
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !replay.record_agent_exchange(&exchange.id, json.clone()) {
+            return Ok(());
+        }
+        let _ = self.event_tx.send(json);
+        Ok(())
+    }
+}
+
+/// Everything a newly connected guest needs to catch up, snapshotted under one
+/// lock so the join boundary has no gap and no duplicates.
+pub(crate) struct JoinSnapshot {
+    pub(crate) backlog: Vec<String>,
+    pub(crate) typed_input: String,
+    pub(crate) agent_exchanges: Vec<String>,
+    pub(crate) events: broadcast::Receiver<String>,
+}
+
+/// One Agent Mode turn, flattened to the plain text a guest can render.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalShareAgentExchange {
+    /// Stable per-turn id, so a streamed update replaces the previous snapshot
+    /// instead of appending a new block.
+    pub id: String,
+    /// The user's query, as shown on the host (including any `/agent` prefix).
+    pub query: String,
+    /// The agent's answer so far, flattened to markdown-ish plain text.
+    pub output: String,
+    /// True while the answer is still streaming.
+    pub running: bool,
+}
+
+pub(crate) fn agent_exchange_message_json(
+    exchange: &LocalShareAgentExchange,
+) -> Result<String, HubError> {
+    serde_json::to_string(&serde_json::json!({
+        "LocalShareAgentExchange": {
+            "id": exchange.id,
+            "query": exchange.query,
+            "output": exchange.output,
+            "running": exchange.running,
+        }
+    }))
+    .map_err(HubError::Serialize)
 }
 
 /// JSON envelope for live typed-input mirrors. Kept as a free function so the
@@ -289,6 +379,14 @@ impl LocalShareEventPublisher {
     /// Publishes the host's current Warp input-editor text for live mirroring.
     pub fn publish_typed_input(&self, text: String) -> Result<(), HubError> {
         self.state.publish_typed_input(text)
+    }
+
+    /// Publishes one Agent Mode turn as plain text for live mirroring.
+    pub fn publish_agent_exchange(
+        &self,
+        exchange: LocalShareAgentExchange,
+    ) -> Result<(), HubError> {
+        self.state.publish_agent_exchange(exchange)
     }
 
     pub fn set_window_size(&self, size: WindowSize) {

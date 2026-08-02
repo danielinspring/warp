@@ -983,7 +983,32 @@
         "node app/src/terminal/local_session_share/lite_viewer_tests.js",
         "./script/format --check"
       ],
-      "evidence": "2026-08-02: Guests join as Role::Executor. handle_upstream forwards ExecuteCommand/WriteToPty as LocalShareGuestRequest (agent/control still rejected). Hub guest_tx/rx reverse channel; TerminalView listen_for_local_share_guest_requests applies ExecuteCommand via try_execute_command_on_behalf_of_shared_session_participant and WriteToPty when alt-screen or long-running. Lite viewer: contenteditable #typed, Enter\to ExecuteCommand, alt-screen keydown\to WriteToPty; pill shows interactive; toasts disclose execute. cargo test -p warp local_session_share --lib: 37 passed. lite_viewer_tests.js: 39 checks passed. ./script/format --check passed."
+      "evidence": "2026-08-02: Guests join as Role::Executor. handle_upstream forwards ExecuteCommand/WriteToPty as LocalShareGuestRequest (agent/control still rejected). Hub guest_tx/rx reverse channel; TerminalView listen_for_local_share_guest_requests applies ExecuteCommand via try_execute_command_on_behalf_of_shared_session_participant and WriteToPty when alt-screen or long-running. Lite viewer: contenteditable #typed, Enter\to ExecuteCommand, alt-screen keydown\to WriteToPty; pill shows interactive; toasts disclose execute. cargo test -p warp local_session_share --lib: 37 passed. lite_viewer_tests.js: 39 checks passed. ./script/format --check passed. Follow-up in feat-043: making the host-mirror span itself contenteditable did not actually work in a browser."
+    },
+    {
+      "id": "feat-043",
+      "name": "Guest command line and Agent Mode mirroring",
+      "description": "Give the local-share guest its own stable command line (the host-mirror span could not be typed into) and mirror Agent Mode turns, which never reach guests over the PTY.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-042"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "The guest types in a dedicated #guestbar element that no render pass re-parents or overwrites, so focus and caret survive host updates.",
+        "Editability no longer depends on the guest having observed a Precmd hook.",
+        "Enter runs the line when the host is idle and writes to the running command's stdin when one is active.",
+        "ExecuteCommand is still sent when the guest was never told a buffer id.",
+        "Agent Mode turns are published by the host as plain text (query + flattened output + running) keyed by exchange id, replacing in place as they stream.",
+        "Agent turns are replayed to guests that join after the turn started.",
+        "Focused hub tests, lite_viewer harness, and format check pass."
+      ],
+      "verification": [
+        "cargo test -p warp local_session_share --lib",
+        "node app/src/terminal/local_session_share/lite_viewer_tests.js",
+        "./script/format --check"
+      ],
+      "evidence": "2026-08-03: Typing was impossible because #typed is re-parented into the prompt's last row on every render (moving a focused contenteditable blurs it), the host mirror overwrote the draft, and editability was gated on session.state == 'prompt'. Replaced with a sibling #guestbar/#ginput that render never touches; #typed is a read-only mirror again. Enter routes to ExecuteCommand or WriteToPty(line + CR) by host state; ExecuteCommand falls back to a placeholder buffer id. Agent Mode: added LocalShareAgentExchange (hub ReplayLog.agent_exchanges, replayed after the backlog on join) published from TerminalView::handle_ai_history_model_event on BlocklistAIHistoryEvent::UpdatedStreamingExchange using display_user_query + format_output_for_copy; lite viewer renders/updates an agent block per exchange id. cargo test -p warp local_session_share --lib: 38 passed (new agent_exchange_is_mirrored_live_and_on_late_join). lite_viewer_tests.js: 46 checks passed. ./script/format --check passed. WarpOss rebuilt and relaunched."
     }
   ],
   "future_phases": [
@@ -1000,7 +1025,7 @@
     {
       "phase": "Phase D",
       "scope": [],
-      "note": "Phase D complete through feat-042 (local share guest command execution)."
+      "note": "Phase D complete through feat-043 (guest command line + Agent Mode mirroring)."
     }
   ]
 }

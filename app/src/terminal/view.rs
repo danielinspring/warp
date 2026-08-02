@@ -6079,6 +6079,18 @@ impl TerminalView {
         ) {
             self.maybe_insert_tombstone_for_non_running_shared_ambient_task(ctx);
         }
+        #[cfg(not(target_family = "wasm"))]
+        if let BlocklistAIHistoryEvent::UpdatedStreamingExchange {
+            exchange_id,
+            conversation_id,
+            is_hidden,
+            ..
+        } = event
+        {
+            if !is_hidden {
+                self.publish_local_share_agent_exchange(*conversation_id, *exchange_id, ctx);
+            }
+        }
         match event {
             BlocklistAIHistoryEvent::AppendedExchange {
                 exchange_id,

@@ -10,11 +10,14 @@ use warpui::{AppContext, SingletonEntity, ViewContext};
 use super::{
     InlineBannerItem, InlineBannerType, SharedSessionBanners, TerminalAction, TerminalView,
 };
+use crate::ai::agent::conversation::AIConversationId;
+use crate::ai::agent::AIAgentExchangeId;
+use crate::ai::blocklist::BlocklistAIHistoryModel;
 use crate::features::FeatureFlag;
 use crate::menu::{MenuItem, MenuItemFields};
 use crate::terminal::local_session_share::{
     all_interfaces_label, bind_candidate_label, is_all_interfaces, non_loopback_candidates,
-    resolve_palette_bind_ip, LocalSessionShareHub, LocalShareGuestRequest,
+    resolve_palette_bind_ip, LocalSessionShareHub, LocalShareAgentExchange, LocalShareGuestRequest,
     COPY_LOCAL_SHARE_LINK_TEXT, LOCAL_SHARE_ACTIVE_TOAST, LOCAL_SHARE_ALL_INTERFACES_WARNING,
     LOCAL_SHARE_BLOCKS_CLOUD_TOAST, LOCAL_SHARE_CLOUD_BLOCK_TOAST, LOCAL_SHARE_LITE_VIEWER_TOAST,
     LOCAL_SHARE_ROTATED_TOAST, LOCAL_SHARE_START_FAILED_TOAST,
@@ -294,6 +297,52 @@ impl TerminalView {
         let text = self.input().as_ref(ctx).buffer_text(ctx);
         if let Err(err) = publisher.publish_typed_input(text) {
             log::warn!("Failed to publish local LAN share typed input: {err}");
+        }
+    }
+
+    /// Mirrors one Agent Mode turn to local-share guests as plain text.
+    ///
+    /// Agent conversations live in `AIConversation`, not in the terminal grid,
+    /// so none of it reaches guests over the PTY stream: without this a guest
+    /// watching the host run `/agent …` sees nothing happen at all.
+    pub(crate) fn publish_local_share_agent_exchange(
+        &self,
+        conversation_id: AIConversationId,
+        exchange_id: AIAgentExchangeId,
+        ctx: &AppContext,
+    ) {
+        let Some(publisher) = self.local_session_share_hub.event_publisher() else {
+            return;
+        };
+        let history_model = BlocklistAIHistoryModel::as_ref(ctx);
+        let Some(conversation) = history_model.conversation(&conversation_id) else {
+            return;
+        };
+        let Some(exchange) = conversation.exchange_with_id(exchange_id) else {
+            return;
+        };
+
+        let initial_query = conversation.initial_query();
+        let query = exchange
+            .input
+            .iter()
+            .find_map(|input| input.display_user_query(initial_query.as_ref()))
+            .unwrap_or_default();
+        // `None` action model: tool-call detail is host-side UI state, and the
+        // lite viewer only renders the transcript text.
+        let output = exchange.format_output_for_copy(None);
+        if query.is_empty() && output.is_empty() {
+            return;
+        }
+
+        let exchange = LocalShareAgentExchange {
+            id: exchange_id.to_string(),
+            query,
+            output,
+            running: !exchange.output_status.is_finished(),
+        };
+        if let Err(err) = publisher.publish_agent_exchange(exchange) {
+            log::warn!("Failed to publish local LAN share agent exchange: {err}");
         }
     }
 

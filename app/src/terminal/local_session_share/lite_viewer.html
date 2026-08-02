@@ -256,6 +256,31 @@
         color: var(--muted);
         font-style: italic;
       }
+
+      /* Agent Mode turns. These never touch the PTY, so they arrive as plain
+         text snapshots rather than as parsed terminal output. */
+      .block.agent .bcmd::before {
+        content: "agent";
+        display: inline-block;
+        margin-right: 8px;
+        padding: 0 6px;
+        border: 1px solid var(--accent);
+        border-radius: 5px;
+        color: var(--accent);
+        font-size: 11px;
+        font-weight: 600;
+        vertical-align: 1px;
+      }
+      .agentout {
+        margin-top: 4px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .agentout:empty::before {
+        content: "thinking…";
+        color: var(--faint);
+        font-style: italic;
+      }
       .divider {
         padding: 6px 16px;
         color: var(--faint);
@@ -291,6 +316,7 @@
       }
       body.alt #blocks,
       body.alt #footer,
+      body.alt #guestbar,
       body.alt #jump {
         display: none;
       }
@@ -331,15 +357,46 @@
         white-space: pre-wrap;
         word-break: break-word;
         font-weight: 600;
+        color: var(--muted);
+      }
+
+      /* The guest's own command line. Deliberately a sibling of #footer and
+         never re-parented by a render pass: moving a focused contenteditable
+         node blurs it, which is why the host mirror above cannot double as the
+         guest's input. */
+      #guestbar {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        padding: 9px 16px;
+        border-top: 1px solid var(--line);
+        background: var(--chrome-bg);
+        cursor: text;
+      }
+      #guestbar.off {
+        display: none;
+      }
+      #gsigil {
+        color: var(--accent);
+        font-weight: 600;
+      }
+      #ginput {
+        flex: 1 1 auto;
+        white-space: pre-wrap;
+        word-break: break-word;
         color: var(--fg);
         outline: none;
-        min-width: 1ch;
+        min-height: 1.2em;
       }
-      #typed[contenteditable="true"]:empty::before {
-        content: "";
+      #ginput:empty::before {
+        content: attr(data-placeholder);
+        color: var(--faint);
       }
-      #typed[contenteditable="false"] {
-        color: var(--muted);
+      #ghint {
+        flex: 0 0 auto;
+        color: var(--faint);
+        font-size: 11.5px;
       }
 
       #jump {
@@ -457,16 +514,20 @@
 
     <div id="footer" class="hidden">
       <div id="prompt"></div>
-      <span id="input"
-        ><span
-          id="typed"
-          contenteditable="true"
-          spellcheck="false"
-          role="textbox"
-          aria-label="Command input"
-        ></span
-        ><span id="caret"></span
+      <span id="input"><span id="typed"></span><span id="caret"></span></span>
+    </div>
+
+    <div id="guestbar" class="off">
+      <span id="gsigil">❯</span>
+      <span
+        id="ginput"
+        contenteditable="true"
+        spellcheck="false"
+        role="textbox"
+        aria-label="Run a command on the host"
+        data-placeholder="run a command on the host…"
       ></span>
+      <span id="ghint">Enter to run</span>
     </div>
 
     <button id="jump" type="button">↓ Jump to live</button>
@@ -1680,6 +1741,9 @@
         var promptEl = document.getElementById("prompt");
         var inputEl = document.getElementById("input");
         var typedEl = document.getElementById("typed");
+        var guestBarEl = document.getElementById("guestbar");
+        var ginputEl = document.getElementById("ginput");
+        var ghintEl = document.getElementById("ghint");
         var statusEl = document.getElementById("status");
         var statusTextEl = document.getElementById("status-text");
         var sizeEl = document.getElementById("size");
@@ -1975,6 +2039,38 @@
           }
         }
 
+        // Agent Mode turns are mirrored by the host as plain-text snapshots
+        // keyed by exchange id, so each streamed update replaces the previous
+        // text in place instead of appending another block.
+        var agentBlocks = {};
+
+        function upsertAgentExchange(payload) {
+          var id = payload && payload.id;
+          if (!id) return;
+          var entry = agentBlocks[id];
+          if (!entry) {
+            var el = document.createElement("article");
+            el.className = "block agent";
+            var head = document.createElement("div");
+            head.className = "bhead";
+            var cmd = document.createElement("div");
+            cmd.className = "bcmd";
+            var out = document.createElement("div");
+            out.className = "agentout";
+            el.appendChild(head);
+            el.appendChild(cmd);
+            el.appendChild(out);
+            blocksEl.appendChild(el);
+            entry = agentBlocks[id] = { el: el, head: head, cmd: cmd, out: out };
+          }
+          entry.cmd.textContent = payload.query || "";
+          entry.out.textContent = payload.output || "";
+          entry.head.textContent = payload.running ? "responding…" : "";
+          entry.head.className = payload.running ? "bhead live" : "bhead";
+          entry.el.dataset.state = payload.running ? "running" : "ok";
+          if (view.following) scrollToBottom();
+        }
+
         function scheduleRender() {
           if (view.dirty) return;
           view.dirty = true;
@@ -1991,6 +2087,7 @@
           }
           for (var i = 0; i < view.blocks.length; i++) renderBlock(view.blocks[i]);
           renderPrompt();
+          renderGuestBar();
           if (view.following) scrollToBottom();
         }
 
@@ -2050,7 +2147,7 @@
           var buffer = session.promptBuffer;
           var atPrompt = session.state === "prompt";
           var hasPrompt = atPrompt && !buffer.isEmpty();
-          var hasTyped = session.typedInput.length > 0 || session.editing;
+          var hasTyped = session.typedInput.length > 0;
           if (!atPrompt && !hasTyped) {
             footerEl.className = "hidden";
             return;
@@ -2061,16 +2158,31 @@
           } else {
             promptEl.textContent = "";
           }
-          if (!session.editing && typedEl.textContent !== session.typedInput) {
+          if (typedEl.textContent !== session.typedInput) {
             typedEl.textContent = session.typedInput;
           }
-          typedEl.contentEditable = atPrompt && !session.altScreen ? "true" : "false";
-          // The prompt renders as one block element per row, so the typed text
-          // has to live inside the last row to continue on the same line as the
-          // prompt instead of wrapping onto its own. Re-parent on every pass:
-          // renderBuffer rewrites the rows it repaints.
+          // The prompt renders as one block element per row, so the mirrored
+          // host text has to live inside the last row to continue on the
+          // prompt's line instead of wrapping onto its own. Re-parent on every
+          // pass: renderBuffer rewrites the rows it repaints.
           var lastRow = hasPrompt ? promptEl.lastElementChild : null;
           (lastRow || footerEl).appendChild(inputEl);
+        }
+
+        /// The guest command line is enabled whenever we are joined and the host
+        /// is not in a full-screen app (where raw keystrokes go to the PTY
+        /// instead). Enter runs the line; while a command is running it is sent
+        /// to the running program's stdin instead.
+        function renderGuestBar() {
+          var enabled = guest.joined && !session.altScreen;
+          guestBarEl.className = enabled ? "" : "off";
+          if (!enabled) return;
+          var running = session.state === "running";
+          ghintEl.textContent = running ? "Enter to send · ⌃C to stop" : "Enter to run";
+          ginputEl.setAttribute(
+            "data-placeholder",
+            running ? "send input to the running command…" : "run a command on the host…"
+          );
         }
 
         function scrollToBottom() {
@@ -2130,10 +2242,14 @@
           altScreen: false,
           screen: new Screen(24, 80),
           hooksSeen: false,
+          // Read-only mirror of the host's Warp input editor.
           typedInput: "",
-          // Guest-owned draft. Host LocalShareTypedInput only wins when the
-          // guest is not actively editing.
-          editing: false,
+        };
+
+        // The guest's own input, kept separate from the host mirror above so
+        // neither can clobber the other.
+        var guest = {
+          joined: false,
         };
 
         var transport = {
@@ -2168,7 +2284,6 @@
           session.current = appendBlock(block);
           session.state = "running";
           session.typedInput = "";
-          session.editing = false;
           typedEl.textContent = "";
           scheduleRender();
         }
@@ -2224,6 +2339,7 @@
           history.older = [];
           history.atStart = true;
           history.markerEl = null;
+          agentBlocks = {};
           blocksEl.textContent = "";
           scheduleRender();
         }
@@ -2236,8 +2352,7 @@
           if (enabled) {
             session.screen.reset();
             fitScreen();
-            session.editing = false;
-            typedEl.blur();
+            ginputEl.blur();
           } else {
             screenEl.textContent = "";
             var block = session.current;
@@ -2466,10 +2581,11 @@
         }
 
         function sendExecuteCommand(command) {
-          if (!transport.bufferId) return false;
           return sendJson({
+            // The hub routes on the socket's participant, not the buffer, so an
+            // id we have not been told yet must not block the guest's command.
             ExecuteCommand: {
-              buffer_id: transport.bufferId,
+              buffer_id: transport.bufferId || "local-share",
               command: command,
             },
           });
@@ -2490,35 +2606,65 @@
           });
         }
 
+        function guestDraft() {
+          // contenteditable can insert NBSP and hard newlines; normalize both to
+          // the plain shell text the host expects.
+          return (ginputEl.textContent || "")
+            .replace(/\u00a0/g, " ")
+            .replace(/\n/g, "");
+        }
+
         function submitGuestCommand() {
-          var command = typedEl.textContent || "";
-          // contenteditable can insert NBSP / newlines; normalize to shell text.
-          command = command.replace(/\u00a0/g, " ").replace(/\n/g, "");
-          session.editing = false;
-          session.typedInput = "";
-          typedEl.textContent = "";
-          if (!sendExecuteCommand(command)) {
-            console.warn("could not send ExecuteCommand");
+          var command = guestDraft();
+          ginputEl.textContent = "";
+          if (session.state === "running") {
+            // A command already owns the PTY, so the line is stdin for it
+            // rather than a new command to run.
+            sendWriteToPty(
+              Array.from(new TextEncoder().encode(command)).concat([0x0d])
+            );
+          } else {
+            sendExecuteCommand(command);
           }
           scheduleRender();
         }
 
-        typedEl.addEventListener("focus", function () {
-          session.editing = true;
+        function focusGuestInput() {
+          if (guestBarEl.className === "off") return;
+          ginputEl.focus();
+        }
+
+        guestBarEl.addEventListener("mousedown", function (event) {
+          if (event.target === ginputEl) return;
+          // Clicking the sigil, the hint or the padding should still put the
+          // caret in the input rather than doing nothing.
+          event.preventDefault();
+          focusGuestInput();
         });
-        typedEl.addEventListener("blur", function () {
-          session.editing = false;
-          session.typedInput = typedEl.textContent || "";
-        });
-        typedEl.addEventListener("keydown", function (event) {
+
+        ginputEl.addEventListener("keydown", function (event) {
           if (event.key === "Enter" && !event.shiftKey) {
             event.preventDefault();
             submitGuestCommand();
+            return;
+          }
+          if (event.ctrlKey && !event.metaKey && !event.altKey) {
+            var code = event.key.toLowerCase().charCodeAt(0);
+            if (code >= 97 && code <= 122) {
+              event.preventDefault();
+              sendWriteToPty([code - 96]);
+            }
           }
         });
-        typedEl.addEventListener("input", function () {
-          session.editing = true;
-          session.typedInput = typedEl.textContent || "";
+
+        // Typing anywhere on the page while nothing else is focused should land
+        // in the guest's command line, the way it would in a terminal.
+        document.addEventListener("keydown", function (event) {
+          if (session.altScreen) return;
+          if (event.metaKey || event.ctrlKey || event.altKey) return;
+          if (event.target === ginputEl) return;
+          if (event.key.length !== 1) return;
+          focusGuestInput();
         });
 
         // Alt-screen / long-running apps need raw keystrokes on the host PTY.
@@ -2553,14 +2699,16 @@
         });
 
         function handleMessage(msg) {
+          if (msg.LocalShareAgentExchange) {
+            upsertAgentExchange(msg.LocalShareAgentExchange);
+            return;
+          }
+
           if (msg.LocalShareTypedInput) {
-            // Don't clobber in-progress guest typing.
-            if (!session.editing) {
-              session.typedInput =
-                typeof msg.LocalShareTypedInput.text === "string"
-                  ? msg.LocalShareTypedInput.text
-                  : "";
-            }
+            session.typedInput =
+              typeof msg.LocalShareTypedInput.text === "string"
+                ? msg.LocalShareTypedInput.text
+                : "";
             // Host typing implies the session is at the input editor even if we
             // have not yet seen a Precmd hook (e.g. joined mid-prompt).
             if (session.state !== "running") session.state = "prompt";
@@ -2576,6 +2724,7 @@
             retryDelay = 1000;
             transport.viewerId = joined.viewer_id || transport.viewerId;
             transport.bufferId = joined.init_block_id || transport.bufferId;
+            guest.joined = true;
             if (!joinedOnce) {
               joinedOnce = true;
               var totalHistory =
@@ -2603,6 +2752,7 @@
                 },
                 function () {
                   progress.done();
+                  focusGuestInput();
                 }
               );
             } else {
@@ -2614,14 +2764,17 @@
 
           if (msg.SessionEnded) {
             closedByServer = true;
+            guest.joined = false;
             setStatus("session ended", "err");
             progress.fail("Session ended", "the host stopped sharing");
             appendDivider("— the host ended this session —");
+            scheduleRender();
             return;
           }
 
           if (msg.FailedToJoin) {
             closedByServer = true;
+            guest.joined = false;
             setStatus("join failed", "err");
             progress.fail("Could not join", "the share link may have been rotated");
             appendDivider("— could not join this session —");
@@ -2705,6 +2858,8 @@
           });
 
           ws.addEventListener("close", function () {
+            guest.joined = false;
+            scheduleRender();
             if (closedByServer) return;
             setStatus("reconnecting…", "err");
             progress.retrying(retryDelay);
