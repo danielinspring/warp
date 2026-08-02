@@ -3,7 +3,7 @@
 ## Current State
 
 **Last Updated:** 2026-08-02  
-**Active Feature:** (none — feat-038 complete)  
+**Active Feature:** (none — feat-039 complete)  
 **Status:** Idle  
 
 ## What's Done
@@ -35,13 +35,21 @@
   - Warp's input editor does not echo through the PTY, so guests only saw executed commands.
   - Host publishes coalesced `LocalShareTypedInput` plain-text snapshots (not stored in the durable PTY replay log); late joiners get the latest value right after `JoinedSuccessfully`.
   - Lite viewer footer shows `#typed` next to the prompt caret; Preexec clears it.
+  - The typed text and caret are re-parented into the prompt's last row on every render pass, so input continues on the prompt's line instead of wrapping to its own.
 
-## Verification (feat-036–038)
+- feat-039: Full-screen host applications are mirrored to the guest.
+  - Alt-screen output addresses cells absolutely (CUP, scroll regions, line inserts), which the block model cannot express, so it used to be dumped into a scratch buffer behind a "not mirrored" notice.
+  - The viewer now has a `Screen` grid emulator: fixed rows x cols, DECSTBM scroll region, IL/DL/ICH/DCH/ECH, ED/EL that erase with the active background, deferred right-margin wrap, ESC D/E/M/7/8, and DECTCEM cursor visibility rendered as an inverted cell.
+  - `?1049h` / `?1047h` / `?47h` swaps the whole view to the grid (blocks, footer and jump button hide) and back out on exit, leaving a note on the owning block that its output was not captured.
+  - Grid geometry follows the host's `JoinedSuccessfully` / `Resize` window size, and the font auto-scales from a measured monospace ratio so the host's grid fits the guest viewport.
 
+## Verification (feat-036–039)
+
+- `node app/src/terminal/local_session_share/lite_viewer_tests.js` (stub-DOM harness driving the viewer script with synthetic VT sequences): 20 checks passed — CUP placement, `ED 2`, scroll-region isolation, deferred wrap, IL/DL, `ESC M`, background-aware erase, cursor cell, resize, and the `?1049h`/`?1049l` round trip.  
 - `cargo test -p warp local_session_share --lib`: 34 passed (typed-input live + late-join)  
 - `./script/format --check`: passed  
 - `cargo bundle --profile dev --bin warp-oss --target aarch64-apple-darwin` from `app/`: bundled `WarpOss.app`; relaunched.
 
 ## Next
 
-Dogfood: Start Local Share → open the link → type in the host input (do not press Enter) → confirm the guest footer updates character-by-character, then Enter and confirm the typed text clears into a command block.
+Dogfood: Start Local Share → open the link → run `claude` (or `top`) on the host → confirm the guest switches to the full-screen grid, repaints as the app redraws, and returns to blocks on exit.

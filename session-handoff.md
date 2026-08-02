@@ -25,8 +25,9 @@ Local LAN share guest opens a real viewer — Warp-style blocks by default (buil
 - Joining over plain http on the LAN no longer throws: `crypto.randomUUID` (secure-context only) is replaced by a `getRandomValues` UUID fallback, and an inline data-URI favicon removes the `/favicon.ico` 404.
 - A join overlay shows staged percent, a bar and elapsed seconds, ending with `done / total blocks` while the scrollback replays in animation-frame slices.
 - Guests that open the link after the share started now get the history they missed: the hub keeps an 8 MiB replay log of published frames and sends it after `JoinedSuccessfully`, before the live stream. Pre-share history still comes from the start-time scrollback snapshot, whose size is now logged.
-- Host typing is mirrored live as `LocalShareTypedInput` plain-text snapshots into the guest footer (Warp's editor does not echo through PTY).
+- Host typing is mirrored live as `LocalShareTypedInput` plain-text snapshots into the guest footer (Warp's editor does not echo through PTY), rendered inside the last prompt row so it continues on the prompt's line.
+- Full-screen apps (`claude`, `vim`, `top`) are mirrored: the guest switches to a real alternate-screen grid sized to the host's cols x rows, and returns to blocks when the app exits.
 
 ## Recommended Next Step
 
-In WarpOss: Start **Local Share**, open the link, type a command without pressing Enter, and confirm the guest footer updates live; then Enter and confirm it becomes a block.
+In WarpOss: Start **Local Share**, open the link, run `claude` (or `top`) on the host, and confirm the guest switches to the full-screen grid and repaints as the app redraws.

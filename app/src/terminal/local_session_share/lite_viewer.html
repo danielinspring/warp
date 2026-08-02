@@ -263,6 +263,35 @@
         border-bottom: 1px solid var(--line);
       }
 
+      /* Alternate screen: a fixed grid that takes over the whole view while a
+         full-screen app owns the host terminal. */
+      #screen {
+        display: none;
+        flex: 1 1 auto;
+        overflow: hidden;
+        padding: 6px 8px;
+        line-height: 1.2;
+      }
+      body.alt #screen {
+        display: block;
+      }
+      body.alt #blocks,
+      body.alt #footer,
+      body.alt #jump {
+        display: none;
+      }
+      .srow {
+        white-space: pre;
+        height: 1.2em;
+      }
+      .cur {
+        background: var(--fg);
+        color: var(--bg);
+      }
+      .pill.hidden {
+        display: none;
+      }
+
       #footer {
         flex: 0 0 auto;
         border-top: 1px solid var(--line);
@@ -379,11 +408,13 @@
         ><span id="status-text">connecting…</span></span>
       <span id="title"></span>
       <span class="grow"></span>
+      <span class="pill hidden" id="mode">full-screen app</span>
       <span class="pill" id="size"></span>
       <span class="pill">view-only</span>
     </div>
 
     <div id="blocks"></div>
+    <div id="screen"></div>
 
     <div id="join">
       <div class="jcard">
@@ -403,7 +434,7 @@
 
     <div id="footer" class="hidden">
       <div id="prompt"></div>
-      <span id="typed"></span><span id="caret"></span>
+      <span id="input"><span id="typed"></span><span id="caret"></span></span>
     </div>
 
     <button id="jump" type="button">↓ Jump to live</button>
@@ -420,6 +451,10 @@
       //     hooks (DCS `ESC P $ d <hex> ST` / OSC 9278) carry Preexec, Precmd and
       //     CommandFinished, which is exactly what the client itself uses to cut
       //     the stream into blocks.
+      //   * Full-screen apps (vim, claude, top) switch to the alternate screen,
+      //     which addresses cells absolutely and so cannot live in the block
+      //     model. Those get a real fixed grid (`Screen`) that takes over the
+      //     view until the app exits.
       (function () {
         "use strict";
 
@@ -843,19 +878,28 @@
           return out.join("\n");
         };
 
-        function renderLineHtml(line) {
+        // `cursorCol` (-1 when there is no cursor on this row) is drawn as its
+        // own inverted cell, so it breaks the styled runs around it.
+        function renderLineHtml(line, cursorCol) {
+          if (cursorCol === undefined) cursorCol = -1;
           var end = line.c.length;
           while (end > 0 && line.c[end - 1] === " " && line.s[end - 1] === 0) {
             end--;
           }
+          if (cursorCol >= 0 && cursorCol + 1 > end) end = cursorCol + 1;
           var html = "";
           var i = 0;
           while (i < end) {
+            if (i === cursorCol) {
+              html += '<span class="cur">' + escapeHtml(line.c[i] || " ") + "</span>";
+              i++;
+              continue;
+            }
             var style = line.s[i];
             var text = "";
             var j = i;
-            while (j < end && line.s[j] === style) {
-              text += line.c[j];
+            while (j < end && j !== cursorCol && line.s[j] === style) {
+              text += line.c[j] === undefined ? " " : line.c[j];
               j++;
             }
             html +=
@@ -900,6 +944,238 @@
           }
           buffer.dirtyFrom = Infinity;
         }
+
+        /* ----------------------------------------------------------------- */
+        /* Alternate screen grid                                              */
+        /* ----------------------------------------------------------------- */
+
+        function blankRow(cols) {
+          var line = newLine();
+          for (var i = 0; i < cols; i++) {
+            line.c.push(" ");
+            line.s.push(0);
+          }
+          return line;
+        }
+
+        // Fixed rows x cols grid with a scrolling region, used while the host
+        // runs a full-screen app. It exposes the same methods as LineBuffer so
+        // the parser sink can write to either, plus the absolute-addressing
+        // operations that only make sense on a real screen.
+        function Screen(rows, cols) {
+          this.isScreen = true;
+          this.rows = Math.max(1, rows || 24);
+          this.cols = Math.max(1, cols || 80);
+          this.reset();
+        }
+
+        Screen.prototype.reset = function () {
+          this.lines = [];
+          for (var i = 0; i < this.rows; i++) this.lines.push(blankRow(this.cols));
+          this.row = 0;
+          this.col = 0;
+          this.top = 0;
+          this.bottom = this.rows - 1;
+          this.saved = null;
+          this.wrapPending = false;
+          this.cursorVisible = true;
+          this.dirty = true;
+        };
+
+        Screen.prototype.resize = function (rows, cols) {
+          rows = Math.max(1, rows);
+          cols = Math.max(1, cols);
+          if (rows === this.rows && cols === this.cols) return;
+          this.rows = rows;
+          this.cols = cols;
+          // Reflowing a TUI's grid is meaningless: the app repaints on SIGWINCH,
+          // so start from a clean screen instead.
+          this.reset();
+        };
+
+        Screen.prototype.clampRow = function (row) {
+          return Math.max(0, Math.min(this.rows - 1, row));
+        };
+
+        Screen.prototype.clampCol = function (col) {
+          return Math.max(0, Math.min(this.cols - 1, col));
+        };
+
+        Screen.prototype.moveTo = function (row, col) {
+          if (row !== null) this.row = this.clampRow(row);
+          if (col !== null) this.col = this.clampCol(col);
+          this.wrapPending = false;
+        };
+
+        Screen.prototype.write = function (text, styleIdx) {
+          for (var i = 0; i < text.length; i++) {
+            // Wrapping is deferred: writing the last column leaves the cursor
+            // there until one more character arrives, like xterm.
+            if (this.wrapPending) {
+              this.col = 0;
+              this.linefeed();
+            }
+            var line = this.lines[this.row];
+            line.c[this.col] = text[i];
+            line.s[this.col] = styleIdx;
+            if (this.col + 1 >= this.cols) this.wrapPending = true;
+            else this.col++;
+          }
+          this.dirty = true;
+        };
+
+        Screen.prototype.linefeed = function () {
+          if (this.row === this.bottom) this.scrollUp(1);
+          else this.row = this.clampRow(this.row + 1);
+          this.wrapPending = false;
+          this.dirty = true;
+        };
+
+        Screen.prototype.reverseIndex = function () {
+          if (this.row === this.top) this.scrollDown(1);
+          else this.row = this.clampRow(this.row - 1);
+          this.wrapPending = false;
+          this.dirty = true;
+        };
+
+        Screen.prototype.carriageReturn = function () {
+          this.col = 0;
+          this.wrapPending = false;
+        };
+
+        Screen.prototype.backspace = function () {
+          if (this.col > 0) this.col--;
+          this.wrapPending = false;
+        };
+
+        Screen.prototype.tab = function () {
+          this.col = Math.min(this.cols - 1, (this.col + 8) & ~7);
+          this.wrapPending = false;
+        };
+
+        Screen.prototype.scrollUp = function (count) {
+          for (var i = 0; i < count; i++) {
+            this.lines.splice(this.top, 1);
+            this.lines.splice(this.bottom, 0, blankRow(this.cols));
+          }
+          this.dirty = true;
+        };
+
+        Screen.prototype.scrollDown = function (count) {
+          for (var i = 0; i < count; i++) {
+            this.lines.splice(this.bottom, 1);
+            this.lines.splice(this.top, 0, blankRow(this.cols));
+          }
+          this.dirty = true;
+        };
+
+        Screen.prototype.setScrollRegion = function (top, bottom) {
+          top = this.clampRow(top);
+          bottom = this.clampRow(bottom);
+          if (bottom <= top) {
+            this.top = 0;
+            this.bottom = this.rows - 1;
+          } else {
+            this.top = top;
+            this.bottom = bottom;
+          }
+          this.moveTo(0, 0);
+          this.dirty = true;
+        };
+
+        Screen.prototype.eraseCells = function (row, from, to, styleIdx) {
+          var line = this.lines[row];
+          if (!line) return;
+          for (var i = Math.max(0, from); i <= to && i < this.cols; i++) {
+            line.c[i] = " ";
+            line.s[i] = styleIdx;
+          }
+          this.dirty = true;
+        };
+
+        Screen.prototype.eraseInLine = function (mode, styleIdx) {
+          styleIdx = styleIdx || 0;
+          if (mode === 1) this.eraseCells(this.row, 0, this.col, styleIdx);
+          else if (mode === 2) this.eraseCells(this.row, 0, this.cols - 1, styleIdx);
+          else this.eraseCells(this.row, this.col, this.cols - 1, styleIdx);
+        };
+
+        Screen.prototype.eraseInDisplay = function (mode, styleIdx) {
+          styleIdx = styleIdx || 0;
+          var row;
+          if (mode === 1) {
+            for (row = 0; row < this.row; row++) {
+              this.eraseCells(row, 0, this.cols - 1, styleIdx);
+            }
+            this.eraseCells(this.row, 0, this.col, styleIdx);
+            return;
+          }
+          if (mode === 2 || mode === 3) {
+            for (row = 0; row < this.rows; row++) {
+              this.eraseCells(row, 0, this.cols - 1, styleIdx);
+            }
+            return;
+          }
+          this.eraseCells(this.row, this.col, this.cols - 1, styleIdx);
+          for (row = this.row + 1; row < this.rows; row++) {
+            this.eraseCells(row, 0, this.cols - 1, styleIdx);
+          }
+        };
+
+        Screen.prototype.eraseChars = function (count, styleIdx) {
+          this.eraseCells(this.row, this.col, this.col + count - 1, styleIdx || 0);
+        };
+
+        Screen.prototype.deleteChars = function (count, styleIdx) {
+          var line = this.lines[this.row];
+          line.c.splice(this.col, count);
+          line.s.splice(this.col, count);
+          while (line.c.length < this.cols) {
+            line.c.push(" ");
+            line.s.push(styleIdx || 0);
+          }
+          this.dirty = true;
+        };
+
+        Screen.prototype.insertChars = function (count, styleIdx) {
+          var line = this.lines[this.row];
+          for (var i = 0; i < count; i++) {
+            line.c.splice(this.col, 0, " ");
+            line.s.splice(this.col, 0, styleIdx || 0);
+          }
+          line.c.length = this.cols;
+          line.s.length = this.cols;
+          this.dirty = true;
+        };
+
+        Screen.prototype.insertLines = function (count) {
+          if (this.row < this.top || this.row > this.bottom) return;
+          for (var i = 0; i < count; i++) {
+            this.lines.splice(this.bottom, 1);
+            this.lines.splice(this.row, 0, blankRow(this.cols));
+          }
+          this.dirty = true;
+        };
+
+        Screen.prototype.deleteLines = function (count) {
+          if (this.row < this.top || this.row > this.bottom) return;
+          for (var i = 0; i < count; i++) {
+            this.lines.splice(this.row, 1);
+            this.lines.splice(this.bottom, 0, blankRow(this.cols));
+          }
+          this.dirty = true;
+        };
+
+        Screen.prototype.saveCursor = function () {
+          this.saved = { row: this.row, col: this.col };
+        };
+
+        Screen.prototype.restoreCursor = function () {
+          if (!this.saved) return;
+          this.row = this.clampRow(this.saved.row);
+          this.col = this.clampCol(this.saved.col);
+          this.wrapPending = false;
+        };
 
         /* ----------------------------------------------------------------- */
         /* ANSI / VT parser                                                   */
@@ -977,6 +1253,7 @@
                 this.state = S_CHARSET;
               } else {
                 this.state = S_GROUND;
+                this.sink.esc(ch);
               }
               return;
 
@@ -1062,6 +1339,9 @@
           this.options = options;
           this.style = defaultStyle();
           this.styleIdx = 0;
+          // Erasing fills cells with the current background only, so it needs
+          // its own interned style.
+          this.eraseStyleIdx = 0;
           this.parser = new AnsiParser(this);
         }
 
@@ -1131,27 +1411,68 @@
             case "D":
               buffer.moveTo(null, buffer.col - count);
               return;
+            case "E":
+              buffer.moveTo(buffer.row + count, 0);
+              return;
+            case "F":
+              buffer.moveTo(buffer.row - count, 0);
+              return;
             case "G":
             case "`":
               buffer.moveTo(null, count - 1);
               return;
+            case "d":
+              if (buffer.isScreen) buffer.moveTo(count - 1, null);
+              return;
             case "H":
             case "f":
-              // Absolute positioning is grid-relative; a block list has no grid,
-              // so honor the column and leave the row where it is.
-              buffer.moveTo(null, (args[1] > 0 ? args[1] : 1) - 1);
+              // A block list has no grid, so outside the alternate screen only
+              // the column is honored and the row is left where it is.
+              buffer.moveTo(
+                buffer.isScreen ? count - 1 : null,
+                (args[1] > 0 ? args[1] : 1) - 1
+              );
               return;
             case "J":
-              buffer.eraseInDisplay(args[0] || 0);
+              buffer.eraseInDisplay(args[0] || 0, this.eraseStyleIdx);
               return;
             case "K":
-              buffer.eraseInLine(args[0] || 0);
+              buffer.eraseInLine(args[0] || 0, this.eraseStyleIdx);
               return;
             case "X":
-              buffer.eraseChars(count);
+              buffer.eraseChars(count, this.eraseStyleIdx);
               return;
             case "P":
-              buffer.deleteChars(count);
+              buffer.deleteChars(count, this.eraseStyleIdx);
+              return;
+            case "@":
+              if (buffer.isScreen) buffer.insertChars(count, this.eraseStyleIdx);
+              return;
+            case "L":
+              if (buffer.isScreen) buffer.insertLines(count);
+              return;
+            case "M":
+              if (buffer.isScreen) buffer.deleteLines(count);
+              return;
+            case "S":
+              if (buffer.isScreen) buffer.scrollUp(count);
+              return;
+            case "T":
+              if (buffer.isScreen) buffer.scrollDown(count);
+              return;
+            case "r":
+              if (buffer.isScreen) {
+                buffer.setScrollRegion(
+                  (args[0] > 0 ? args[0] : 1) - 1,
+                  (args[1] > 0 ? args[1] : buffer.rows) - 1
+                );
+              }
+              return;
+            case "s":
+              if (buffer.isScreen) buffer.saveCursor();
+              return;
+            case "u":
+              if (buffer.isScreen) buffer.restoreCursor();
               return;
             case "h":
             case "l":
@@ -1167,7 +1488,43 @@
             var mode = args[i];
             if (mode === 1049 || mode === 1047 || mode === 47) {
               if (this.options.onAltScreen) this.options.onAltScreen(enabled);
+            } else if (mode === 25) {
+              var buffer = this.buffer();
+              if (buffer.isScreen) {
+                buffer.cursorVisible = enabled;
+                buffer.dirty = true;
+              }
             }
+          }
+        };
+
+        Terminal.prototype.esc = function (ch) {
+          // Most ESC finals here are no-ops (charset, keypad mode, …) and
+          // resolving the target buffer can start a block, so bail out first.
+          if ("DEM78c".indexOf(ch) === -1) return;
+          var buffer = this.buffer();
+          switch (ch) {
+            case "D":
+              buffer.linefeed();
+              return;
+            case "E":
+              buffer.carriageReturn();
+              buffer.linefeed();
+              return;
+            case "M":
+              if (buffer.isScreen) buffer.reverseIndex();
+              return;
+            case "7":
+              if (buffer.isScreen) buffer.saveCursor();
+              return;
+            case "8":
+              if (buffer.isScreen) buffer.restoreCursor();
+              return;
+            case "c":
+              buffer.reset();
+              return;
+            default:
+              return;
           }
         };
 
@@ -1220,6 +1577,13 @@
             }
           }
           this.styleIdx = internStyle(this.style);
+          if (this.style.bg === null) {
+            this.eraseStyleIdx = 0;
+          } else {
+            var erase = defaultStyle();
+            erase.bg = this.style.bg;
+            this.eraseStyleIdx = internStyle(erase);
+          }
         };
 
         Terminal.prototype.osc = function (data) {
@@ -1272,8 +1636,11 @@
         /* ----------------------------------------------------------------- */
 
         var blocksEl = document.getElementById("blocks");
+        var screenEl = document.getElementById("screen");
+        var modeEl = document.getElementById("mode");
         var footerEl = document.getElementById("footer");
         var promptEl = document.getElementById("prompt");
+        var inputEl = document.getElementById("input");
         var typedEl = document.getElementById("typed");
         var statusEl = document.getElementById("status");
         var statusTextEl = document.getElementById("status-text");
@@ -1569,10 +1936,66 @@
         }
 
         function render() {
+          if (session.altScreen) {
+            renderScreen();
+            return;
+          }
           for (var i = 0; i < view.blocks.length; i++) renderBlock(view.blocks[i]);
           renderPrompt();
           if (view.following) scrollToBottom();
         }
+
+        function renderScreen() {
+          var screen = session.screen;
+          if (!screen.dirty) return;
+          screen.dirty = false;
+          var lines = screen.lines;
+          while (screenEl.childNodes.length > lines.length) {
+            screenEl.removeChild(screenEl.lastChild);
+          }
+          for (var i = 0; i < lines.length; i++) {
+            var el = screenEl.childNodes[i];
+            if (!el) {
+              el = document.createElement("div");
+              el.className = "srow";
+              screenEl.appendChild(el);
+            }
+            var cursorCol =
+              screen.cursorVisible && i === screen.row ? screen.col : -1;
+            el.innerHTML = renderLineHtml(lines[i], cursorCol);
+          }
+        }
+
+        // The guest window is not the host's window, so scale the grid font to
+        // whatever makes the host's cols x rows fit here.
+        var charRatio = 0;
+
+        function measureCharRatio() {
+          if (charRatio) return charRatio;
+          var probe = document.createElement("span");
+          probe.textContent = "0000000000";
+          probe.style.cssText =
+            "position:absolute;visibility:hidden;white-space:pre;font:100px/1 var(--mono)";
+          document.body.appendChild(probe);
+          charRatio = probe.getBoundingClientRect().width / 1000;
+          document.body.removeChild(probe);
+          return charRatio || 0.6;
+        }
+
+        function fitScreen() {
+          var screen = session.screen;
+          var width = screenEl.clientWidth - 16;
+          var height = screenEl.clientHeight - 12;
+          if (width <= 0 || height <= 0) return;
+          var byWidth = width / (screen.cols * measureCharRatio());
+          var byHeight = height / (screen.rows * 1.2);
+          var size = Math.floor(Math.min(byWidth, byHeight) * 10) / 10;
+          screenEl.style.fontSize = Math.max(5, Math.min(16, size)) + "px";
+        }
+
+        window.addEventListener("resize", function () {
+          if (session.altScreen) fitScreen();
+        });
 
         function renderPrompt() {
           var buffer = session.promptBuffer;
@@ -1590,6 +2013,12 @@
             promptEl.textContent = "";
           }
           typedEl.textContent = session.typedInput;
+          // The prompt renders as one block element per row, so the typed text
+          // has to live inside the last row to continue on the same line as the
+          // prompt instead of wrapping onto its own. Re-parent on every pass:
+          // renderBuffer rewrites the rows it repaints.
+          var lastRow = hasPrompt ? promptEl.lastElementChild : null;
+          (lastRow || footerEl).appendChild(inputEl);
         }
 
         function scrollToBottom() {
@@ -1627,6 +2056,7 @@
           scratch: new LineBuffer(MAX_PROMPT_LINES),
           inBandDepth: 0,
           altScreen: false,
+          screen: new Screen(24, 80),
           hooksSeen: false,
           typedInput: "",
         };
@@ -1640,7 +2070,8 @@
         }
 
         function targetBuffer() {
-          if (session.altScreen || session.inBandDepth > 0) return session.scratch;
+          if (session.altScreen) return session.screen;
+          if (session.inBandDepth > 0) return session.scratch;
           if (session.state === "prompt") return session.promptBuffer;
           return currentBlock().buffer;
         }
@@ -1713,13 +2144,21 @@
         function onAltScreen(enabled) {
           if (session.altScreen === enabled) return;
           session.altScreen = enabled;
-          session.scratch.reset();
-          var block = session.current;
-          if (block) {
-            block.notice = enabled
-              ? "Full-screen application running on the host — output is not mirrored in the view-only guest."
-              : null;
-            block.headDirty = true;
+          document.body.className = enabled ? "alt" : "";
+          modeEl.className = enabled ? "pill" : "pill hidden";
+          if (enabled) {
+            session.screen.reset();
+            fitScreen();
+          } else {
+            screenEl.textContent = "";
+            var block = session.current;
+            if (block) {
+              // The grid is gone once the app exits, and it was never part of
+              // this block's output, so say so rather than leaving it blank.
+              block.notice =
+                "Full-screen application output is not captured in this block.";
+              block.headDirty = true;
+            }
           }
           scheduleRender();
         }
@@ -1829,6 +2268,12 @@
 
         function setSize(cols, rows) {
           sizeEl.textContent = cols && rows ? cols + "×" + rows : "";
+          if (!cols || !rows) return;
+          session.screen.resize(rows, cols);
+          if (session.altScreen) {
+            fitScreen();
+            scheduleRender();
+          }
         }
 
         function secretFromPath() {
