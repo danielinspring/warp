@@ -28,7 +28,8 @@ Local LAN share guest opens a real viewer — Warp-style blocks by default (buil
 - Host typing is mirrored live as `LocalShareTypedInput` plain-text snapshots into the guest footer (Warp's editor does not echo through PTY), rendered inside the last prompt row so it continues on the prompt's line.
 - Full-screen apps (`claude`, `vim`, `top`) are mirrored: the guest switches to a real alternate-screen grid sized to the host's cols x rows, and returns to blocks when the app exits.
 - Stuck SGR 4 underlines from Claude Code are not painted as CSS text-decoration (native terminals hide them under glyph ink; CSS was ruling every row).
+- Pre-share history is paginated: newest ~3 blocks mount on join; scroll up loads ~5 older blocks until the beginning of shared history. The snapshot now keeps restored blocks (`shared_session::local_share_scrollback`), so a guest sees the history the host has on screen after an app restart.
 
 ## Recommended Next Step
 
-In WarpOss: Start **Local Share**, open the link, run `claude`, and confirm the guest grid has no underline hairline under every row.
+In WarpOss: Start **Local Share** on a session with many prior blocks, open the link, confirm only the latest few show, then scroll up (or click the top marker) until the beginning marker.

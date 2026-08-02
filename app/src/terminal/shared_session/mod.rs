@@ -282,6 +282,35 @@ impl SharedSessionScrollbackType {
     }
 }
 
+/// Scrollback for a local LAN share, which mirrors what the host currently has
+/// on screen.
+///
+/// Unlike [`SharedSessionScrollbackType::to_scrollback`], restored blocks are
+/// included. A cloud shared session omits them because they belong to an
+/// earlier session that the viewer never observed, but a local share is a live
+/// mirror of this window: after a restart the restored blocks are exactly the
+/// history the host is looking at, so dropping them leaves the guest blank.
+pub(crate) fn local_share_scrollback(model: &TerminalModel) -> Scrollback {
+    let agent_view_state = model.block_list().agent_view_state();
+    let blocks = model
+        .block_list()
+        .blocks()
+        .iter()
+        .filter(|block| !block.should_hide_block(agent_view_state))
+        .filter_map(|block| {
+            let serialized_block: SerializedBlock = block.into();
+            serde_json::to_vec(&serialized_block)
+                .ok()
+                .map(|raw| ScrollbackBlock { raw })
+        })
+        .collect();
+
+    Scrollback {
+        blocks,
+        is_alt_screen_active: model.is_alt_screen_active(),
+    }
+}
+
 #[cfg(not(test))]
 pub fn max_session_size(ctx: &AppContext) -> Byte {
     use warpui::SingletonEntity;

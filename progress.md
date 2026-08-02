@@ -3,7 +3,7 @@
 ## Current State
 
 **Last Updated:** 2026-08-02  
-**Active Feature:** (none — feat-040 complete)  
+**Active Feature:** (none — feat-041 complete)  
 **Status:** Idle  
 
 ## What's Done
@@ -47,13 +47,20 @@
   - Claude Code leaves SGR 4 set for the whole UI; Warp hides it inside the cell under glyph ink, but CSS `text-decoration` sat below the baseline.
   - The lite viewer keeps tracking underline for style identity but no longer emits underline CSS (strikethrough unchanged).
 
-## Verification (feat-036–040)
+- feat-041: Pre-share history is paginated in the guest viewer.
+  - Full scrollback still arrives on join; only the newest 3 blocks mount into the DOM.
+  - Scrolling near the top prepends 5 older blocks at a time (scroll anchor preserved) until the beginning marker.
+  - Scroll events only fire when the pane overflows, so a short mounted history could never page; wheel-up at the top and a clickable `load N older blocks (M left)` marker cover that case.
+  - Top sticky marker shows remaining count, then `beginning of shared history`.
+  - The snapshot itself was near-empty: `SharedSessionScrollbackType::All` drops restored blocks, and after an app restart the host's visible history is entirely restored blocks. `shared_session::local_share_scrollback` now keeps every non-hidden block, because a local share mirrors this window instead of replaying a cloud session.
 
-- `node app/src/terminal/local_session_share/lite_viewer_tests.js`: 22 checks passed (alt-screen grid + underline suppression)  
-- `cargo test -p warp local_session_share --lib`: 34 passed (typed-input live + late-join)  
+## Verification (feat-036–041)
+
+- `node app/src/terminal/local_session_share/lite_viewer_tests.js`: 34 checks passed (alt-screen, underline suppression, history pagination incl. wheel + marker click)  
+- `cargo test -p warp scrollback --lib`: 29 passed (includes `local_share_scrollback_includes_restored_blocks`)  
 - `./script/format --check`: passed  
-- `cargo bundle --profile dev --bin warp-oss --target aarch64-apple-darwin` from `app/`: bundled `WarpOss.app`; relaunched.
+- `cargo bundle --profile dev --bin warp-oss` from `app/`: bundled `WarpOss.app`; relaunched.
 
 ## Next
 
-Dogfood: Start Local Share → open the link → run `claude` on the host → confirm the guest grid has no hairline under every row.
+Dogfood: Start Local Share with a long session history → open the link → confirm ~3 recent blocks show → scroll up to load older pages until the beginning marker.

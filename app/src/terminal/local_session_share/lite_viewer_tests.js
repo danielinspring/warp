@@ -12,13 +12,14 @@ const html = fs.readFileSync(path.join(__dirname, "lite_viewer.html"), "utf8");
 let script = /<script>([\s\S]*)<\/script>/.exec(html)[1];
 script = script.replace(
   "boot();",
-  "globalThis.__exports = { Screen: Screen, Terminal: Terminal, renderLineHtml: renderLineHtml, session: session, terminal: terminal, render: render, styleCss: styleCss };"
+  "globalThis.__exports = { Screen: Screen, Terminal: Terminal, renderLineHtml: renderLineHtml, session: session, terminal: terminal, render: render, styleCss: styleCss, history: history, view: view, ingestScrollback: ingestScrollback, loadOlderHistory: loadOlderHistory, INITIAL_VISIBLE_BLOCKS: INITIAL_VISIBLE_BLOCKS, HISTORY_PAGE_SIZE: HISTORY_PAGE_SIZE, blocksEl: blocksEl };"
 );
 
 function makeEl(tag) {
   const el = {
     tagName: tag,
     childNodes: [],
+    listeners: {},
     style: { cssText: "", setProperty() {} },
     dataset: {},
     className: "",
@@ -26,6 +27,8 @@ function makeEl(tag) {
     _html: "",
     clientWidth: 800,
     clientHeight: 600,
+    scrollTop: 0,
+    scrollHeight: 600,
     get textContent() {
       return this._text;
     },
@@ -68,7 +71,12 @@ function makeEl(tag) {
       return child;
     },
     setAttribute() {},
-    addEventListener() {},
+    addEventListener(type, handler) {
+      (this.listeners[type] || (this.listeners[type] = [])).push(handler);
+    },
+    dispatch(type, event) {
+      (this.listeners[type] || []).forEach((handler) => handler(event || {}));
+    },
     select() {},
     getBoundingClientRect() {
       return { width: 600, height: 400 };
@@ -306,5 +314,114 @@ function driver(rows, cols) {
   check("SGR strikethrough still emits CSS", hasStrike, true);
 }
 
-console.log(failures ? "\n" + failures + " FAILURES" : "\nall checks passed");
-process.exit(failures ? 1 : 0);
+// History pagination: mount a short tail, then page older blocks on demand.
+(async function testHistoryPagination() {
+  const {
+    ingestScrollback,
+    loadOlderHistory,
+    history,
+    view,
+    INITIAL_VISIBLE_BLOCKS,
+    HISTORY_PAGE_SIZE,
+    blocksEl,
+  } = sandbox.__exports;
+
+  function utf8Bytes(text) {
+    return Array.from(Buffer.from(text, "utf8"));
+  }
+
+  function fakeScrollback(count) {
+    const blocks = [];
+    for (let i = 0; i < count; i++) {
+      const serialized = JSON.stringify({
+        stylized_command: utf8Bytes("cmd-" + i),
+        stylized_output: utf8Bytes("out-" + i),
+        pwd: "/tmp",
+        exit_code: 0,
+      });
+      blocks.push({ raw: utf8Bytes(serialized) });
+    }
+    return { blocks };
+  }
+
+  // Reset visible state left over from the alt-screen round-trip above.
+  view.blocks.splice(0, view.blocks.length);
+  history.older.splice(0, history.older.length);
+  history.atStart = true;
+  history.markerEl = null;
+  history.loading = false;
+  blocksEl.childNodes.splice(0, blocksEl.childNodes.length);
+  blocksEl._text = "";
+
+  const TOTAL = 30;
+  await new Promise((resolve) => {
+    ingestScrollback(fakeScrollback(TOTAL), function () {}, resolve);
+  });
+
+  check(
+    "initial visible count is the configured tail",
+    view.blocks.length,
+    INITIAL_VISIBLE_BLOCKS
+  );
+  check(
+    "remaining history stays unmounted",
+    history.older.length,
+    TOTAL - INITIAL_VISIBLE_BLOCKS
+  );
+  check("start marker is not terminal yet", history.atStart, false);
+
+  const before = view.blocks.length;
+  loadOlderHistory(HISTORY_PAGE_SIZE);
+  check(
+    "scroll-up mounts one page",
+    view.blocks.length,
+    before + HISTORY_PAGE_SIZE
+  );
+  check(
+    "older pile shrinks by one page",
+    history.older.length,
+    TOTAL - INITIAL_VISIBLE_BLOCKS - HISTORY_PAGE_SIZE
+  );
+
+  // A short history never overflows the pane, so no scroll event fires; the
+  // wheel and the marker are the paths that must still work.
+  const beforeWheel = view.blocks.length;
+  blocksEl.scrollTop = 0;
+  history.lastLoadAt = 0;
+  blocksEl.dispatch("wheel", { deltaY: -120 });
+  check(
+    "wheel-up at the top loads a page without a scrollbar",
+    view.blocks.length,
+    beforeWheel + HISTORY_PAGE_SIZE
+  );
+
+  const beforeClick = view.blocks.length;
+  check("marker is clickable while history remains", !!history.markerEl, true);
+  history.markerEl.dispatch("click");
+  check(
+    "clicking the marker loads a page",
+    view.blocks.length,
+    beforeClick + HISTORY_PAGE_SIZE
+  );
+
+  while (history.older.length) loadOlderHistory(HISTORY_PAGE_SIZE);
+  check("all history can be revealed", view.blocks.length, TOTAL);
+  check("older pile is empty at the end", history.older.length, 0);
+  check("atStart once history is exhausted", history.atStart, true);
+
+  const stuck = view.blocks.length;
+  loadOlderHistory(HISTORY_PAGE_SIZE);
+  check("further scroll-up is a no-op at the start", view.blocks.length, stuck);
+
+  check(
+    "prepended history keeps chronological order",
+    view.blocks.map((b) => b.commandBuffer.toText()),
+    Array.from({ length: TOTAL }, (_, i) => "cmd-" + i)
+  );
+
+  console.log(failures ? "\n" + failures + " FAILURES" : "\nall checks passed");
+  process.exit(failures ? 1 : 0);
+})().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

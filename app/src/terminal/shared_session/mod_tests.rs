@@ -6,7 +6,7 @@ use url::Url;
 use warpui::r#async::executor::Background;
 use warpui::units::Lines;
 
-use super::{decode_scrollback, SharedSessionScrollbackType};
+use super::{decode_scrollback, local_share_scrollback, SharedSessionScrollbackType};
 use crate::ai::blocklist::agent_view::AgentViewState;
 use crate::assert_lines_approx_eq;
 use crate::channel::ChannelState;
@@ -131,6 +131,28 @@ fn test_get_all_scrollback() {
 
     // Should contain 2 completed blocks + active block
     assert_eq!(scrollback.blocks.len(), 3);
+}
+
+#[test]
+fn local_share_scrollback_includes_restored_blocks() {
+    let restored_blocks = &[SerializedBlock::new_for_test("a".into(), "b".into()).into()];
+    let channel_event_proxy = ChannelEventListener::new_for_test();
+    let mut model = TerminalModel::mock(Some(restored_blocks), Some(channel_event_proxy));
+
+    model.simulate_block("block1", "block1");
+
+    // A cloud shared session drops restored blocks: 1 completed + active.
+    assert_eq!(
+        SharedSessionScrollbackType::All
+            .to_scrollback(&model)
+            .blocks
+            .len(),
+        2
+    );
+
+    // A local share mirrors the host's window, so the restored block is kept:
+    // 1 restored + 1 completed + active.
+    assert_eq!(local_share_scrollback(&model).blocks.len(), 3);
 }
 
 #[test]

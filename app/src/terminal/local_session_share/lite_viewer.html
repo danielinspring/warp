@@ -262,6 +262,20 @@
         font-size: 11.5px;
         border-bottom: 1px solid var(--line);
       }
+      .divider.history {
+        text-align: center;
+        position: sticky;
+        top: 0;
+        background: var(--bg);
+        z-index: 1;
+      }
+      .divider.history.more {
+        cursor: pointer;
+        color: var(--accent);
+      }
+      .divider.history.more:hover {
+        background: var(--hover);
+      }
 
       /* Alternate screen: a fixed grid that takes over the whole view while a
          full-screen app owns the host terminal. */
@@ -445,8 +459,9 @@
       // WS (PTY bytes are LZ4 size-prepended, matching lz4_flex), and rebuilds
       // Warp's block UI on the client:
       //
-      //   * Scrollback blocks arrive as JSON `SerializedBlock`s and are rendered
-      //     directly (stylized command + output, pwd, exit code, timing).
+      //   * Scrollback blocks arrive as JSON `SerializedBlock`s. The full list is
+      //     kept client-side; only the newest few mount into the DOM at join, and
+      //     scrolling up pages in older ones.
       //   * Live output is a raw PTY stream, so we parse it here: Warp's shell
       //     hooks (DCS `ESC P $ d <hex> ST` / OSC 9278) carry Preexec, Precmd and
       //     CommandFinished, which is exactly what the client itself uses to cut
@@ -462,6 +477,11 @@
         var MAX_LINES = 4000;
         var MAX_PROMPT_LINES = 60;
         var MAX_COLS = 20000;
+        // History arrives all at once on join, but mounting every block into the
+        // DOM up front is wasteful. Show a short tail first and reveal older
+        // pages when the guest scrolls up.
+        var INITIAL_VISIBLE_BLOCKS = 3;
+        var HISTORY_PAGE_SIZE = 5;
         var SUCCESS_EXIT_CODES = [0, 130, 141, -1073741510];
 
         /* ----------------------------------------------------------------- */
@@ -1736,6 +1756,17 @@
           dirty: false,
         };
 
+        // Pre-share history kept as serialized JSON until the guest scrolls up
+        // for it. `older` is oldest → newest; the visible tail lives in
+        // `view.blocks`.
+        var history = {
+          older: [],
+          atStart: true,
+          loading: false,
+          markerEl: null,
+          lastLoadAt: 0,
+        };
+
         // `Bootstrapped` carries the real home dir, but it only fires at shell
         // startup — a guest that joins mid-session never sees it, so fall back
         // to the conventional home prefixes.
@@ -2030,7 +2061,27 @@
             blocksEl.scrollTop + blocksEl.clientHeight >= blocksEl.scrollHeight - 12;
           view.following = atBottom;
           jumpEl.className = atBottom ? "" : "show";
+          // Near the top: pull in the next page of older history, if any.
+          if (blocksEl.scrollTop < 96) {
+            loadOlderHistory(HISTORY_PAGE_SIZE);
+          }
         });
+
+        // A short history does not overflow the pane, so there is no scrollbar
+        // and no scroll event to page on. Wheel events fire either way, so treat
+        // "wheel up while already at the top" as a request for the next page.
+        blocksEl.addEventListener(
+          "wheel",
+          function (event) {
+            if (event.deltaY >= 0 || blocksEl.scrollTop > 0) return;
+            var now = Date.now();
+            // One page per flick rather than the whole history in one gesture.
+            if (now - history.lastLoadAt < 120) return;
+            history.lastLoadAt = now;
+            loadOlderHistory(HISTORY_PAGE_SIZE);
+          },
+          { passive: true }
+        );
 
         jumpEl.addEventListener("click", function () {
           view.following = true;
@@ -2137,6 +2188,9 @@
           }
           view.blocks = [];
           session.current = null;
+          history.older = [];
+          history.atStart = true;
+          history.markerEl = null;
           blocksEl.textContent = "";
           scheduleRender();
         }
@@ -2197,12 +2251,100 @@
           return buffer;
         }
 
-        // Replays in animation-frame slices so a large snapshot can report
-        // progress instead of freezing the tab until every block is parsed.
-        function renderScrollback(scrollback, onProgress, onDone) {
-          var blocks = (scrollback && scrollback.blocks) || [];
-          var total = blocks.length;
-          if (!total) {
+        function updateHistoryMarker() {
+          if (history.markerEl && history.markerEl.parentNode) {
+            history.markerEl.parentNode.removeChild(history.markerEl);
+          }
+          history.markerEl = null;
+          if (history.atStart && view.blocks.length === 0 && history.older.length === 0) {
+            return;
+          }
+          var el = document.createElement("div");
+          if (history.older.length > 0) {
+            el.className = "divider history more";
+            el.setAttribute("role", "button");
+            el.setAttribute("tabindex", "0");
+            el.textContent =
+              "↑ load " +
+              Math.min(HISTORY_PAGE_SIZE, history.older.length) +
+              " older blocks (" +
+              history.older.length +
+              " left)";
+            // Clicking is the fallback for anything that cannot generate a
+            // scroll or wheel event here (touch, keyboard-only, short history).
+            el.addEventListener("click", function () {
+              loadOlderHistory(HISTORY_PAGE_SIZE);
+            });
+          } else {
+            el.className = "divider history";
+            el.textContent = "— beginning of shared history —";
+            history.atStart = true;
+          }
+          history.markerEl = el;
+          blocksEl.insertBefore(el, blocksEl.firstChild);
+        }
+
+        // Mount already-parsed blocks at the front of the list, preserving the
+        // guest's scroll anchor so the viewport does not jump.
+        function prependBlocks(blocks) {
+          if (!blocks.length) return;
+          var prevHeight = blocksEl.scrollHeight;
+          var prevTop = blocksEl.scrollTop;
+          for (var i = blocks.length - 1; i >= 0; i--) {
+            view.blocks.unshift(blocks[i]);
+          }
+          for (var j = 0; j < blocks.length; j++) {
+            renderBlock(blocks[j]);
+          }
+          var delta = blocksEl.scrollHeight - prevHeight;
+          blocksEl.scrollTop = prevTop + delta;
+        }
+
+        function loadOlderHistory(count) {
+          if (history.loading) return;
+          if (!history.older.length) {
+            if (!history.atStart) {
+              history.atStart = true;
+              updateHistoryMarker();
+            }
+            return;
+          }
+          history.loading = true;
+          var take = Math.min(count || HISTORY_PAGE_SIZE, history.older.length);
+          var batch = history.older.splice(history.older.length - take, take);
+          var mounted = [];
+          for (var i = 0; i < batch.length; i++) {
+            var block = blockFromSerialized(batch[i]);
+            if (block) mounted.push(block);
+          }
+          prependBlocks(mounted);
+          if (!history.older.length) history.atStart = true;
+          updateHistoryMarker();
+          history.loading = false;
+        }
+
+        // Decode every scrollback entry up front (cheap JSON), mount only the
+        // newest tail, and keep the rest for scroll-up pagination.
+        function ingestScrollback(scrollback, onProgress, onDone) {
+          var rawBlocks = (scrollback && scrollback.blocks) || [];
+          var entries = [];
+          for (var i = 0; i < rawBlocks.length; i++) {
+            var raw = rawBlocks[i].raw;
+            if (!raw) continue;
+            try {
+              entries.push(JSON.parse(decodeUtf8(bytesFromJson(raw))));
+            } catch (err) {
+              /* skip corrupt entries */
+            }
+          }
+
+          var visibleCount = Math.min(INITIAL_VISIBLE_BLOCKS, entries.length);
+          history.older = entries.slice(0, Math.max(0, entries.length - visibleCount));
+          history.atStart = history.older.length === 0;
+          var toShow = entries.slice(entries.length - visibleCount);
+
+          if (!toShow.length) {
+            updateHistoryMarker();
             onDone();
             return;
           }
@@ -2210,22 +2352,17 @@
           var index = 0;
           function step() {
             var sliceStarted = performance.now();
-            while (index < total && performance.now() - sliceStarted < 12) {
-              var raw = blocks[index].raw;
+            while (index < toShow.length && performance.now() - sliceStarted < 12) {
+              var block = blockFromSerialized(toShow[index]);
               index++;
-              if (!raw) continue;
-              var serialized;
-              try {
-                serialized = JSON.parse(decodeUtf8(bytesFromJson(raw)));
-              } catch (err) {
-                continue;
-              }
-              var block = blockFromSerialized(serialized);
               if (block) appendBlock(block);
             }
-            onProgress(index, total);
-            if (index < total) requestAnimationFrame(step);
-            else onDone();
+            onProgress(index, toShow.length);
+            if (index < toShow.length) requestAnimationFrame(step);
+            else {
+              updateHistoryMarker();
+              onDone();
+            }
           }
           requestAnimationFrame(step);
         }
@@ -2308,14 +2445,27 @@
             retryDelay = 1000;
             if (!joinedOnce) {
               joinedOnce = true;
-              progress.to(70, "Replaying scrollback…");
-              renderScrollback(
+              var totalHistory =
+                (joined.scrollback && joined.scrollback.blocks
+                  ? joined.scrollback.blocks.length
+                  : 0) || 0;
+              progress.to(
+                70,
+                "Loading history…",
+                totalHistory
+                  ? "showing latest " +
+                      Math.min(INITIAL_VISIBLE_BLOCKS, totalHistory) +
+                      " of " +
+                      totalHistory
+                  : "no prior blocks"
+              );
+              ingestScrollback(
                 joined.scrollback,
                 function (done, total) {
                   progress.to(
-                    70 + (done / total) * 30,
-                    "Replaying scrollback…",
-                    done + " / " + total + " blocks"
+                    70 + (total ? (done / total) * 30 : 30),
+                    "Loading history…",
+                    done + " / " + total + " visible"
                   );
                 },
                 function () {

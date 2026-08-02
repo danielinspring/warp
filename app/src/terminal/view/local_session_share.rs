@@ -87,8 +87,8 @@ impl TerminalView {
         }
 
         {
-            let scrollback = crate::terminal::shared_session::SharedSessionScrollbackType::All
-                .to_scrollback(&self.model.lock());
+            let scrollback =
+                crate::terminal::shared_session::local_share_scrollback(&self.model.lock());
             // Guests only ever see this snapshot for pre-share history, so log
             // its size (never its contents) to make an empty one diagnosable.
             log::info!(

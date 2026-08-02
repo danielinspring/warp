@@ -931,6 +931,32 @@
         "./script/format --check"
       ],
       "evidence": "2026-08-02: Claude Code leaves SGR 4 set for the whole alt-screen UI (github.com/anthropics/claude-code/issues/46719). Warp paints underlines inside the cell under glyph ink so they disappear; CSS text-decoration sat below the baseline and underlined every row. decorations() no longer emits underline (strike kept). lite_viewer_tests.js: 22 checks passed including the new underline/strike assertions."
+    },
+    {
+      "id": "feat-041",
+      "name": "Local share history pagination",
+      "description": "Keep the full pre-share scrollback on the guest, but mount only the newest ~3 blocks at join and reveal ~5 older blocks each time the guest scrolls up, until the start of shared history.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-035",
+        "feat-037"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "On join, only the newest INITIAL_VISIBLE_BLOCKS (3) scrollback blocks are mounted into the DOM.",
+        "Scrolling near the top loads HISTORY_PAGE_SIZE (5) older blocks, preserving scroll position.",
+        "Repeated scroll-up eventually reaches the beginning and further loads are no-ops.",
+        "A top marker shows remaining older count, then 'beginning of shared history'.",
+        "Focused viewer harness and format check pass.",
+        "Local share snapshot includes restored blocks so a guest sees the history the host has on screen after an app restart.",
+        "Paging works when the mounted history is shorter than the pane: wheel-up at the top and clicking the history marker both load the next page."
+      ],
+      "verification": [
+        "node app/src/terminal/local_session_share/lite_viewer_tests.js",
+        "cargo test -p warp scrollback --lib",
+        "./script/format --check"
+      ],
+      "evidence": "2026-08-02: ingestScrollback keeps full serialized scrollback in history.older and mounts only the newest 3; loadOlderHistory prepends 5 on scroll-up with scroll-anchor preservation; marker updates until beginning. lite_viewer_tests.js: 32 checks passed including pagination (initial 3 of 12, +5, drain to start, chronological order). Follow-up: the guest showed nothing because the snapshot had only 1 block \u2014 SharedSessionScrollbackType::All excludes restored blocks, and after an app restart the host's visible history is entirely restored blocks. Added shared_session::local_share_scrollback, which keeps every non-hidden block (restored included) because a local share mirrors this window rather than replaying a cloud session. New test local_share_scrollback_includes_restored_blocks; cargo test -p warp scrollback --lib: 29 passed. Follow-up 2: scroll events only fire when the pane overflows, so with only 3 short blocks mounted the guest could never page. Added a wheel handler (deltaY<0 at scrollTop 0, throttled to one page per 120ms) and made the marker a clickable 'load N older blocks (M left)' control for touch/keyboard. lite_viewer_tests.js: 34 checks passed, including wheel-up and marker-click paging against a 30-block history."
     }
   ],
   "future_phases": [
