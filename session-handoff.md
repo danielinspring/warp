@@ -22,7 +22,11 @@ Local LAN share guest opens a real viewer — Warp-style blocks by default (buil
 - Guest renders **blocks, not a PTY dump**: scrollback `SerializedBlock`s plus live output cut into command blocks via Warp's shell hooks (`Preexec` / `CommandFinished` / `Precmd`); ANSI colors, exit codes, cwd/git header, duration, live prompt strip.
 - Hook payloads, in-band generator output (OSC 9277) and alt-screen frames no longer leak as hex garbage.
 - Full Warp WASM still served from `WARP_LOCAL_SHARE_WASM_DIR` or app `Resources/local_share_wasm`.
+- Joining over plain http on the LAN no longer throws: `crypto.randomUUID` (secure-context only) is replaced by a `getRandomValues` UUID fallback, and an inline data-URI favicon removes the `/favicon.ico` 404.
+- A join overlay shows staged percent, a bar and elapsed seconds, ending with `done / total blocks` while the scrollback replays in animation-frame slices.
+- Guests that open the link after the share started now get the history they missed: the hub keeps an 8 MiB replay log of published frames and sends it after `JoinedSuccessfully`, before the live stream. Pre-share history still comes from the start-time scrollback snapshot, whose size is now logged.
+- Host typing is mirrored live as `LocalShareTypedInput` plain-text snapshots into the guest footer (Warp's editor does not echo through PTY).
 
 ## Recommended Next Step
 
-In WarpOss: Start **Local Share**, open the copied link on a second device, run a few commands (including a failing one and a TUI) and confirm blocks, colors and history look right.
+In WarpOss: Start **Local Share**, open the link, type a command without pressing Enter, and confirm the guest footer updates live; then Enter and confirm it becomes a block.

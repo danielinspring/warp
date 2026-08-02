@@ -21525,6 +21525,8 @@ impl TerminalView {
                     block_id: block_id.clone(),
                     operations: operations.clone(),
                 });
+                #[cfg(not(target_family = "wasm"))]
+                self.publish_local_share_typed_input(ctx);
             }
             InputEvent::InputFocusedFromMiddleClick => {
                 self.focus_input_box(ctx);

@@ -3,7 +3,7 @@
 ## Current State
 
 **Last Updated:** 2026-08-02  
-**Active Feature:** (none — feat-035 complete)  
+**Active Feature:** (none — feat-038 complete)  
 **Status:** Idle  
 
 ## What's Done
@@ -17,12 +17,31 @@
   - Full SGR rendering (16/256/truecolor, bold, dim, italic, underline, inverse) plus CR/BS/tab/erase handling, so progress bars and colored `ls` look right.
   - Light/dark palettes taken from `app/src/themes/default_themes.rs`; footer strip mirrors the host prompt and typed input; hover copy-command/copy-output; reconnect with backoff.
 
-## Verification (feat-035)
+- feat-036: The guest page now works on a plain-http LAN origin and shows join progress.
+  - `crypto.randomUUID` is unavailable outside a secure context, which threw on join; the `Initialize` anonymous id now comes from a `randomUuid()` fallback built on `getRandomValues` (then `Math.random`).
+  - An inline SVG data-URI favicon stops the browser's `/favicon.ico` 404.
+  - A join overlay reports staged progress with a percentage, a bar and a 100ms elapsed timer: fetching session info (10%), opening connection (30%), joining (45%), waiting for host (60%), then scrollback replay 70→100% labelled `done / total blocks`.
+  - Scrollback replay is chunked into ~12ms animation-frame slices so a large snapshot reports progress instead of freezing the tab.
+  - Join failure, host session end and reconnect backoff now update the overlay rather than leaving it pinned.
 
-- `cargo test -p warp local_session_share --lib`: 31 passed  
+- feat-037: A guest joining after the share started now receives the history it missed.
+  - Root cause: `tokio::sync::broadcast` only delivers to receivers that already exist, and the WS handler subscribed at socket upgrade. Combined with a scrollback snapshot frozen at share start, everything the host ran between "Start local share" and the guest opening the link was dropped on the floor.
+  - `ShareState` now keeps a `ReplayLog` of published downstream frames, capped at `LOCAL_SHARE_MAX_REPLAY_BYTES` (8 MiB) by dropping the oldest frames and always keeping the newest.
+  - `ShareState::join` snapshots the backlog and subscribes under the same lock `publish_downstream` holds, so the join boundary has no gap and no duplicates.
+  - The WS handler is two-phase: wait for `Initialize`, send `JoinedSuccessfully`, replay the backlog, then stream live. Scrollback (pre-share) and replay log (post-share) do not overlap.
+  - Share start logs the scrollback snapshot's block count and byte size (never contents), so an empty pre-share snapshot is diagnosable from the log.
+
+- feat-038: Host typing is mirrored live to the lite viewer before Enter.
+  - Warp's input editor does not echo through the PTY, so guests only saw executed commands.
+  - Host publishes coalesced `LocalShareTypedInput` plain-text snapshots (not stored in the durable PTY replay log); late joiners get the latest value right after `JoinedSuccessfully`.
+  - Lite viewer footer shows `#typed` next to the prompt caret; Preexec clears it.
+
+## Verification (feat-036–038)
+
+- `cargo test -p warp local_session_share --lib`: 34 passed (typed-input live + late-join)  
 - `./script/format --check`: passed  
-- Replayed a canned Warp PTY fixture (hooks, colored `ls`, failing `grep`, CR progress bar, `vim` alt-screen, in-band generator burst, live prompt) through the real viewer in Node and in Chrome — blocks, exit codes, colors and the prompt strip all render in both light and dark.
+- `cargo bundle --profile dev --bin warp-oss --target aarch64-apple-darwin` from `app/`: bundled `WarpOss.app`; relaunched.
 
 ## Next
 
-Dogfood on device: Start Local Share → open the copied URL on a phone/second machine → confirm blocks appear live and history is present on join.
+Dogfood: Start Local Share → open the link → type in the host input (do not press Enter) → confirm the guest footer updates character-by-character, then Enter and confirm the typed text clears into a command block.

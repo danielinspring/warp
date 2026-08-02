@@ -1,7 +1,8 @@
+use std::collections::VecDeque;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use session_sharing_protocol::common::{OrderedTerminalEventType, Scrollback, WindowSize};
 use session_sharing_protocol::viewer::DownstreamMessage;
@@ -20,7 +21,42 @@ pub const WASM_BUNDLE_DIR_ENV: &str = "WARP_LOCAL_SHARE_WASM_DIR";
 /// (PRODUCT.md P20). Older blocks are dropped from the front when capping.
 pub const LOCAL_SHARE_MAX_SCROLLBACK_BYTES: u64 = 10 * 1024 * 1024;
 
+/// Maximum size of the replay log of already-published events, kept so a guest
+/// that opens the link some time after the share started still receives the
+/// history it missed. Oldest frames are dropped once the log exceeds this.
+pub const LOCAL_SHARE_MAX_REPLAY_BYTES: usize = 8 * 1024 * 1024;
+
 const EVENT_BROADCAST_CAPACITY: usize = 256;
+
+/// Serialized downstream frames published since the share started.
+///
+/// [`broadcast`] only delivers to receivers that already exist, so without this
+/// log everything the host did between "start share" and a guest opening the
+/// link would be invisible to that guest: the scrollback snapshot is frozen at
+/// share start, and the live stream begins at join.
+///
+/// `typed_input` is the host's current Warp input-editor text. It is kept here
+/// (under the same lock as join/publish) so late guests get the in-progress
+/// command without every keystroke bloating [`Self::frames`].
+#[derive(Default)]
+struct ReplayLog {
+    frames: VecDeque<String>,
+    bytes: usize,
+    typed_input: String,
+}
+
+impl ReplayLog {
+    fn push(&mut self, frame: String) {
+        self.bytes = self.bytes.saturating_add(frame.len());
+        self.frames.push_back(frame);
+        // Keep the newest frame even if it alone is over budget.
+        while self.bytes > LOCAL_SHARE_MAX_REPLAY_BYTES && self.frames.len() > 1 {
+            if let Some(dropped) = self.frames.pop_front() {
+                self.bytes = self.bytes.saturating_sub(dropped.len());
+            }
+        }
+    }
+}
 
 /// A live local session share, returned by [`LocalSessionShareHub::start`]
 /// and [`LocalSessionShareHub::rotate_secret`]. Holding onto this is not
@@ -64,6 +100,7 @@ pub(crate) struct ShareState {
     scrollback: RwLock<Scrollback>,
     next_event_no: AtomicUsize,
     event_tx: broadcast::Sender<String>,
+    replay: Mutex<ReplayLog>,
     /// Optional directory containing `index.html`, `wasm/`, and `assets/` for
     /// serving the Warp WASM viewer over the share URL.
     wasm_bundle_dir: Option<PathBuf>,
@@ -81,6 +118,7 @@ impl ShareState {
             }),
             next_event_no: AtomicUsize::new(0),
             event_tx,
+            replay: Mutex::new(ReplayLog::default()),
             wasm_bundle_dir,
         }
     }
@@ -145,12 +183,33 @@ impl ShareState {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = scrollback;
     }
 
-    pub(crate) fn subscribe_events(&self) -> broadcast::Receiver<String> {
-        self.event_tx.subscribe()
+    /// Snapshots the replay log (and current typed input) and subscribes to
+    /// the live stream under the same lock [`Self::publish_downstream`] /
+    /// [`Self::publish_typed_input`] hold, so a joining guest sees every
+    /// frame published since the share started, each exactly once, plus the
+    /// host's in-progress input-editor text.
+    ///
+    /// Together with the scrollback snapshot (the session as of share start),
+    /// this gives a late guest the complete history: scrollback covers
+    /// everything before the share, the replay log everything after it.
+    pub(crate) fn join(&self) -> (Vec<String>, String, broadcast::Receiver<String>) {
+        let replay = self
+            .replay
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let backlog = replay.frames.iter().cloned().collect();
+        let typed_input = replay.typed_input.clone();
+        let events = self.event_tx.subscribe();
+        (backlog, typed_input, events)
     }
 
     fn publish_downstream(&self, message: DownstreamMessage) -> Result<(), HubError> {
         let json = message.to_json().map_err(HubError::Serialize)?;
+        let mut replay = self
+            .replay
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        replay.push(json.clone());
         // No active subscribers is fine — host may publish before guests join.
         let _ = self.event_tx.send(json);
         Ok(())
@@ -160,6 +219,34 @@ impl ShareState {
         let event_no = self.next_event_no.fetch_add(1, Ordering::SeqCst);
         self.publish_downstream(ordered_event_downstream(event_no, event_type))
     }
+
+    /// Publishes the host's current input-editor text to guests. Unlike PTY
+    /// frames this is not appended to the durable replay log — only the latest
+    /// value is retained for late joiners — because every keystroke would
+    /// otherwise dominate the log.
+    fn publish_typed_input(&self, text: String) -> Result<(), HubError> {
+        let json = typed_input_message_json(&text)?;
+        let mut replay = self
+            .replay
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if replay.typed_input == text {
+            return Ok(());
+        }
+        replay.typed_input = text;
+        let _ = self.event_tx.send(json);
+        Ok(())
+    }
+}
+
+/// JSON envelope for live typed-input mirrors. Kept as a free function so the
+/// WS join path can emit the same shape for the late-joiner snapshot without
+/// going through the publisher.
+pub(crate) fn typed_input_message_json(text: &str) -> Result<String, HubError> {
+    serde_json::to_string(&serde_json::json!({
+        "LocalShareTypedInput": { "text": text }
+    }))
+    .map_err(HubError::Serialize)
 }
 
 /// Cloneable handle for publishing host PTY/events into an active local share
@@ -179,6 +266,11 @@ impl LocalShareEventPublisher {
 
     pub fn publish_event(&self, event_type: OrderedTerminalEventType) -> Result<(), HubError> {
         self.state.publish_event_type(event_type)
+    }
+
+    /// Publishes the host's current Warp input-editor text for live mirroring.
+    pub fn publish_typed_input(&self, text: String) -> Result<(), HubError> {
+        self.state.publish_typed_input(text)
     }
 
     pub fn set_window_size(&self, size: WindowSize) {

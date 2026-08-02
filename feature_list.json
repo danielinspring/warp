@@ -815,6 +815,79 @@
         "./script/format --check"
       ],
       "evidence": "2026-08-02: Rewrote lite_viewer.html as a block viewer (VT parser + line buffer + hook-driven block state machine + SerializedBlock scrollback decoding). Verified against a canned Warp PTY fixture (hooks, colored ls, failing grep, CR progress bar, vim alt-screen, in-band generator burst) in Node and in Chrome, light and dark. local_session_share: 31 passed; format --check passed."
+    },
+    {
+      "id": "feat-036",
+      "name": "Local share guest join progress + insecure-context fixes",
+      "description": "Make the local LAN share guest page work on plain-http LAN origins (no secure context) and show a staged join progress indicator with percentage and elapsed time while the handshake and scrollback replay run.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-034",
+        "feat-035"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "Guest page no longer calls crypto.randomUUID, which is undefined on insecure (plain http) origins; a getRandomValues/Math.random UUID v4 fallback is used for the Initialize anonymous_id.",
+        "Guest page declares an inline data-URI favicon so browsers stop requesting /favicon.ico and logging a 404.",
+        "A join overlay reports staged progress (fetching session info, opening connection, joining, waiting for host, replaying scrollback) with a percentage, elapsed seconds and a bar.",
+        "Scrollback replay is chunked across animation frames and reports blocks done / total, then the overlay hides when the guest is live.",
+        "Join failures, session end and reconnect backoff are surfaced in the overlay instead of leaving it stuck.",
+        "Focused unit tests and format check pass."
+      ],
+      "verification": [
+        "cargo test -p warp local_session_share --lib",
+        "./script/format --check"
+      ],
+      "evidence": "2026-08-02: Replaced crypto.randomUUID with randomUuid() fallback (getRandomValues, then Math.random) and added an inline SVG data-URI favicon, clearing both Chrome console errors reported on a LAN http share URL. Added a stage-weighted join overlay (10/30/45/60/70% handshake, 70-100% scrollback) with tabular percent, 100ms elapsed timer and error/retry states; renderScrollback now replays in ~12ms animation-frame slices reporting done/total blocks. cargo test -p warp local_session_share --lib: 31 passed. ./script/format --check: passed. WarpOss debug bundle rebuilt and relaunched."
+    },
+    {
+      "id": "feat-037",
+      "name": "Local share replay log for late-joining guests",
+      "description": "Keep a bounded log of downstream frames published since the local share started and replay it to a guest on join, so history between 'Start local share' and opening the link is no longer lost.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-025",
+        "feat-026",
+        "feat-035"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "ShareState keeps a replay log of published downstream frames, capped at LOCAL_SHARE_MAX_REPLAY_BYTES by dropping oldest frames while always retaining the newest.",
+        "ShareState::join snapshots the backlog and subscribes to the broadcast under the same lock publish uses, so a joining guest gets every frame since share start exactly once (no gap, no duplicate).",
+        "The WS handler sends JoinedSuccessfully, then the backlog, then live events; nothing is streamed before Initialize.",
+        "Scrollback snapshot (pre-share history) and replay log (post-share history) do not overlap.",
+        "Share start logs the scrollback snapshot block count and byte size (never contents) so an empty snapshot is diagnosable.",
+        "Focused unit tests and format check pass."
+      ],
+      "verification": [
+        "cargo test -p warp local_session_share --lib",
+        "./script/format --check",
+        "cargo clippy -p warp --lib --all-features --tests"
+      ],
+      "evidence": "2026-08-02: Root cause of missing history on the guest: tokio broadcast only delivers to existing receivers and the WS handler subscribed at upgrade, while the scrollback snapshot is frozen at share start — so anything the host ran between starting the share and a guest opening the link was dropped. Added ReplayLog (VecDeque + byte cap, 8 MiB) to ShareState, atomic ShareState::join (backlog snapshot + subscribe under the publish lock), and a two-phase WS handler that replays the backlog after JoinedSuccessfully. New tests: events_published_before_join_are_replayed_to_a_late_guest, replay_log_drops_oldest_frames_past_the_cap. cargo test -p warp local_session_share --lib: 33 passed. ./script/format --check: passed. clippy: no new warnings. WarpOss debug bundle rebuilt and relaunched."
+    },
+    {
+      "id": "feat-038",
+      "name": "Local share live typed-input mirror",
+      "description": "Mirror the host's Warp input-editor text to local-share guests in real time (plain-text snapshot), so typing is visible in the lite viewer footer before Enter.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-035",
+        "feat-037"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "Host publishes LocalShareTypedInput snapshots (full current buffer text) on each input-editor edit while local share is active, without bloating the PTY replay log.",
+        "ShareState keeps the latest typed-input string; join sends it after JoinedSuccessfully so late guests see in-progress typing before backlog flush.",
+        "Lite viewer footer shows host typed text in real time next to the live prompt caret.",
+        "Executing/clearing the host input clears the guest typed-input display.",
+        "Focused unit tests and format check pass."
+      ],
+      "verification": [
+        "cargo test -p warp local_session_share --lib",
+        "./script/format --check"
+      ],
+      "evidence": "2026-08-02: Warp input editor does not echo through PTY, so guests never saw pre-Enter typing. Added LocalShareTypedInput plain-text snapshots on ShareState (coalesced, not in durable ReplayLog), atomic join snapshot, WS emit after JoinedSuccessfully, TerminalView InputEvent::EditorUpdated + share-start publish, lite viewer footer #typed. New test typed_input_is_mirrored_live_and_on_late_join. cargo test -p warp local_session_share --lib: 34 passed. format --check passed. WarpOss rebuilt."
     }
   ],
   "future_phases": [

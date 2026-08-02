@@ -63,6 +63,17 @@ async fn join_as_viewer(
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     DownstreamMessage,
 ) {
+    let (socket, joined, _typed_input) = join_as_viewer_with_typed_input(ws_url).await;
+    (socket, joined)
+}
+
+async fn join_as_viewer_with_typed_input(
+    ws_url: String,
+) -> (
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    DownstreamMessage,
+    String,
+) {
     let (mut socket, response) = tokio_tungstenite::connect_async(ws_url)
         .await
         .expect("guest should connect with the correct secret");
@@ -83,7 +94,25 @@ async fn join_as_viewer(
         panic!("expected text JoinedSuccessfully, got {message:?}");
     };
     let joined = DownstreamMessage::from_json(text.as_ref()).expect("parse JoinedSuccessfully");
-    (socket, joined)
+
+    // The hub always follows JoinedSuccessfully (+ durable backlog) with the
+    // latest typed-input snapshot so late guests mirror in-progress typing.
+    let typed_message = socket
+        .next()
+        .await
+        .expect("hub should send typed-input snapshot")
+        .expect("typed-input snapshot should not error");
+    let Message::Text(typed_text) = typed_message else {
+        panic!("expected text LocalShareTypedInput, got {typed_message:?}");
+    };
+    let typed_json: serde_json::Value =
+        serde_json::from_str(typed_text.as_ref()).expect("parse LocalShareTypedInput");
+    let typed_input = typed_json["LocalShareTypedInput"]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+
+    (socket, joined, typed_input)
 }
 
 #[test]
@@ -390,6 +419,154 @@ fn publish_pty_bytes_reaches_joined_guest() {
     });
 
     hub.stop();
+}
+
+/// A guest that opens the link some time after the share started must still
+/// receive what it missed: the scrollback snapshot only covers the session up
+/// to share start, so everything published since then is replayed on join.
+#[test]
+fn events_published_before_join_are_replayed_to_a_late_guest() {
+    let mut hub = LocalSessionShareHub::new();
+    let handle = hub.start(loopback_ip(), 0).expect("start should succeed");
+
+    hub.publish_pty_bytes(b"ran before the guest joined")
+        .expect("publish should succeed");
+    hub.publish_pty_bytes(b" and more")
+        .expect("publish should succeed");
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let (mut socket, _) = join_as_viewer(guest_ws_url(&handle)).await;
+
+        let mut replayed = Vec::new();
+        for _ in 0..2 {
+            let message = socket
+                .next()
+                .await
+                .expect("hub should replay the backlog")
+                .expect("replay should not error");
+            let Message::Text(text) = message else {
+                panic!("expected text OrderedTerminalEvent, got {message:?}");
+            };
+            let DownstreamMessage::OrderedTerminalEvent(event) =
+                DownstreamMessage::from_json(text.as_ref()).expect("parse event")
+            else {
+                panic!("expected OrderedTerminalEvent");
+            };
+            let session_sharing_protocol::common::OrderedTerminalEventType::PtyBytesRead { bytes } =
+                event.event_type
+            else {
+                panic!("expected PtyBytesRead");
+            };
+            replayed.extend(lz4_flex::block::decompress_size_prepended(&bytes).unwrap());
+        }
+        assert_eq!(replayed, b"ran before the guest joined and more");
+
+        // Live events still arrive exactly once after the backlog.
+        hub.publish_pty_bytes(b" live")
+            .expect("publish should succeed");
+        let message = socket
+            .next()
+            .await
+            .expect("hub should broadcast")
+            .expect("broadcast should not error");
+        let Message::Text(text) = message else {
+            panic!("expected text OrderedTerminalEvent, got {message:?}");
+        };
+        let DownstreamMessage::OrderedTerminalEvent(event) =
+            DownstreamMessage::from_json(text.as_ref()).expect("parse event")
+        else {
+            panic!("expected OrderedTerminalEvent");
+        };
+        let session_sharing_protocol::common::OrderedTerminalEventType::PtyBytesRead { bytes } =
+            event.event_type
+        else {
+            panic!("expected PtyBytesRead");
+        };
+        assert_eq!(
+            lz4_flex::block::decompress_size_prepended(&bytes).unwrap(),
+            b" live"
+        );
+    });
+
+    hub.stop();
+}
+
+#[test]
+fn typed_input_is_mirrored_live_and_on_late_join() {
+    let mut hub = LocalSessionShareHub::new();
+    let handle = hub.start(loopback_ip(), 0).expect("start should succeed");
+    let publisher = hub.event_publisher().expect("publisher while active");
+
+    publisher
+        .publish_typed_input("pwd".to_owned())
+        .expect("publish typed input");
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let (mut socket, _, typed) = join_as_viewer_with_typed_input(guest_ws_url(&handle)).await;
+        assert_eq!(typed, "pwd");
+
+        publisher
+            .publish_typed_input("pwd -P".to_owned())
+            .expect("publish typed input update");
+
+        let message = socket
+            .next()
+            .await
+            .expect("hub should broadcast typed input")
+            .expect("broadcast should not error");
+        let Message::Text(text) = message else {
+            panic!("expected text LocalShareTypedInput, got {message:?}");
+        };
+        let json: serde_json::Value =
+            serde_json::from_str(text.as_ref()).expect("parse LocalShareTypedInput");
+        assert_eq!(json["LocalShareTypedInput"]["text"], "pwd -P");
+
+        // Identical text is coalesced — no extra frame.
+        publisher
+            .publish_typed_input("pwd -P".to_owned())
+            .expect("publish identical typed input");
+        publisher
+            .publish_typed_input("".to_owned())
+            .expect("clear typed input");
+        let message = socket
+            .next()
+            .await
+            .expect("hub should broadcast cleared typed input")
+            .expect("broadcast should not error");
+        let Message::Text(text) = message else {
+            panic!("expected text LocalShareTypedInput, got {message:?}");
+        };
+        let json: serde_json::Value =
+            serde_json::from_str(text.as_ref()).expect("parse LocalShareTypedInput");
+        assert_eq!(json["LocalShareTypedInput"]["text"], "");
+    });
+
+    hub.stop();
+}
+
+#[test]
+fn replay_log_drops_oldest_frames_past_the_cap() {
+    let mut log = ReplayLog::default();
+    let frame = "x".repeat(LOCAL_SHARE_MAX_REPLAY_BYTES / 4);
+    for _ in 0..6 {
+        log.push(frame.clone());
+    }
+
+    assert!(log.bytes <= LOCAL_SHARE_MAX_REPLAY_BYTES);
+    assert_eq!(log.frames.len(), 4);
+
+    // A single oversized frame is still kept, so the newest output is never lost.
+    let mut log = ReplayLog::default();
+    log.push("y".repeat(LOCAL_SHARE_MAX_REPLAY_BYTES * 2));
+    assert_eq!(log.frames.len(), 1);
 }
 
 #[test]

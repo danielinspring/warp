@@ -11,7 +11,7 @@ use serde::Serialize;
 use session_sharing_protocol::viewer::{DownstreamMessage, UpstreamMessage};
 use tower_http::services::ServeDir;
 
-use super::hub::ShareState;
+use super::hub::{typed_input_message_json, ShareState};
 use super::protocol::{joined_successfully, reply_for_upstream};
 
 /// Guest page served when no Warp WASM bundle is staged. Speaks the real
@@ -115,8 +115,46 @@ async fn ws_upgrade(
 
 async fn handle_socket(socket: WebSocket, state: Arc<ShareState>) {
     let (mut sink, mut stream) = socket.split();
-    let mut events = state.subscribe_events();
-    let mut joined = false;
+
+    // Join phase: nothing is streamed to a guest before it identifies itself,
+    // so subscribing only once `Initialize` arrives loses nothing — and lets
+    // the backlog snapshot and the subscription be taken atomically.
+    let mut events = loop {
+        match stream.next().await {
+            Some(Ok(Message::Text(text))) => {
+                let Ok(UpstreamMessage::Initialize(_)) = UpstreamMessage::from_json(text.as_ref())
+                else {
+                    continue;
+                };
+                let reply = joined_successfully(state.window_size(), state.scrollback());
+                if send_downstream(&mut sink, reply).await.is_err() {
+                    return;
+                }
+                let (backlog, typed_input, events) = state.join();
+                // Typed-input snapshot first so the guest footer can update
+                // while a large scrollback backlog is still flushing.
+                if let Ok(json) = typed_input_message_json(&typed_input) {
+                    if sink.send(Message::Text(json.into())).await.is_err() {
+                        return;
+                    }
+                }
+                for frame in backlog {
+                    if sink.send(Message::Text(frame.into())).await.is_err() {
+                        return;
+                    }
+                }
+                break events;
+            }
+            Some(Ok(Message::Ping(payload))) => {
+                if sink.send(Message::Pong(payload)).await.is_err() {
+                    return;
+                }
+            }
+            Some(Ok(Message::Close(_))) | None => return,
+            Some(Ok(_)) => {}
+            Some(Err(_)) => return,
+        }
+    };
 
     loop {
         tokio::select! {
@@ -126,17 +164,6 @@ async fn handle_socket(socket: WebSocket, state: Arc<ShareState>) {
                         let Ok(message) = UpstreamMessage::from_json(text.as_ref()) else {
                             continue;
                         };
-                        if !joined {
-                            if let UpstreamMessage::Initialize(_) = &message {
-                                let reply =
-                                    joined_successfully(state.window_size(), state.scrollback());
-                                if send_downstream(&mut sink, reply).await.is_err() {
-                                    return;
-                                }
-                                joined = true;
-                            }
-                            continue;
-                        }
                         if let Some(reply) = reply_for_upstream(message) {
                             if send_downstream(&mut sink, reply).await.is_err() {
                                 return;
@@ -153,7 +180,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<ShareState>) {
                     Some(Err(_)) => return,
                 }
             }
-            event = events.recv(), if joined => {
+            event = events.recv() => {
                 match event {
                     Ok(json) => {
                         if sink.send(Message::Text(json.into())).await.is_err() {

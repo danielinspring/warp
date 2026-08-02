@@ -5,7 +5,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use chrono::Local;
 use session_sharing_protocol::common::WindowSize;
 use warpui::clipboard::ClipboardContent;
-use warpui::{SingletonEntity, ViewContext};
+use warpui::{AppContext, SingletonEntity, ViewContext};
 
 use super::{
     InlineBannerItem, InlineBannerType, SharedSessionBanners, TerminalAction, TerminalView,
@@ -89,6 +89,13 @@ impl TerminalView {
         {
             let scrollback = crate::terminal::shared_session::SharedSessionScrollbackType::All
                 .to_scrollback(&self.model.lock());
+            // Guests only ever see this snapshot for pre-share history, so log
+            // its size (never its contents) to make an empty one diagnosable.
+            log::info!(
+                "Local LAN share scrollback snapshot: {} blocks, {} bytes",
+                scrollback.blocks.len(),
+                scrollback.num_bytes().as_u64()
+            );
             if let Err(err) = self.local_session_share_hub.set_scrollback(scrollback) {
                 log::warn!("Failed to set local LAN share scrollback: {err}");
             }
@@ -97,6 +104,10 @@ impl TerminalView {
         if let Some(publisher) = self.local_session_share_hub.event_publisher() {
             self.model.lock().set_local_share_event_publisher(publisher);
         }
+
+        // Mirror whatever is already in the input editor so a guest that joins
+        // immediately sees in-progress typing, not just post-share keystrokes.
+        self.publish_local_share_typed_input(ctx);
 
         self.insert_local_lan_share_started_banner(ctx);
 
@@ -268,6 +279,18 @@ impl TerminalView {
     /// True when local LAN share is active on this pane (for cloud mutual exclusion).
     pub(crate) fn is_local_lan_share_active(&self) -> bool {
         self.local_session_share_hub.is_active()
+    }
+
+    /// Publishes the current Warp input-editor text to local-share guests so
+    /// typing is mirrored in the lite viewer before Enter.
+    pub(crate) fn publish_local_share_typed_input(&self, ctx: &AppContext) {
+        let Some(publisher) = self.local_session_share_hub.event_publisher() else {
+            return;
+        };
+        let text = self.input().as_ref(ctx).buffer_text(ctx);
+        if let Err(err) = publisher.publish_typed_input(text) {
+            log::warn!("Failed to publish local LAN share typed input: {err}");
+        }
     }
 
     pub(crate) fn toast_local_share_blocks_cloud(&self, ctx: &mut ViewContext<Self>) {
