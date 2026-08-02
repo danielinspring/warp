@@ -14,18 +14,12 @@ use tower_http::services::ServeDir;
 use super::hub::ShareState;
 use super::protocol::{joined_successfully, reply_for_upstream};
 
-const PLACEHOLDER_HTML: &str = r#"<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <title>Warp local session share</title>
-  </head>
-  <body>
-    <h1>Local session share (view-only hub active)</h1>
-    <p>WASM viewer coming soon.</p>
-  </body>
-</html>
-"#;
+/// Guest page served when no Warp WASM bundle is staged. Speaks the real
+/// session-sharing-protocol WS dialect and rebuilds Warp's block UI in the
+/// browser: scrollback `SerializedBlock`s are rendered directly, and live PTY
+/// output is cut into blocks using the shell hooks (Preexec / CommandFinished /
+/// Precmd) that ride along in the stream.
+const LITE_VIEWER_HTML: &str = include_str!("lite_viewer.html");
 
 #[derive(Serialize)]
 struct BootConfig {
@@ -81,7 +75,7 @@ async fn serve_session_page(
         }
     }
 
-    Html(PLACEHOLDER_HTML).into_response()
+    Html(LITE_VIEWER_HTML).into_response()
 }
 
 async fn serve_boot_json(

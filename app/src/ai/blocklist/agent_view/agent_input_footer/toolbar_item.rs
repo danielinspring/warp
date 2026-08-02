@@ -63,6 +63,8 @@ pub enum AgentToolbarItemKind {
     #[serde(alias = "ImageAttach")]
     FileAttach,
     ShareSession,
+    /// Desktop-only local LAN / Tailscale share (next to `/remote-control`).
+    LocalLanShare,
 
     // CLI agent only – opens settings to the Coding Agents section.
     Settings,
@@ -77,9 +79,11 @@ pub enum AgentToolbarItemKind {
 impl AgentToolbarItemKind {
     pub fn available_in(&self) -> ToolbarAvailability {
         match self {
-            Self::ContextChip(_) | Self::VoiceInput | Self::FileAttach | Self::ShareSession => {
-                ToolbarAvailability::Both
-            }
+            Self::ContextChip(_)
+            | Self::VoiceInput
+            | Self::FileAttach
+            | Self::ShareSession
+            | Self::LocalLanShare => ToolbarAvailability::Both,
             Self::ModelSelector
             | Self::NLDToggle
             | Self::ContextWindowUsage
@@ -100,7 +104,9 @@ impl AgentToolbarItemKind {
         is_cloud_mode: bool,
     ) -> bool {
         match self {
-            Self::Settings | Self::ShareSession | Self::FileExplorer => !status.is_viewer(),
+            Self::Settings | Self::ShareSession | Self::LocalLanShare | Self::FileExplorer => {
+                !status.is_viewer()
+            }
             Self::FileAttach => !status.is_viewer() || is_cloud_mode,
             Self::FastForwardToggle => !status.is_viewer() || status.is_executor(),
             // Handoff is host-initiated; viewers cannot hand off another user's conversation.
@@ -125,6 +131,7 @@ impl AgentToolbarItemKind {
             Self::FileExplorer => "File Explorer",
             Self::RichInput => "Rich Input",
             Self::ShareSession => "/remote-control",
+            Self::LocalLanShare => "Local Share",
             Self::Settings => "Settings",
             Self::FastForwardToggle => "Fast Forward",
             Self::HandoffToCloud => "Hand off to cloud",
@@ -142,6 +149,7 @@ impl AgentToolbarItemKind {
             Self::FileExplorer => Some(Icon::FileCopy),
             Self::RichInput => Some(Icon::TextInput),
             Self::ShareSession => Some(Icon::Phone01),
+            Self::LocalLanShare => Some(Icon::Globe),
             Self::Settings => Some(Icon::Settings),
             Self::FastForwardToggle => Some(Icon::FastForward),
             // The bundled `upload-cloud-01.svg` (cloud-with-upward-arrow) is the
@@ -164,6 +172,7 @@ impl AgentToolbarItemKind {
             | Self::FastForwardToggle
             | Self::HandoffToCloud
             | Self::ShareSession
+            | Self::LocalLanShare
             | Self::FileExplorer
             | Self::RichInput
             | Self::Settings => false,
@@ -218,6 +227,10 @@ impl AgentToolbarItemKind {
         {
             items.push(Self::ShareSession);
         }
+        #[cfg(not(target_family = "wasm"))]
+        if FeatureFlag::LocalLanSessionShare.is_enabled() {
+            items.push(Self::LocalLanShare);
+        }
         if FeatureFlag::OzHandoff.is_enabled()
             && FeatureFlag::HandoffLocalCloud.is_enabled()
             && cfg!(all(feature = "local_fs", not(target_family = "wasm")))
@@ -250,6 +263,10 @@ impl AgentToolbarItemKind {
         {
             items.push(Self::ShareSession);
         }
+        #[cfg(not(target_family = "wasm"))]
+        if FeatureFlag::LocalLanSessionShare.is_enabled() {
+            items.push(Self::LocalLanShare);
+        }
         if FeatureFlag::OzHandoff.is_enabled()
             && FeatureFlag::HandoffLocalCloud.is_enabled()
             && cfg!(all(feature = "local_fs", not(target_family = "wasm")))
@@ -270,6 +287,10 @@ impl AgentToolbarItemKind {
             && FeatureFlag::HOARemoteControl.is_enabled()
         {
             items.push(Self::ShareSession);
+        }
+        #[cfg(not(target_family = "wasm"))]
+        if FeatureFlag::LocalLanSessionShare.is_enabled() {
+            items.push(Self::LocalLanShare);
         }
         items.push(Self::FileExplorer);
         if FeatureFlag::CLIAgentRichInput.is_enabled() {
@@ -304,6 +325,10 @@ impl AgentToolbarItemKind {
             && FeatureFlag::HOARemoteControl.is_enabled()
         {
             items.push(Self::ShareSession);
+        }
+        #[cfg(not(target_family = "wasm"))]
+        if FeatureFlag::LocalLanSessionShare.is_enabled() {
+            items.push(Self::LocalLanShare);
         }
         items
     }

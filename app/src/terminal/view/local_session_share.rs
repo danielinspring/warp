@@ -16,7 +16,8 @@ use crate::terminal::local_session_share::{
     all_interfaces_label, bind_candidate_label, is_all_interfaces, non_loopback_candidates,
     resolve_palette_bind_ip, LocalSessionShareHub, COPY_LOCAL_SHARE_LINK_TEXT,
     LOCAL_SHARE_ACTIVE_TOAST, LOCAL_SHARE_ALL_INTERFACES_WARNING, LOCAL_SHARE_BLOCKS_CLOUD_TOAST,
-    LOCAL_SHARE_CLOUD_BLOCK_TOAST, LOCAL_SHARE_ROTATED_TOAST, LOCAL_SHARE_START_FAILED_TOAST,
+    LOCAL_SHARE_CLOUD_BLOCK_TOAST, LOCAL_SHARE_LITE_VIEWER_TOAST, LOCAL_SHARE_ROTATED_TOAST,
+    LOCAL_SHARE_START_FAILED_TOAST,
 };
 use crate::view_components::DismissibleToast;
 
@@ -104,6 +105,8 @@ impl TerminalView {
 
         if is_all_interfaces(bind_ip) {
             self.show_local_share_toast(LOCAL_SHARE_ALL_INTERFACES_WARNING, ctx);
+        } else if !handle.has_wasm_viewer {
+            self.show_local_share_toast(LOCAL_SHARE_LITE_VIEWER_TOAST, ctx);
         } else if let Some(label) = bind_label {
             self.show_local_share_toast(&format!("Local network share active on {label}"), ctx);
         } else {
@@ -151,6 +154,9 @@ impl TerminalView {
     }
 
     /// Pane-overflow menu items to start a share on a chosen interface.
+    ///
+    /// Note: pane header overflow does not support [`MenuItem::Header`] /
+    /// [`MenuItem::Submenu`] (it panics), so labels are inlined on each item.
     pub(crate) fn local_lan_share_bind_menu_items() -> Vec<MenuItem<TerminalAction>> {
         let mut items = Vec::new();
         let candidates = non_loopback_candidates();
@@ -158,23 +164,21 @@ impl TerminalView {
             return items;
         }
 
-        items.push(MenuItem::Header {
-            fields: MenuItemFields::new("Start local network share on…"),
-            clickable: false,
-            right_side_fields: None,
-        });
         for candidate in &candidates {
             items.push(
-                MenuItemFields::new(bind_candidate_label(candidate))
-                    .with_on_select_action(TerminalAction::StartLocalLanShareWithBind {
-                        bind_ip: candidate.addr,
-                    })
-                    .into_item(),
+                MenuItemFields::new(format!(
+                    "Start local share on {}",
+                    bind_candidate_label(candidate)
+                ))
+                .with_on_select_action(TerminalAction::StartLocalLanShareWithBind {
+                    bind_ip: candidate.addr,
+                })
+                .into_item(),
             );
         }
         items.push(MenuItem::Separator);
         items.push(
-            MenuItemFields::new(all_interfaces_label())
+            MenuItemFields::new(format!("Start local share — {}", all_interfaces_label()))
                 .with_on_select_action(TerminalAction::StartLocalLanShareWithBind {
                     bind_ip: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
                 })
@@ -247,6 +251,9 @@ impl TerminalView {
         self.pane_configuration.update(ctx, |pane_config, ctx| {
             pane_config.refresh_pane_header_overflow_menu_items(ctx);
             pane_config.notify_header_content_changed(ctx);
+        });
+        self.use_agent_footer.update(ctx, |footer, ctx| {
+            footer.notify_and_notify_children(ctx);
         });
     }
 

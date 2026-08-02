@@ -2533,6 +2533,11 @@ impl Input {
                 | AgentInputFooterEvent::StopRemoteControl => {
                     // Handled by UseAgentToolbar's subscription, not here.
                 }
+                #[cfg(not(target_family = "wasm"))]
+                AgentInputFooterEvent::StartLocalLanShare
+                | AgentInputFooterEvent::StopLocalLanShare => {
+                    // Handled by UseAgentToolbar's subscription, not here.
+                }
                 // These events are handled by UseAgentToolbar's subscription.
                 // The UseAgentToolbar shares this same AgentInputFooter instance,
                 // so its subscriber always fires alongside ours for every chip click.

@@ -198,6 +198,10 @@ pub struct AgentInputFooter {
     file_button: ViewHandle<ActionButton>,
     start_remote_control_button: ViewHandle<ActionButton>,
     stop_remote_control_button: ViewHandle<ActionButton>,
+    #[cfg(not(target_family = "wasm"))]
+    start_local_lan_share_button: ViewHandle<ActionButton>,
+    #[cfg(not(target_family = "wasm"))]
+    stop_local_lan_share_button: ViewHandle<ActionButton>,
     context_window_button: ViewHandle<ActionButton>,
     model_selector: ViewHandle<ProfileModelSelector>,
     environment_selector: Option<ViewHandle<EnvironmentSelector>>,
@@ -604,6 +608,31 @@ impl AgentInputFooter {
                 })
         });
 
+        #[cfg(not(target_family = "wasm"))]
+        let start_local_lan_share_button = ctx.add_typed_action_view(|_ctx| {
+            ActionButton::new("Local Share", RemoteControlButtonTheme)
+                .with_icon(Icon::Globe)
+                .with_tooltip("Start local network share")
+                .with_size(cli_button_size)
+                .with_tooltip_alignment(TooltipAlignment::Left)
+                .on_click(|ctx| {
+                    ctx.dispatch_typed_action(AgentInputFooterAction::StartLocalLanShare);
+                })
+        });
+
+        #[cfg(not(target_family = "wasm"))]
+        let stop_local_lan_share_button = ctx.add_typed_action_view(|_ctx| {
+            ActionButton::new("Stop local share", RemoteControlButtonTheme)
+                .with_icon(Icon::StopFilled)
+                .with_icon_ansi_color(AnsiColorIdentifier::Red)
+                .with_tooltip("Stop local network share")
+                .with_size(cli_button_size)
+                .with_tooltip_alignment(TooltipAlignment::Left)
+                .on_click(|ctx| {
+                    ctx.dispatch_typed_action(AgentInputFooterAction::StopLocalLanShare);
+                })
+        });
+
         let context_window_button = ctx.add_typed_action_view(|_ctx| {
             ActionButton::new("", AgentInputButtonTheme)
                 .with_icon(Icon::ContextRemaining100)
@@ -839,6 +868,10 @@ impl AgentInputFooter {
             settings_button,
             start_remote_control_button,
             stop_remote_control_button,
+            #[cfg(not(target_family = "wasm"))]
+            start_local_lan_share_button,
+            #[cfg(not(target_family = "wasm"))]
+            stop_local_lan_share_button,
             install_plugin_button,
             plugin_instructions_button,
             update_plugin_button,
@@ -1411,6 +1444,8 @@ impl AgentInputFooter {
         item: &AgentToolbarItemKind,
         shared_status: &SharedSessionStatus,
         is_conversation_transcript_context: bool,
+        is_shared_ambient_agent_session: bool,
+        local_lan_share_active: bool,
         app: &AppContext,
     ) -> Option<Box<dyn Element>> {
         if !item.available_in().is_available_for_cli()
@@ -1423,8 +1458,15 @@ impl AgentInputFooter {
         // it doesn't make sense to offer remote-control when already
         // viewing a cloud agent's shared session.
         if matches!(item, AgentToolbarItemKind::ShareSession)
+            && (is_conversation_transcript_context || is_shared_ambient_agent_session)
+        {
+            return None;
+        }
+
+        #[cfg(not(target_family = "wasm"))]
+        if matches!(item, AgentToolbarItemKind::LocalLanShare)
             && (is_conversation_transcript_context
-                || self.terminal_model.lock().is_shared_ambient_agent_session())
+                || shared_status.is_sharer_or_viewer() && !local_lan_share_active)
         {
             return None;
         }
@@ -1467,6 +1509,20 @@ impl AgentInputFooter {
                 };
                 Some(ChildView::new(button).finish())
             }
+            #[cfg(not(target_family = "wasm"))]
+            AgentToolbarItemKind::LocalLanShare => {
+                if !FeatureFlag::LocalLanSessionShare.is_enabled() {
+                    return None;
+                }
+                let button = if local_lan_share_active {
+                    &self.stop_local_lan_share_button
+                } else {
+                    &self.start_local_lan_share_button
+                };
+                Some(ChildView::new(button).finish())
+            }
+            #[cfg(target_family = "wasm")]
+            AgentToolbarItemKind::LocalLanShare => None,
             AgentToolbarItemKind::Settings => Some(ChildView::new(&self.settings_button).finish()),
             // Handled by the available_in() guard above; included for exhaustiveness.
             AgentToolbarItemKind::ModelSelector
@@ -1485,7 +1541,13 @@ impl AgentInputFooter {
         // the lock before calling into helpers like `should_use_manual_mode`
         // and `render_cli_toolbar_item`, which may re-lock the same model and
         // would deadlock since the lock is non-reentrant.
-        let (background_color, shared_status, is_conversation_transcript_context) = {
+        let (
+            background_color,
+            shared_status,
+            is_conversation_transcript_context,
+            is_shared_ambient_agent_session,
+            local_lan_share_active,
+        ) = {
             let terminal_model = self.terminal_model.lock();
             let background_color = if terminal_model.is_alt_screen_active() {
                 terminal_model
@@ -1498,20 +1560,31 @@ impl AgentInputFooter {
             let shared_status = terminal_model.shared_session_status().clone();
             let is_conversation_transcript_context =
                 is_conversation_transcript_context(self.terminal_view_id, &terminal_model, app);
+            let is_shared_ambient_agent_session = terminal_model.is_shared_ambient_agent_session();
+            #[cfg(not(target_family = "wasm"))]
+            let local_lan_share_active = terminal_model.local_lan_share_status().is_active();
+            #[cfg(target_family = "wasm")]
+            let local_lan_share_active = false;
             (
                 background_color,
                 shared_status,
                 is_conversation_transcript_context,
+                is_shared_ambient_agent_session,
+                local_lan_share_active,
             )
         };
 
         let session_settings = SessionSettings::as_ref(app);
-        let left_items = session_settings
-            .cli_agent_footer_chip_selection
-            .left_items();
-        let right_items = session_settings
-            .cli_agent_footer_chip_selection
-            .right_items();
+        let left_items = ensure_local_lan_share_toolbar_item(
+            session_settings
+                .cli_agent_footer_chip_selection
+                .left_items(),
+        );
+        let right_items = ensure_local_lan_share_toolbar_item(
+            session_settings
+                .cli_agent_footer_chip_selection
+                .right_items(),
+        );
 
         let mut left_buttons = Wrap::row()
             .with_main_axis_size(MainAxisSize::Min)
@@ -1569,6 +1642,8 @@ impl AgentInputFooter {
                 item,
                 &shared_status,
                 is_conversation_transcript_context,
+                is_shared_ambient_agent_session,
+                local_lan_share_active,
                 app,
             ) {
                 left_buttons.add_child(element);
@@ -1585,6 +1660,8 @@ impl AgentInputFooter {
                 item,
                 &shared_status,
                 is_conversation_transcript_context,
+                is_shared_ambient_agent_session,
+                local_lan_share_active,
                 app,
             ) {
                 right_buttons.add_child(element);
@@ -2031,6 +2108,7 @@ impl AgentInputFooter {
         shared_status: &SharedSessionStatus,
         is_cloud_context: bool,
         is_conversation_transcript_context: bool,
+        local_lan_share_active: bool,
         app: &AppContext,
     ) -> Option<Box<dyn Element>> {
         let is_cloud_mode = FeatureFlag::CloudModeImageContext.is_enabled()
@@ -2142,6 +2220,25 @@ impl AgentInputFooter {
                 };
                 Some(ChildView::new(button).finish())
             }
+            #[cfg(not(target_family = "wasm"))]
+            AgentToolbarItemKind::LocalLanShare => {
+                if is_conversation_transcript_context
+                    || !FeatureFlag::LocalLanSessionShare.is_enabled()
+                {
+                    return None;
+                }
+                if shared_status.is_sharer_or_viewer() && !local_lan_share_active {
+                    return None;
+                }
+                let button = if local_lan_share_active {
+                    &self.stop_local_lan_share_button
+                } else {
+                    &self.start_local_lan_share_button
+                };
+                Some(ChildView::new(button).finish())
+            }
+            #[cfg(target_family = "wasm")]
+            AgentToolbarItemKind::LocalLanShare => None,
             AgentToolbarItemKind::FastForwardToggle => FeatureFlag::FastForwardAutoexecuteButton
                 .is_enabled()
                 .then(|| ChildView::new(&self.fast_forward_button).finish()),
@@ -2207,8 +2304,12 @@ impl View for AgentInputFooter {
         }
 
         let session_settings = SessionSettings::as_ref(app);
-        let left_items = session_settings.agent_footer_chip_selection.left_items();
-        let right_items = session_settings.agent_footer_chip_selection.right_items();
+        let left_items = ensure_local_lan_share_toolbar_item(
+            session_settings.agent_footer_chip_selection.left_items(),
+        );
+        let right_items = ensure_local_lan_share_toolbar_item(
+            session_settings.agent_footer_chip_selection.right_items(),
+        );
 
         let mut left_buttons = Wrap::row()
             .with_main_axis_size(MainAxisSize::Min)
@@ -2234,21 +2335,39 @@ impl View for AgentInputFooter {
                 .with_child(ChildView::new(&self.handoff_environment_selector).finish());
         }
 
-        let terminal_model = self.terminal_model.lock();
-        let shared_status = terminal_model.shared_session_status();
-        let is_cloud_context = super::is_in_cloud_context(
-            terminal_model.block_list().agent_view_state(),
-            &terminal_model,
-        );
-        let is_conversation_transcript_context =
-            is_conversation_transcript_context(self.terminal_view_id, &terminal_model, app);
+        let (
+            shared_status,
+            is_cloud_context,
+            is_conversation_transcript_context,
+            local_lan_share_active,
+        ) = {
+            let terminal_model = self.terminal_model.lock();
+            let shared_status = terminal_model.shared_session_status().clone();
+            let is_cloud_context = super::is_in_cloud_context(
+                terminal_model.block_list().agent_view_state(),
+                &terminal_model,
+            );
+            let is_conversation_transcript_context =
+                is_conversation_transcript_context(self.terminal_view_id, &terminal_model, app);
+            #[cfg(not(target_family = "wasm"))]
+            let local_lan_share_active = terminal_model.local_lan_share_status().is_active();
+            #[cfg(target_family = "wasm")]
+            let local_lan_share_active = false;
+            (
+                shared_status,
+                is_cloud_context,
+                is_conversation_transcript_context,
+                local_lan_share_active,
+            )
+        };
 
         for item in &left_items {
             if let Some(element) = self.render_toolbar_item(
                 item,
-                shared_status,
+                &shared_status,
                 is_cloud_context,
                 is_conversation_transcript_context,
+                local_lan_share_active,
                 app,
             ) {
                 left_buttons.add_child(element);
@@ -2273,9 +2392,10 @@ impl View for AgentInputFooter {
             for item in &right_items {
                 if let Some(element) = self.render_toolbar_item(
                     item,
-                    shared_status,
+                    &shared_status,
                     is_cloud_context,
                     is_conversation_transcript_context,
+                    local_lan_share_active,
                     app,
                 ) {
                     right_buttons.add_child(element);
@@ -2324,6 +2444,10 @@ pub enum AgentInputFooterAction {
     DismissPluginChip,
     StartRemoteControl,
     StopRemoteControl,
+    #[cfg(not(target_family = "wasm"))]
+    StartLocalLanShare,
+    #[cfg(not(target_family = "wasm"))]
+    StopLocalLanShare,
     OpenCodingAgentSettings,
     /// User clicked the "Hand off to cloud" footer chip. The terminal `Input`
     /// subscriber decides whether to dispatch the immediate empty-prompt
@@ -2512,6 +2636,14 @@ impl TypedActionView for AgentInputFooter {
             AgentInputFooterAction::StopRemoteControl => {
                 ctx.emit(AgentInputFooterEvent::StopRemoteControl);
             }
+            #[cfg(not(target_family = "wasm"))]
+            AgentInputFooterAction::StartLocalLanShare => {
+                ctx.emit(AgentInputFooterEvent::StartLocalLanShare);
+            }
+            #[cfg(not(target_family = "wasm"))]
+            AgentInputFooterAction::StopLocalLanShare => {
+                ctx.emit(AgentInputFooterEvent::StopLocalLanShare);
+            }
             AgentInputFooterAction::OpenCodingAgentSettings => {
                 #[cfg(not(target_family = "wasm"))]
                 ctx.dispatch_typed_action_deferred(WorkspaceAction::ScrollToSettingsWidget {
@@ -2551,6 +2683,10 @@ pub enum AgentInputFooterEvent {
     ToggleFileExplorer(CLIAgent),
     StartRemoteControl,
     StopRemoteControl,
+    #[cfg(not(target_family = "wasm"))]
+    StartLocalLanShare,
+    #[cfg(not(target_family = "wasm"))]
+    StopLocalLanShare,
     OpenRichInput,
     HideRichInput,
     ToggledChipMenu {
@@ -2662,6 +2798,32 @@ impl ActionButtonTheme for RemoteControlButtonTheme {
     fn should_opt_out_of_contrast_adjustment(&self) -> bool {
         AgentInputButtonTheme.should_opt_out_of_contrast_adjustment()
     }
+}
+
+/// Ensures the Local Share chip appears next to `/remote-control` even when the
+/// user has a saved toolbar layout that predates this item.
+fn ensure_local_lan_share_toolbar_item(
+    mut items: Vec<AgentToolbarItemKind>,
+) -> Vec<AgentToolbarItemKind> {
+    #[cfg(not(target_family = "wasm"))]
+    {
+        if !FeatureFlag::LocalLanSessionShare.is_enabled()
+            || items
+                .iter()
+                .any(|item| matches!(item, AgentToolbarItemKind::LocalLanShare))
+        {
+            return items;
+        }
+        if let Some(pos) = items
+            .iter()
+            .position(|item| matches!(item, AgentToolbarItemKind::ShareSession))
+        {
+            items.insert(pos + 1, AgentToolbarItemKind::LocalLanShare);
+        } else {
+            items.push(AgentToolbarItemKind::LocalLanShare);
+        }
+    }
+    items
 }
 
 /// Theme for the mic button.

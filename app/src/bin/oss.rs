@@ -23,6 +23,9 @@ fn main() -> Result<()> {
     );
     if cfg!(debug_assertions) {
         state = state.with_additional_features(warp_core::features::DEBUG_FLAGS);
+        // Dogfood local LAN session share on debug OSS builds (footer Local Share chip).
+        state = state
+            .with_additional_features(&[warp_core::features::FeatureFlag::LocalLanSessionShare]);
     }
     #[cfg(feature = "local_ollama_runtime_tool_use")]
     {

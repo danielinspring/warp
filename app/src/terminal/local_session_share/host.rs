@@ -9,6 +9,8 @@ use super::bind::{non_loopback_candidates, BindCandidate};
 pub const COPY_LOCAL_SHARE_LINK_TEXT: &str = "Local share link copied";
 pub const LOCAL_SHARE_ACTIVE_TOAST: &str =
     "Local network share active — anyone with the link on this network can view";
+pub const LOCAL_SHARE_LITE_VIEWER_TOAST: &str =
+    "Local network share active — guests see a read-only block view of this session";
 pub const LOCAL_SHARE_START_FAILED_TOAST: &str = "Could not start local network share";
 pub const LOCAL_SHARE_CLOUD_BLOCK_TOAST: &str =
     "Stop cloud session sharing before starting a local network share";

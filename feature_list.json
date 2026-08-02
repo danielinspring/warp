@@ -2,7 +2,7 @@
   "roadmap": {
     "name": "Local Ollama Agent Runtime",
     "source": "dan_docs/reports/local_agent_runtime_competitive_gap_report.md",
-      "active_feature": "",
+    "active_feature": "",
     "status_values": [
       "not-started",
       "in-progress",
@@ -744,6 +744,77 @@
         "./script/format --check"
       ],
       "evidence": "2026-08-01: Pane overflow lists bind candidates + 0.0.0.0 with warning toast; StartLocalLanShareWithBind; palette resolve_palette_bind_ip with interface toast. local_session_share: 31 passed; format --check passed."
+    },
+    {
+      "id": "feat-033",
+      "name": "Local Share pane header button",
+      "description": "Add a Local Share control next to the cloud Share button in the terminal pane header so hosts can start/copy local LAN share without using only the overflow menu or Command Palette.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-028",
+        "feat-032"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "When LocalLanSessionShare is enabled on desktop, the terminal pane header shows a Local Share button after the cloud Share controls.",
+        "Inactive click starts local share (preferred bind / StartLocalLanShare); active click copies the current link.",
+        "Button is hidden while a cloud shared session is active and local share is not.",
+        "Pane header renders when the flag is enabled so the button is discoverable on single-pane terminals.",
+        "Focused unit tests and format check pass."
+      ],
+      "verification": [
+        "cargo test -p warp local_session_share --lib",
+        "./script/format --check"
+      ],
+      "evidence": "2026-08-01: Moved Local Share to agent input footer next to /remote-control (Globe chip Start/Stop). Ensures item is injected into saved toolbar layouts. Removed misplaced pane-header button. local_session_share: focused tests + format check."
+    },
+    {
+      "id": "feat-034",
+      "name": "Local share lite viewer + WASM auto-discover",
+      "description": "Serve a built-in view-only HTML guest that joins the local share WS and renders live PTY when no Warp WASM bundle is staged; auto-discover Resources/local_share_wasm or WARP_LOCAL_SHARE_WASM_DIR for the full WASM SPA.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-025",
+        "feat-026",
+        "feat-027"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "GET /local-session/{secret} serves the built-in lite viewer HTML when no WASM index.html is configured.",
+        "Lite viewer connects to same-origin WS, sends Initialize, and can decode LZ4 PtyBytesRead.",
+        "When WARP_LOCAL_SHARE_WASM_DIR or app Resources/local_share_wasm has index.html, the full WASM SPA is served instead.",
+        "ShareHandle.has_wasm_viewer reflects which path is active; host toast warns for lite mode.",
+        "Focused unit tests and format check pass."
+      ],
+      "verification": [
+        "cargo test -p warp local_session_share --lib",
+        "./script/format --check"
+      ],
+      "evidence": "2026-08-01: Replaced placeholder with include_str!(lite_viewer.html) WS guest (Initialize + LZ4 PtyBytesRead). resolve_wasm_bundle_dir also checks Resources/local_share_wasm. ShareHandle.has_wasm_viewer + lite toast. cargo test -p warp local_session_share --lib: 31 passed. format --check passed. WarpOss debug bundle relaunched."
+    },
+    {
+      "id": "feat-035",
+      "name": "Block-based local share guest viewer",
+      "description": "Render the local LAN share guest page as Warp-style blocks instead of a raw PTY dump: scrollback SerializedBlocks and live output cut into command blocks with cwd, git branch, exit code, duration and full ANSI styling.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-030",
+        "feat-034"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "Guest page renders one card per command (cwd/git header, bold command, styled output) rather than a single scrolling <pre>.",
+        "Scrollback JSON SerializedBlocks render with their stylized command/output, pwd, exit code and start/completed timing.",
+        "Live PTY is split into blocks from Warp shell hooks (Preexec / CommandFinished / Precmd) carried in the stream; hook payloads, in-band generator output and alt-screen frames never leak as text.",
+        "ANSI SGR (16/256/truecolor, bold, dim, italic, underline, inverse) plus CR/BS/tab/erase are rendered; failed blocks are marked with the exit code.",
+        "Light and dark palettes match app/src/themes/default_themes.rs; the host prompt and typed input show in a live footer strip.",
+        "Focused unit tests and format check pass."
+      ],
+      "verification": [
+        "cargo test -p warp local_session_share --lib",
+        "./script/format --check"
+      ],
+      "evidence": "2026-08-02: Rewrote lite_viewer.html as a block viewer (VT parser + line buffer + hook-driven block state machine + SerializedBlock scrollback decoding). Verified against a canned Warp PTY fixture (hooks, colored ls, failing grep, CR progress bar, vim alt-screen, in-band generator burst) in Node and in Chrome, light and dark. local_session_share: 31 passed; format --check passed."
     }
   ],
   "future_phases": [
@@ -760,7 +831,7 @@
     {
       "phase": "Phase D",
       "scope": [],
-      "note": "Phase D complete (feat-025–032). Next: desktop dogfood."
+      "note": "Phase D complete through feat-035 (block-based local share guest viewer)."
     }
   ]
 }

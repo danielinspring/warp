@@ -2,11 +2,11 @@
 
 ## Current Objective
 
-Phase D local LAN session share complete through bind address picker (feat-032). No active harness feature.
+Local LAN share guest opens a real viewer — Warp-style blocks by default (built-in HTML), full WASM when staged.
 
 ## Last Updated
 
-2026-08-01
+2026-08-02
 
 ## Active Feature
 
@@ -18,14 +18,11 @@ Phase D local LAN session share complete through bind address picker (feat-032).
 
 ## Current State
 
-- **feat-025–031 done:** hub through agent event fan-out.
-- **feat-032 done:** pane overflow lists per-interface Start + all-interfaces with warning toast; Command Palette uses `resolve_palette_bind_ip` and reports the chosen interface.
-
-## Verification (feat-032)
-
-- local_session_share: 31 passed  
-- format --check: passed  
+- Share URL serves the built-in guest viewer (WS join + LZ4 PTY) when no WASM bundle is present.
+- Guest renders **blocks, not a PTY dump**: scrollback `SerializedBlock`s plus live output cut into command blocks via Warp's shell hooks (`Preexec` / `CommandFinished` / `Precmd`); ANSI colors, exit codes, cwd/git header, duration, live prompt strip.
+- Hook payloads, in-band generator output (OSC 9277) and alt-screen frames no longer leak as hex garbage.
+- Full Warp WASM still served from `WARP_LOCAL_SHARE_WASM_DIR` or app `Resources/local_share_wasm`.
 
 ## Recommended Next Step
 
-Dogfood on desktop: set `WARP_LOCAL_SHARE_WASM_DIR`, Start local network share from pane menu on a LAN/Tailscale address, open the URL in Chrome on another device.
+In WarpOss: Start **Local Share**, open the copied link on a second device, run a few commands (including a failing one and a TUI) and confirm blocks, colors and history look right.

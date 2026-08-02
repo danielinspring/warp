@@ -20,7 +20,8 @@ pub use host::{
     all_interfaces_label, bind_candidate_label, preferred_bind_ip, resolve_palette_bind_ip,
     HostUxError, LocalLanShareStatus, COPY_LOCAL_SHARE_LINK_TEXT, LOCAL_SHARE_ACTIVE_TOAST,
     LOCAL_SHARE_ALL_INTERFACES_WARNING, LOCAL_SHARE_BLOCKS_CLOUD_TOAST,
-    LOCAL_SHARE_CLOUD_BLOCK_TOAST, LOCAL_SHARE_ROTATED_TOAST, LOCAL_SHARE_START_FAILED_TOAST,
+    LOCAL_SHARE_CLOUD_BLOCK_TOAST, LOCAL_SHARE_LITE_VIEWER_TOAST, LOCAL_SHARE_ROTATED_TOAST,
+    LOCAL_SHARE_START_FAILED_TOAST,
 };
 pub use hub::{
     HubError, LocalSessionShareHub, LocalShareEventPublisher, ShareHandle,

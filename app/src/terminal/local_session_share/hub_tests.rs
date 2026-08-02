@@ -125,14 +125,16 @@ fn health_endpoint_does_not_require_a_secret() {
 }
 
 #[test]
-fn correct_secret_returns_placeholder_html() {
+fn correct_secret_returns_lite_viewer_html() {
     let mut hub = LocalSessionShareHub::new();
     let handle = hub.start(loopback_ip(), 0).expect("start should succeed");
+    assert!(!handle.has_wasm_viewer);
 
     let (status, body) = get(&handle.url);
     assert_eq!(status, reqwest::StatusCode::OK);
     assert!(body.contains("Local session share"));
-    assert!(body.contains("WASM viewer coming soon"));
+    assert!(body.contains("connecting"));
+    assert!(!body.contains("WASM viewer coming soon"));
 
     hub.stop();
 }
@@ -496,11 +498,12 @@ fn wasm_bundle_serves_index_and_assets() {
     let handle = hub
         .start_with_options(loopback_ip(), 0, Some(bundle.path().to_path_buf()))
         .expect("start should succeed");
+    assert!(handle.has_wasm_viewer);
 
     let (status, body) = get(&handle.url);
     assert_eq!(status, reqwest::StatusCode::OK);
-    assert!(body.contains("fake-wasm-index-marker"));
     assert!(!body.contains("WASM viewer coming soon"));
+    assert!(body.contains("fake-wasm-index-marker"));
 
     let bad_url = format!("http://{}/local-session/not-the-secret", handle.addr);
     let (bad_status, bad_body) = get(&bad_url);

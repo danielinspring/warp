@@ -32,6 +32,9 @@ pub struct ShareHandle {
     pub url: String,
     pub secret: ShareSecret,
     pub addr: SocketAddr,
+    /// True when a full Warp WASM bundle was resolved and will be served
+    /// instead of the built-in lite viewer.
+    pub has_wasm_viewer: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -84,6 +87,12 @@ impl ShareState {
 
     pub(crate) fn wasm_bundle_dir(&self) -> Option<&std::path::Path> {
         self.wasm_bundle_dir.as_deref()
+    }
+
+    pub(crate) fn has_wasm_viewer(&self) -> bool {
+        self.wasm_bundle_dir
+            .as_ref()
+            .is_some_and(|dir| dir.join("index.html").is_file())
     }
 
     pub(crate) fn check_secret(&self, candidate: &str) -> bool {
@@ -217,6 +226,7 @@ impl LocalSessionShareHub {
             url: build_url(active.addr, &active.secret),
             secret: active.secret.clone(),
             addr: active.addr,
+            has_wasm_viewer: active.state.has_wasm_viewer(),
         })
     }
 
@@ -268,6 +278,14 @@ impl LocalSessionShareHub {
             .map_err(HubError::Runtime)?;
 
         let wasm_bundle_dir = resolve_wasm_bundle_dir(wasm_bundle_dir);
+        let has_wasm_viewer = wasm_bundle_dir
+            .as_ref()
+            .is_some_and(|dir| dir.join("index.html").is_file());
+        if !has_wasm_viewer {
+            log::info!(
+                "Local session share serving built-in lite viewer (set {WASM_BUNDLE_DIR_ENV} or Resources/local_share_wasm for full Warp WASM)"
+            );
+        }
         let secret = ShareSecret::generate();
         let state = Arc::new(ShareState::new(secret.clone(), wasm_bundle_dir));
         let router = server::build_router(state.clone());
@@ -296,6 +314,7 @@ impl LocalSessionShareHub {
             url: build_url(addr, &secret),
             secret: secret.clone(),
             addr,
+            has_wasm_viewer,
         };
 
         self.active = Some(ActiveShare {
@@ -337,6 +356,7 @@ impl LocalSessionShareHub {
             url: build_url(active.addr, &new_secret),
             secret: new_secret,
             addr: active.addr,
+            has_wasm_viewer: active.state.has_wasm_viewer(),
         })
     }
 
@@ -396,7 +416,26 @@ fn build_url(addr: SocketAddr, secret: &ShareSecret) -> String {
 }
 
 fn resolve_wasm_bundle_dir(explicit: Option<PathBuf>) -> Option<PathBuf> {
-    explicit.or_else(|| std::env::var_os(WASM_BUNDLE_DIR_ENV).map(PathBuf::from))
+    explicit
+        .or_else(|| std::env::var_os(WASM_BUNDLE_DIR_ENV).map(PathBuf::from))
+        .or_else(bundled_wasm_dir_next_to_exe)
+        .filter(|dir| dir.join("index.html").is_file())
+}
+
+/// Looks for `Contents/Resources/local_share_wasm` next to a macOS app binary,
+/// or `local_share_wasm` beside the executable on other layouts.
+fn bundled_wasm_dir_next_to_exe() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe_dir = exe.parent()?;
+
+    let candidates = [
+        exe_dir.join("../Resources/local_share_wasm"),
+        exe_dir.join("local_share_wasm"),
+        exe_dir.join("../local_share_wasm"),
+    ];
+    candidates
+        .into_iter()
+        .find(|dir| dir.join("index.html").is_file())
 }
 
 /// Drops oldest scrollback blocks until `scrollback` fits under `max_bytes`.

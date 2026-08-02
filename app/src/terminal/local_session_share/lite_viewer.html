@@ -1,0 +1,1786 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Warp local session share</title>
+    <style>
+      /* Palette mirrors app/src/themes/default_themes.rs (Light / Dark). */
+      :root {
+        color-scheme: light dark;
+        --bg: #ffffff;
+        --fg: #1b1b1f;
+        --muted: #6b7280;
+        --faint: #9aa1ab;
+        --line: #e7e9ec;
+        --hover: #f7f8fa;
+        --chrome-bg: #f4f5f7;
+        --accent: #00a2d8;
+        --ok: #10a778;
+        --err: #d1264c;
+        --chip: #eceef1;
+        --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas,
+          "Liberation Mono", monospace;
+
+        --a0: #212121;
+        --a1: #c30771;
+        --a2: #10a778;
+        --a3: #a89c14;
+        --a4: #008ec4;
+        --a5: #523c79;
+        --a6: #20a5ba;
+        --a7: #e0e0e0;
+        --a8: #212121;
+        --a9: #fb007a;
+        --a10: #5fd7af;
+        --a11: #f3e430;
+        --a12: #20bbfc;
+        --a13: #6855de;
+        --a14: #4fb8cc;
+        --a15: #f1f1f1;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0b0c0e;
+          --fg: #f1f1f1;
+          --muted: #8b949e;
+          --faint: #6a727c;
+          --line: #1e2126;
+          --hover: #131519;
+          --chrome-bg: #101216;
+          --accent: #19aad8;
+          --ok: #b4fa72;
+          --err: #ff8272;
+          --chip: #1b1e24;
+
+          --a0: #616161;
+          --a1: #ff8272;
+          --a2: #b4fa72;
+          --a3: #fefdc2;
+          --a4: #a5d5fe;
+          --a5: #ff8ffd;
+          --a6: #d0d1fe;
+          --a7: #f1f1f1;
+          --a8: #8e8e8e;
+          --a9: #ffc4bd;
+          --a10: #d6fcb9;
+          --a11: #fefdd5;
+          --a12: #c1e3fe;
+          --a13: #ffb1fe;
+          --a14: #e5e6fe;
+          --a15: #feffff;
+        }
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+      }
+
+      body {
+        display: flex;
+        flex-direction: column;
+        background: var(--bg);
+        color: var(--fg);
+        font: 13px/1.45 var(--mono);
+        -webkit-font-smoothing: antialiased;
+      }
+
+      #chrome {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        height: 40px;
+        padding: 0 14px;
+        border-bottom: 1px solid var(--line);
+        background: var(--chrome-bg);
+        user-select: none;
+      }
+      #chrome h1 {
+        margin: 0;
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: 0.01em;
+      }
+      #chrome .grow {
+        flex: 1 1 auto;
+      }
+      #title {
+        color: var(--muted);
+        max-width: 40vw;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        height: 22px;
+        padding: 0 9px;
+        border-radius: 11px;
+        background: var(--chip);
+        color: var(--muted);
+        font-size: 11px;
+        white-space: nowrap;
+      }
+      #status .dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--faint);
+      }
+      #status.ok .dot {
+        background: var(--ok);
+        animation: pulse 2s ease-in-out infinite;
+      }
+      #status.err .dot {
+        background: var(--err);
+      }
+      @keyframes pulse {
+        50% {
+          opacity: 0.35;
+        }
+      }
+
+      #blocks {
+        flex: 1 1 auto;
+        overflow: auto;
+        overscroll-behavior: contain;
+      }
+
+      .block {
+        position: relative;
+        padding: 9px 16px 11px 16px;
+        border-bottom: 1px solid var(--line);
+      }
+      .block:hover {
+        background: var(--hover);
+      }
+      .block::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: 2px;
+        background: transparent;
+      }
+      .block[data-state="fail"]::before {
+        background: var(--err);
+      }
+      .block[data-state="running"]::before {
+        background: var(--accent);
+      }
+
+      .bhead {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 16px;
+        margin-bottom: 3px;
+        font-size: 11.5px;
+        color: var(--muted);
+      }
+      .bhead .cwd {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .bhead .git::before {
+        content: "⑂ ";
+      }
+      .bhead .grow {
+        flex: 1 1 auto;
+      }
+      .bhead .exit {
+        color: var(--err);
+      }
+      .bhead .live {
+        color: var(--accent);
+      }
+      .acts {
+        display: flex;
+        gap: 4px;
+        opacity: 0;
+        transition: opacity 0.1s ease-in;
+      }
+      .block:hover .acts,
+      .acts:focus-within {
+        opacity: 1;
+      }
+      .acts button {
+        font: inherit;
+        font-size: 11px;
+        color: var(--muted);
+        background: transparent;
+        border: 1px solid var(--line);
+        border-radius: 5px;
+        padding: 0 6px;
+        height: 18px;
+        cursor: pointer;
+      }
+      .acts button:hover {
+        color: var(--fg);
+        border-color: var(--faint);
+      }
+
+      .bcmd {
+        font-weight: 600;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .bout {
+        margin-top: 3px;
+      }
+      .bout:empty {
+        display: none;
+      }
+      .ln {
+        white-space: pre-wrap;
+        word-break: break-word;
+        min-height: 1.45em;
+      }
+      .notice {
+        color: var(--muted);
+        font-style: italic;
+      }
+      .divider {
+        padding: 6px 16px;
+        color: var(--faint);
+        font-size: 11.5px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      #footer {
+        flex: 0 0 auto;
+        border-top: 1px solid var(--line);
+        background: var(--chrome-bg);
+        padding: 8px 16px;
+        max-height: 30vh;
+        overflow: auto;
+        color: var(--muted);
+      }
+      #footer.hidden {
+        display: none;
+      }
+      #caret {
+        display: inline-block;
+        width: 7px;
+        height: 1.1em;
+        vertical-align: text-bottom;
+        background: var(--accent);
+        opacity: 0.7;
+        animation: pulse 1.1s steps(1, end) infinite;
+      }
+
+      #jump {
+        position: fixed;
+        right: 18px;
+        bottom: 64px;
+        display: none;
+        align-items: center;
+        gap: 6px;
+        height: 28px;
+        padding: 0 12px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--chrome-bg);
+        color: var(--fg);
+        font: inherit;
+        font-size: 11.5px;
+        cursor: pointer;
+        box-shadow: 0 2px 10px rgb(0 0 0 / 18%);
+      }
+      #jump.show {
+        display: inline-flex;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="chrome">
+      <h1>Local session share</h1>
+      <span class="pill" id="status"><span class="dot"></span
+        ><span id="status-text">connecting…</span></span>
+      <span id="title"></span>
+      <span class="grow"></span>
+      <span class="pill" id="size"></span>
+      <span class="pill">view-only</span>
+    </div>
+
+    <div id="blocks"></div>
+
+    <div id="footer" class="hidden">
+      <div id="prompt"></div>
+    </div>
+
+    <button id="jump" type="button">↓ Jump to live</button>
+
+    <script>
+      // View-only guest for the local LAN share hub, used when a full Warp WASM
+      // bundle is not staged. It speaks session-sharing-protocol over same-origin
+      // WS (PTY bytes are LZ4 size-prepended, matching lz4_flex), and rebuilds
+      // Warp's block UI on the client:
+      //
+      //   * Scrollback blocks arrive as JSON `SerializedBlock`s and are rendered
+      //     directly (stylized command + output, pwd, exit code, timing).
+      //   * Live output is a raw PTY stream, so we parse it here: Warp's shell
+      //     hooks (DCS `ESC P $ d <hex> ST` / OSC 9278) carry Preexec, Precmd and
+      //     CommandFinished, which is exactly what the client itself uses to cut
+      //     the stream into blocks.
+      (function () {
+        "use strict";
+
+        var MAX_BLOCKS = 400;
+        var MAX_LINES = 4000;
+        var MAX_PROMPT_LINES = 60;
+        var MAX_COLS = 20000;
+        var SUCCESS_EXIT_CODES = [0, 130, 141, -1073741510];
+
+        /* ----------------------------------------------------------------- */
+        /* Small helpers                                                      */
+        /* ----------------------------------------------------------------- */
+
+        function escapeHtml(text) {
+          return text
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;");
+        }
+
+        function bytesFromJson(value) {
+          if (typeof value === "string") {
+            var bin = atob(value);
+            var out = new Uint8Array(bin.length);
+            for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+            return out;
+          }
+          var bytes = new Uint8Array(value.length);
+          for (var j = 0; j < value.length; j++) bytes[j] = value[j] & 0xff;
+          return bytes;
+        }
+
+        function decodeUtf8(bytes) {
+          return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+        }
+
+        function hexToString(hex) {
+          var bytes = new Uint8Array(hex.length >> 1);
+          for (var i = 0; i < bytes.length; i++) {
+            bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
+          }
+          return decodeUtf8(bytes);
+        }
+
+        function copyText(text) {
+          if (navigator.clipboard && window.isSecureContext) {
+            navigator.clipboard.writeText(text).catch(function () {});
+            return;
+          }
+          // Share URLs are plain http on the LAN, so the async clipboard API is
+          // usually unavailable; fall back to the legacy path.
+          var area = document.createElement("textarea");
+          area.value = text;
+          area.setAttribute("readonly", "");
+          area.style.position = "fixed";
+          area.style.opacity = "0";
+          document.body.appendChild(area);
+          area.select();
+          try {
+            document.execCommand("copy");
+          } catch (err) {
+            /* ignore */
+          }
+          document.body.removeChild(area);
+        }
+
+        // Minimal LZ4 block decoder (size-prepended = u32 LE uncompressed len).
+        function lz4DecompressSizePrepended(bytes) {
+          if (bytes.length < 4) throw new Error("lz4 input too short");
+          var size =
+            bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24);
+          return lz4BlockDecode(bytes.subarray(4), size >>> 0);
+        }
+
+        function lz4BlockDecode(src, uncompressedSize) {
+          var dst = new Uint8Array(uncompressedSize);
+          var s = 0;
+          var d = 0;
+          while (s < src.length) {
+            var token = src[s++];
+            var litLen = token >>> 4;
+            if (litLen === 15) {
+              var lb;
+              do {
+                lb = src[s++];
+                litLen += lb;
+              } while (lb === 255);
+            }
+            for (var i = 0; i < litLen; i++) dst[d++] = src[s++];
+            if (s >= src.length) break;
+            var offset = src[s++] | (src[s++] << 8);
+            if (offset === 0) throw new Error("lz4 invalid offset");
+            var matchLen = (token & 0xf) + 4;
+            if ((token & 0xf) === 15) {
+              var mb;
+              do {
+                mb = src[s++];
+                matchLen += mb;
+              } while (mb === 255);
+            }
+            var matchPos = d - offset;
+            for (var m = 0; m < matchLen; m++) dst[d++] = dst[matchPos++];
+          }
+          if (d !== uncompressedSize) throw new Error("lz4 size mismatch");
+          return dst;
+        }
+
+        /* ----------------------------------------------------------------- */
+        /* SGR styles                                                         */
+        /* ----------------------------------------------------------------- */
+
+        // Style 0 is "no styling at all" and renders without a wrapping span.
+        var styleList = [null];
+        var styleKeys = { "": 0 };
+        var styleCss = [""];
+
+        function defaultStyle() {
+          return {
+            fg: null,
+            bg: null,
+            bold: false,
+            dim: false,
+            italic: false,
+            underline: false,
+            strike: false,
+            inverse: false,
+          };
+        }
+
+        function styleKeyOf(style) {
+          if (
+            style.fg === null &&
+            style.bg === null &&
+            !style.bold &&
+            !style.dim &&
+            !style.italic &&
+            !style.underline &&
+            !style.strike &&
+            !style.inverse
+          ) {
+            return "";
+          }
+          return [
+            style.fg,
+            style.bg,
+            style.bold ? 1 : 0,
+            style.dim ? 1 : 0,
+            style.italic ? 1 : 0,
+            style.underline ? 1 : 0,
+            style.strike ? 1 : 0,
+            style.inverse ? 1 : 0,
+          ].join("|");
+        }
+
+        function cube(value) {
+          return value === 0 ? 0 : 55 + value * 40;
+        }
+
+        function xterm256(index) {
+          if (index < 16) return "var(--a" + index + ")";
+          if (index < 232) {
+            var n = index - 16;
+            var r = cube(Math.floor(n / 36) % 6);
+            var g = cube(Math.floor(n / 6) % 6);
+            var b = cube(n % 6);
+            return "rgb(" + r + "," + g + "," + b + ")";
+          }
+          var level = 8 + (index - 232) * 10;
+          return "rgb(" + level + "," + level + "," + level + ")";
+        }
+
+        function colorCss(color, isForeground) {
+          if (color === null) return isForeground ? "var(--fg)" : "var(--bg)";
+          if (typeof color === "number") return xterm256(color);
+          return color;
+        }
+
+        var MAX_STYLES = 8192;
+
+        function internStyle(style) {
+          var key = styleKeyOf(style);
+          if (key in styleKeys) return styleKeys[key];
+          // Truecolor gradients can mint a style per character; fall back to
+          // unstyled rather than growing the table without bound.
+          if (styleList.length >= MAX_STYLES) return 0;
+          var index = styleList.length;
+          var frozen = {
+            fg: style.fg,
+            bg: style.bg,
+            bold: style.bold,
+            dim: style.dim,
+            italic: style.italic,
+            underline: style.underline,
+            strike: style.strike,
+            inverse: style.inverse,
+          };
+          styleList.push(frozen);
+          styleKeys[key] = index;
+          styleCss.push(buildCss(frozen));
+          return index;
+        }
+
+        function buildCss(style) {
+          var fg = style.fg;
+          var bg = style.bg;
+          // Bold with one of the 8 base colors uses the bright variant, like
+          // most terminals (and Warp) do.
+          if (style.bold && typeof fg === "number" && fg < 8) fg += 8;
+          if (style.inverse) {
+            var swap = fg;
+            fg = bg;
+            bg = swap;
+            var css = "color:" + colorCss(fg, false) + ";";
+            css += "background:" + colorCss(bg, true) + ";";
+            return css + decorations(style);
+          }
+          var out = "";
+          if (fg !== null) out += "color:" + colorCss(fg, true) + ";";
+          if (bg !== null) out += "background:" + colorCss(bg, false) + ";";
+          return out + decorations(style);
+        }
+
+        function decorations(style) {
+          var out = "";
+          if (style.bold) out += "font-weight:600;";
+          if (style.dim) out += "opacity:.62;";
+          if (style.italic) out += "font-style:italic;";
+          if (style.underline && style.strike) {
+            out += "text-decoration:underline line-through;";
+          } else if (style.underline) {
+            out += "text-decoration:underline;";
+          } else if (style.strike) {
+            out += "text-decoration:line-through;";
+          }
+          return out;
+        }
+
+        /* ----------------------------------------------------------------- */
+        /* Line buffer                                                        */
+        /* ----------------------------------------------------------------- */
+
+        function newLine() {
+          return { c: [], s: [] };
+        }
+
+        function LineBuffer(maxLines) {
+          this.lines = [newLine()];
+          this.row = 0;
+          this.col = 0;
+          this.maxLines = maxLines || MAX_LINES;
+          this.dirtyFrom = 0;
+          this.droppedSinceRender = 0;
+        }
+
+        LineBuffer.prototype.markDirty = function (row) {
+          if (row < this.dirtyFrom) this.dirtyFrom = row;
+        };
+
+        LineBuffer.prototype.isEmpty = function () {
+          for (var i = 0; i < this.lines.length; i++) {
+            if (this.lines[i].c.length > 0) return false;
+          }
+          return true;
+        };
+
+        LineBuffer.prototype.reset = function () {
+          this.lines = [newLine()];
+          this.row = 0;
+          this.col = 0;
+          this.dirtyFrom = 0;
+        };
+
+        LineBuffer.prototype.ensureRow = function () {
+          while (this.lines.length <= this.row) this.lines.push(newLine());
+        };
+
+        LineBuffer.prototype.write = function (text, styleIdx) {
+          this.ensureRow();
+          var line = this.lines[this.row];
+          while (line.c.length < this.col) {
+            line.c.push(" ");
+            line.s.push(0);
+          }
+          for (var i = 0; i < text.length; i++) {
+            if (this.col >= MAX_COLS) break;
+            line.c[this.col] = text[i];
+            line.s[this.col] = styleIdx;
+            this.col++;
+          }
+          this.markDirty(this.row);
+        };
+
+        LineBuffer.prototype.linefeed = function () {
+          this.row++;
+          this.col = 0;
+          this.ensureRow();
+          this.markDirty(this.row);
+          if (this.lines.length > this.maxLines) {
+            // Drop from the front and remember how many rows went away so the
+            // renderer can retire the matching DOM nodes instead of repainting
+            // the whole block.
+            var extra = this.lines.length - this.maxLines;
+            this.lines.splice(0, extra);
+            this.row = Math.max(0, this.row - extra);
+            this.droppedSinceRender += extra;
+            if (this.dirtyFrom !== Infinity) {
+              this.dirtyFrom = Math.max(0, this.dirtyFrom - extra);
+            }
+          }
+        };
+
+        LineBuffer.prototype.carriageReturn = function () {
+          this.col = 0;
+        };
+
+        LineBuffer.prototype.backspace = function () {
+          if (this.col > 0) this.col--;
+        };
+
+        LineBuffer.prototype.tab = function () {
+          var next = (this.col + 8) & ~7;
+          this.write(new Array(next - this.col + 1).join(" "), 0);
+        };
+
+        LineBuffer.prototype.moveTo = function (row, col) {
+          if (row !== null) {
+            this.row = Math.max(0, Math.min(row, this.lines.length - 1));
+          }
+          if (col !== null) this.col = Math.max(0, col);
+        };
+
+        LineBuffer.prototype.eraseInLine = function (mode) {
+          this.ensureRow();
+          var line = this.lines[this.row];
+          if (mode === 1) {
+            for (var i = 0; i < Math.min(this.col + 1, line.c.length); i++) {
+              line.c[i] = " ";
+              line.s[i] = 0;
+            }
+          } else if (mode === 2) {
+            line.c.length = 0;
+            line.s.length = 0;
+          } else {
+            line.c.length = Math.min(line.c.length, this.col);
+            line.s.length = line.c.length;
+          }
+          this.markDirty(this.row);
+        };
+
+        LineBuffer.prototype.eraseInDisplay = function (mode) {
+          if (mode === 2 || mode === 3) {
+            this.reset();
+            return;
+          }
+          if (mode === 1) {
+            for (var i = 0; i < this.row; i++) this.lines[i] = newLine();
+            this.eraseInLine(1);
+            this.markDirty(0);
+            return;
+          }
+          this.eraseInLine(0);
+          this.lines.length = this.row + 1;
+          this.markDirty(this.row);
+        };
+
+        LineBuffer.prototype.eraseChars = function (count) {
+          this.ensureRow();
+          var line = this.lines[this.row];
+          for (var i = this.col; i < Math.min(this.col + count, line.c.length); i++) {
+            line.c[i] = " ";
+            line.s[i] = 0;
+          }
+          this.markDirty(this.row);
+        };
+
+        LineBuffer.prototype.deleteChars = function (count) {
+          this.ensureRow();
+          var line = this.lines[this.row];
+          line.c.splice(this.col, count);
+          line.s.splice(this.col, count);
+          this.markDirty(this.row);
+        };
+
+        LineBuffer.prototype.toText = function () {
+          var out = [];
+          for (var i = 0; i < this.lines.length; i++) {
+            out.push(this.lines[i].c.join(""));
+          }
+          while (out.length && out[out.length - 1].trim() === "") out.pop();
+          return out.join("\n");
+        };
+
+        function renderLineHtml(line) {
+          var end = line.c.length;
+          while (end > 0 && line.c[end - 1] === " " && line.s[end - 1] === 0) {
+            end--;
+          }
+          var html = "";
+          var i = 0;
+          while (i < end) {
+            var style = line.s[i];
+            var text = "";
+            var j = i;
+            while (j < end && line.s[j] === style) {
+              text += line.c[j];
+              j++;
+            }
+            html +=
+              style === 0
+                ? escapeHtml(text)
+                : '<span style="' + styleCss[style] + '">' + escapeHtml(text) + "</span>";
+            i = j;
+          }
+          return html;
+        }
+
+        // Repaints only the rows that changed since the last pass, so long-lived
+        // blocks don't rebuild their whole DOM on every PTY chunk.
+        function renderBuffer(container, buffer) {
+          while (buffer.droppedSinceRender > 0 && container.firstChild) {
+            container.removeChild(container.firstChild);
+            buffer.droppedSinceRender--;
+          }
+          buffer.droppedSinceRender = 0;
+
+          var lines = buffer.lines;
+          // Trailing empty lines are the cursor's row, not content.
+          var count = lines.length;
+          while (count > 0 && lines[count - 1].c.length === 0) count--;
+
+          var from = buffer.dirtyFrom;
+          if (from === Infinity) {
+            if (container.childNodes.length === count) return;
+            from = Math.min(container.childNodes.length, count);
+          }
+          for (var i = from; i < count; i++) {
+            var el = container.childNodes[i];
+            if (!el) {
+              el = document.createElement("div");
+              el.className = "ln";
+              container.appendChild(el);
+            }
+            el.innerHTML = renderLineHtml(lines[i]);
+          }
+          while (container.childNodes.length > count) {
+            container.removeChild(container.lastChild);
+          }
+          buffer.dirtyFrom = Infinity;
+        }
+
+        /* ----------------------------------------------------------------- */
+        /* ANSI / VT parser                                                   */
+        /* ----------------------------------------------------------------- */
+
+        var S_GROUND = 0;
+        var S_ESC = 1;
+        var S_CSI = 2;
+        var S_OSC = 3;
+        var S_DCS_ENTRY = 4;
+        var S_DCS_PASS = 5;
+        var S_APC = 6;
+        var S_CHARSET = 7;
+
+        function AnsiParser(sink) {
+          this.sink = sink;
+          this.state = S_GROUND;
+          this.params = "";
+          this.inter = "";
+          this.str = "";
+          this.dcsInter = "";
+          this.dcsFinal = "";
+          this.sawEsc = false;
+        }
+
+        AnsiParser.prototype.write = function (text) {
+          var i = 0;
+          while (i < text.length) {
+            if (this.state === S_GROUND) {
+              var j = i;
+              while (j < text.length) {
+                var code = text.charCodeAt(j);
+                if (code < 0x20 || code === 0x7f) break;
+                j++;
+              }
+              if (j > i) {
+                this.sink.print(text.slice(i, j));
+                i = j;
+                continue;
+              }
+            }
+            this.step(text.charAt(i));
+            i++;
+          }
+        };
+
+        AnsiParser.prototype.step = function (ch) {
+          var code = ch.charCodeAt(0);
+          switch (this.state) {
+            case S_GROUND:
+              if (code === 0x1b) {
+                this.state = S_ESC;
+              } else if (code < 0x20) {
+                this.sink.execute(code);
+              }
+              return;
+
+            case S_ESC:
+              this.params = "";
+              this.inter = "";
+              if (ch === "[") this.state = S_CSI;
+              else if (ch === "]") {
+                this.str = "";
+                this.sawEsc = false;
+                this.state = S_OSC;
+              } else if (ch === "P") {
+                this.dcsInter = "";
+                this.dcsFinal = "";
+                this.state = S_DCS_ENTRY;
+              } else if (ch === "_" || ch === "^" || ch === "X") {
+                this.str = "";
+                this.sawEsc = false;
+                this.state = S_APC;
+              } else if (ch === "(" || ch === ")" || ch === "*" || ch === "+") {
+                this.state = S_CHARSET;
+              } else {
+                this.state = S_GROUND;
+              }
+              return;
+
+            case S_CHARSET:
+              this.state = S_GROUND;
+              return;
+
+            case S_CSI:
+              if (code >= 0x30 && code <= 0x3f) {
+                this.params += ch;
+              } else if (code >= 0x20 && code <= 0x2f) {
+                this.inter += ch;
+              } else if (code >= 0x40 && code <= 0x7e) {
+                this.sink.csi(this.params, this.inter, ch);
+                this.state = S_GROUND;
+              } else if (code < 0x20) {
+                this.sink.execute(code);
+              } else {
+                this.state = S_GROUND;
+              }
+              return;
+
+            case S_DCS_ENTRY:
+              if (code >= 0x30 && code <= 0x3f) {
+                this.params += ch;
+              } else if (code >= 0x20 && code <= 0x2f) {
+                this.dcsInter += ch;
+              } else if (code >= 0x40 && code <= 0x7e) {
+                this.dcsFinal = ch;
+                this.str = "";
+                this.sawEsc = false;
+                this.state = S_DCS_PASS;
+              } else {
+                this.state = S_GROUND;
+              }
+              return;
+
+            case S_OSC:
+            case S_DCS_PASS:
+            case S_APC:
+              if (this.sawEsc) {
+                this.sawEsc = false;
+                if (ch === "\\") {
+                  this.endString();
+                  return;
+                }
+                this.endString();
+                this.step(ch);
+                return;
+              }
+              if (code === 0x1b) {
+                this.sawEsc = true;
+                return;
+              }
+              if (code === 0x07) {
+                this.endString();
+                return;
+              }
+              if (this.str.length < 4 * 1024 * 1024) this.str += ch;
+              return;
+          }
+        };
+
+        AnsiParser.prototype.endString = function () {
+          var state = this.state;
+          this.state = S_GROUND;
+          if (state === S_OSC) this.sink.osc(this.str);
+          else if (state === S_DCS_PASS) {
+            this.sink.dcs(this.dcsInter, this.dcsFinal, this.str);
+          }
+          this.str = "";
+        };
+
+        /* ----------------------------------------------------------------- */
+        /* Terminal: parser sink that writes into a LineBuffer                */
+        /* ----------------------------------------------------------------- */
+
+        // Warp shell-integration markers, mirroring app/src/terminal/model/ansi.
+        var OSC_HOOK = "9278";
+        var OSC_IN_BAND_GENERATOR = "9277";
+
+        function Terminal(options) {
+          this.options = options;
+          this.style = defaultStyle();
+          this.styleIdx = 0;
+          this.parser = new AnsiParser(this);
+        }
+
+        Terminal.prototype.write = function (text) {
+          this.parser.write(text);
+        };
+
+        Terminal.prototype.buffer = function () {
+          return this.options.getBuffer();
+        };
+
+        Terminal.prototype.print = function (text) {
+          this.buffer().write(text, this.styleIdx);
+        };
+
+        Terminal.prototype.execute = function (code) {
+          var buffer = this.buffer();
+          switch (code) {
+            case 0x08:
+              buffer.backspace();
+              break;
+            case 0x09:
+              buffer.tab();
+              break;
+            case 0x0a:
+            case 0x0b:
+            case 0x0c:
+              buffer.linefeed();
+              break;
+            case 0x0d:
+              buffer.carriageReturn();
+              break;
+            default:
+              break;
+          }
+        };
+
+        function numericParams(params) {
+          var parts = params.replace(/^[?<>=!]/, "").split(/[;:]/);
+          var out = [];
+          for (var i = 0; i < parts.length; i++) {
+            var value = parseInt(parts[i], 10);
+            out.push(isNaN(value) ? 0 : value);
+          }
+          return out;
+        }
+
+        Terminal.prototype.csi = function (params, inter, final) {
+          var buffer = this.buffer();
+          var args = numericParams(params);
+          var count = args[0] > 0 ? args[0] : 1;
+          var isPrivate = params.charAt(0) === "?";
+
+          switch (final) {
+            case "m":
+              this.applySgr(params);
+              return;
+            case "A":
+              buffer.moveTo(buffer.row - count, null);
+              return;
+            case "B":
+              buffer.moveTo(buffer.row + count, null);
+              return;
+            case "C":
+              buffer.moveTo(null, buffer.col + count);
+              return;
+            case "D":
+              buffer.moveTo(null, buffer.col - count);
+              return;
+            case "G":
+            case "`":
+              buffer.moveTo(null, count - 1);
+              return;
+            case "H":
+            case "f":
+              // Absolute positioning is grid-relative; a block list has no grid,
+              // so honor the column and leave the row where it is.
+              buffer.moveTo(null, (args[1] > 0 ? args[1] : 1) - 1);
+              return;
+            case "J":
+              buffer.eraseInDisplay(args[0] || 0);
+              return;
+            case "K":
+              buffer.eraseInLine(args[0] || 0);
+              return;
+            case "X":
+              buffer.eraseChars(count);
+              return;
+            case "P":
+              buffer.deleteChars(count);
+              return;
+            case "h":
+            case "l":
+              if (isPrivate) this.privateMode(args, final === "h");
+              return;
+            default:
+              return;
+          }
+        };
+
+        Terminal.prototype.privateMode = function (args, enabled) {
+          for (var i = 0; i < args.length; i++) {
+            var mode = args[i];
+            if (mode === 1049 || mode === 1047 || mode === 47) {
+              if (this.options.onAltScreen) this.options.onAltScreen(enabled);
+            }
+          }
+        };
+
+        Terminal.prototype.applySgr = function (params) {
+          var args = numericParams(params);
+          if (params === "") args = [0];
+          for (var i = 0; i < args.length; i++) {
+            var code = args[i];
+            if (code === 0) this.style = defaultStyle();
+            else if (code === 1) this.style.bold = true;
+            else if (code === 2) this.style.dim = true;
+            else if (code === 3) this.style.italic = true;
+            else if (code === 4) this.style.underline = true;
+            else if (code === 7) this.style.inverse = true;
+            else if (code === 9) this.style.strike = true;
+            else if (code === 21 || code === 22) {
+              this.style.bold = false;
+              this.style.dim = false;
+            } else if (code === 23) this.style.italic = false;
+            else if (code === 24) this.style.underline = false;
+            else if (code === 27) this.style.inverse = false;
+            else if (code === 29) this.style.strike = false;
+            else if (code >= 30 && code <= 37) this.style.fg = code - 30;
+            else if (code === 39) this.style.fg = null;
+            else if (code >= 40 && code <= 47) this.style.bg = code - 40;
+            else if (code === 49) this.style.bg = null;
+            else if (code >= 90 && code <= 97) this.style.fg = code - 90 + 8;
+            else if (code >= 100 && code <= 107) this.style.bg = code - 100 + 8;
+            else if (code === 38 || code === 48) {
+              var isForeground = code === 38;
+              var mode = args[i + 1];
+              if (mode === 5) {
+                var index = args[i + 2] || 0;
+                if (isForeground) this.style.fg = index;
+                else this.style.bg = index;
+                i += 2;
+              } else if (mode === 2) {
+                var rgb =
+                  "rgb(" +
+                  (args[i + 2] | 0) +
+                  "," +
+                  (args[i + 3] | 0) +
+                  "," +
+                  (args[i + 4] | 0) +
+                  ")";
+                if (isForeground) this.style.fg = rgb;
+                else this.style.bg = rgb;
+                i += 4;
+              }
+            }
+          }
+          this.styleIdx = internStyle(this.style);
+        };
+
+        Terminal.prototype.osc = function (data) {
+          var parts = data.split(";");
+          var kind = parts[0];
+
+          if (kind === OSC_HOOK) {
+            var marker = parts[1];
+            if (marker === "d" && parts[2]) {
+              this.emitHook(hexToString(parts[2]));
+            } else if (marker === "f" && parts[2]) {
+              this.emitHook(parts.slice(2).join(";"));
+            }
+            return;
+          }
+
+          if (kind === OSC_IN_BAND_GENERATOR) {
+            // Warp runs completion/generator commands in-band; their output is
+            // bracketed by 9277;A / 9277;B and never belongs to a user block.
+            if (this.options.onInBand) {
+              this.options.onInBand(parts[1] === "A");
+            }
+            return;
+          }
+
+          if ((kind === "0" || kind === "2") && this.options.onTitle) {
+            this.options.onTitle(parts.slice(1).join(";"));
+          }
+        };
+
+        Terminal.prototype.dcs = function (inter, final, data) {
+          if (inter !== "$") return;
+          if (final === "d") this.emitHook(hexToString(data));
+          else if (final === "f") this.emitHook(data);
+        };
+
+        Terminal.prototype.emitHook = function (json) {
+          if (!this.options.onHook) return;
+          var hook;
+          try {
+            hook = JSON.parse(json);
+          } catch (err) {
+            return;
+          }
+          if (hook && hook.hook) this.options.onHook(hook);
+        };
+
+        /* ----------------------------------------------------------------- */
+        /* Block model + rendering                                            */
+        /* ----------------------------------------------------------------- */
+
+        var blocksEl = document.getElementById("blocks");
+        var footerEl = document.getElementById("footer");
+        var promptEl = document.getElementById("prompt");
+        var statusEl = document.getElementById("status");
+        var statusTextEl = document.getElementById("status-text");
+        var sizeEl = document.getElementById("size");
+        var titleEl = document.getElementById("title");
+        var jumpEl = document.getElementById("jump");
+
+        function Block(kind) {
+          this.kind = kind; // "command" | "raw"
+          this.command = null; // plain text (live) — see commandBuffer for scrollback
+          this.commandBuffer = null;
+          this.buffer = new LineBuffer(MAX_LINES);
+          this.pwd = null;
+          this.git = null;
+          this.exitCode = null;
+          this.startedAt = null;
+          this.finishedAt = null;
+          this.running = false;
+          this.inBand = false;
+          this.notice = null;
+          this.el = null;
+          this.headDirty = true;
+        }
+
+        var view = {
+          blocks: [],
+          following: true,
+          home: null,
+          dirty: false,
+        };
+
+        // `Bootstrapped` carries the real home dir, but it only fires at shell
+        // startup — a guest that joins mid-session never sees it, so fall back
+        // to the conventional home prefixes.
+        var HOME_LIKE = /^(\/Users\/[^/]+|\/home\/[^/]+|\/root|[A-Za-z]:\\Users\\[^\\]+)(?=[/\\]|$)/;
+
+        function shortenPath(path) {
+          if (!path) return "";
+          if (view.home && path.indexOf(view.home) === 0) {
+            return "~" + path.slice(view.home.length);
+          }
+          var match = HOME_LIKE.exec(path);
+          if (match) return "~" + path.slice(match[0].length);
+          return path;
+        }
+
+        function formatDuration(ms) {
+          if (ms < 1000) return (ms / 1000).toFixed(3) + "s";
+          if (ms < 60000) return (ms / 1000).toFixed(2) + "s";
+          var minutes = Math.floor(ms / 60000);
+          var seconds = Math.round((ms % 60000) / 1000);
+          return minutes + "m " + seconds + "s";
+        }
+
+        function formatClock(ts) {
+          var date = new Date(ts);
+          return date.toTimeString().slice(0, 8);
+        }
+
+        function exitSucceeded(code) {
+          return SUCCESS_EXIT_CODES.indexOf(code) !== -1;
+        }
+
+        function appendBlock(block) {
+          view.blocks.push(block);
+          while (view.blocks.length > MAX_BLOCKS) {
+            var dropped = view.blocks.shift();
+            if (dropped.el && dropped.el.parentNode) {
+              dropped.el.parentNode.removeChild(dropped.el);
+            }
+          }
+          scheduleRender();
+          return block;
+        }
+
+        function appendDivider(text) {
+          var el = document.createElement("div");
+          el.className = "divider";
+          el.textContent = text;
+          blocksEl.appendChild(el);
+        }
+
+        function blockIsRenderable(block) {
+          if (block.inBand) return false;
+          if (block.kind === "command") return true;
+          if (block.notice) return true;
+          return !block.buffer.isEmpty();
+        }
+
+        function createBlockEl(block) {
+          var el = document.createElement("article");
+          el.className = "block";
+
+          var head = document.createElement("div");
+          head.className = "bhead";
+          el.appendChild(head);
+
+          var cmd = document.createElement("div");
+          cmd.className = "bcmd";
+          el.appendChild(cmd);
+
+          var out = document.createElement("div");
+          out.className = "bout";
+          el.appendChild(out);
+
+          el.__head = head;
+          el.__cmd = cmd;
+          el.__out = out;
+          block.el = el;
+
+          // Blocks can become renderable out of order (an empty one stays out of
+          // the DOM until it has content), so splice it in at its model position.
+          var index = view.blocks.indexOf(block);
+          for (var i = index + 1; i < view.blocks.length; i++) {
+            var next = view.blocks[i].el;
+            if (next && next.parentNode === blocksEl) {
+              blocksEl.insertBefore(el, next);
+              return el;
+            }
+          }
+          blocksEl.appendChild(el);
+          return el;
+        }
+
+        function renderHead(block) {
+          var head = block.el.__head;
+          head.textContent = "";
+
+          function chip(className, text) {
+            if (!text) return;
+            var span = document.createElement("span");
+            span.className = className;
+            span.textContent = text;
+            head.appendChild(span);
+          }
+
+          chip("cwd", shortenPath(block.pwd));
+          chip("git", block.git);
+
+          var grow = document.createElement("span");
+          grow.className = "grow";
+          head.appendChild(grow);
+
+          if (block.running) {
+            chip("live", "running…");
+          } else if (block.exitCode !== null && !exitSucceeded(block.exitCode)) {
+            chip("exit", "exit " + block.exitCode);
+          }
+
+          if (block.startedAt) {
+            var end = block.finishedAt || Date.now();
+            chip("dur", formatDuration(Math.max(0, end - block.startedAt)));
+            chip("time", formatClock(block.startedAt));
+          }
+
+          if (block.kind === "command") {
+            var acts = document.createElement("span");
+            acts.className = "acts";
+            var copyCmd = document.createElement("button");
+            copyCmd.type = "button";
+            copyCmd.textContent = "command";
+            copyCmd.title = "Copy command";
+            copyCmd.addEventListener("click", function () {
+              copyText(blockCommandText(block));
+            });
+            var copyOut = document.createElement("button");
+            copyOut.type = "button";
+            copyOut.textContent = "output";
+            copyOut.title = "Copy output";
+            copyOut.addEventListener("click", function () {
+              copyText(block.buffer.toText());
+            });
+            acts.appendChild(copyCmd);
+            acts.appendChild(copyOut);
+            head.appendChild(acts);
+          }
+
+          var state = "ok";
+          if (block.running) state = "running";
+          else if (block.exitCode !== null && !exitSucceeded(block.exitCode)) {
+            state = "fail";
+          }
+          block.el.dataset.state = state;
+        }
+
+        function blockCommandText(block) {
+          if (block.command !== null) return block.command;
+          if (block.commandBuffer) return block.commandBuffer.toText();
+          return "";
+        }
+
+        function renderBlock(block) {
+          if (!blockIsRenderable(block)) return;
+          if (!block.el) {
+            createBlockEl(block);
+            block.headDirty = true;
+          }
+          if (block.headDirty) {
+            renderHead(block);
+            block.headDirty = false;
+          }
+          if (block.commandBuffer) {
+            renderBuffer(block.el.__cmd, block.commandBuffer);
+          } else if (block.el.__cmd.textContent !== (block.command || "")) {
+            block.el.__cmd.textContent = block.command || "";
+          }
+          renderBuffer(block.el.__out, block.buffer);
+          if (block.notice && !block.el.__notice) {
+            var notice = document.createElement("div");
+            notice.className = "notice";
+            notice.textContent = block.notice;
+            block.el.appendChild(notice);
+            block.el.__notice = notice;
+          } else if (block.notice && block.el.__notice) {
+            block.el.__notice.textContent = block.notice;
+          } else if (!block.notice && block.el.__notice) {
+            block.el.removeChild(block.el.__notice);
+            block.el.__notice = null;
+          }
+        }
+
+        function scheduleRender() {
+          if (view.dirty) return;
+          view.dirty = true;
+          requestAnimationFrame(function () {
+            view.dirty = false;
+            render();
+          });
+        }
+
+        function render() {
+          for (var i = 0; i < view.blocks.length; i++) renderBlock(view.blocks[i]);
+          renderPrompt();
+          if (view.following) scrollToBottom();
+        }
+
+        function renderPrompt() {
+          var buffer = session.promptBuffer;
+          if (session.state !== "prompt" || buffer.isEmpty()) {
+            footerEl.className = "hidden";
+            return;
+          }
+          footerEl.className = "";
+          renderBuffer(promptEl, buffer);
+          if (!promptEl.__caret) {
+            var caret = document.createElement("span");
+            caret.id = "caret";
+            promptEl.__caret = caret;
+          }
+          var last = promptEl.lastChild;
+          if (last && last !== promptEl.__caret) last.appendChild(promptEl.__caret);
+        }
+
+        function scrollToBottom() {
+          blocksEl.scrollTop = blocksEl.scrollHeight;
+        }
+
+        blocksEl.addEventListener("scroll", function () {
+          var atBottom =
+            blocksEl.scrollTop + blocksEl.clientHeight >= blocksEl.scrollHeight - 12;
+          view.following = atBottom;
+          jumpEl.className = atBottom ? "" : "show";
+        });
+
+        jumpEl.addEventListener("click", function () {
+          view.following = true;
+          jumpEl.className = "";
+          scrollToBottom();
+        });
+
+        // Keeps the elapsed time on the in-flight block ticking.
+        setInterval(function () {
+          var block = session.current;
+          if (block && block.running && block.el) renderHead(block);
+        }, 250);
+
+        /* ----------------------------------------------------------------- */
+        /* Session state machine driven by Warp's shell hooks                 */
+        /* ----------------------------------------------------------------- */
+
+        var session = {
+          state: "idle", // "idle" | "prompt" | "running"
+          current: null,
+          promptContext: {},
+          promptBuffer: new LineBuffer(MAX_PROMPT_LINES),
+          scratch: new LineBuffer(MAX_PROMPT_LINES),
+          inBandDepth: 0,
+          altScreen: false,
+          hooksSeen: false,
+        };
+
+        function currentBlock() {
+          if (!session.current) {
+            var block = new Block("raw");
+            session.current = appendBlock(block);
+          }
+          return session.current;
+        }
+
+        function targetBuffer() {
+          if (session.altScreen || session.inBandDepth > 0) return session.scratch;
+          if (session.state === "prompt") return session.promptBuffer;
+          return currentBlock().buffer;
+        }
+
+        function startCommandBlock(command) {
+          var block = new Block("command");
+          block.command = command;
+          block.pwd = session.promptContext.pwd || null;
+          block.git = session.promptContext.git || null;
+          block.startedAt = Date.now();
+          block.running = true;
+          session.current = appendBlock(block);
+          session.state = "running";
+          scheduleRender();
+        }
+
+        function finishCommandBlock(exitCode) {
+          var block = session.current;
+          if (block && block.running) {
+            block.running = false;
+            block.exitCode = typeof exitCode === "number" ? exitCode : null;
+            block.finishedAt = Date.now();
+            block.headDirty = true;
+          }
+          session.state = "idle";
+          scheduleRender();
+        }
+
+        function onHook(hook) {
+          session.hooksSeen = true;
+          var value = hook.value || {};
+          switch (hook.hook) {
+            case "Preexec":
+              startCommandBlock(value.command || "");
+              break;
+            case "CommandFinished":
+              finishCommandBlock(value.exit_code);
+              break;
+            case "Precmd":
+              if (value.pwd) session.promptContext.pwd = value.pwd;
+              session.promptContext.git =
+                value.git_branch || value.git_head || session.promptContext.git;
+              session.state = "prompt";
+              session.promptBuffer.reset();
+              scheduleRender();
+              break;
+            case "Bootstrapped":
+              if (value.home_dir) view.home = value.home_dir;
+              break;
+            case "Clear":
+              clearBlocks();
+              break;
+            default:
+              break;
+          }
+        }
+
+        function clearBlocks() {
+          for (var i = 0; i < view.blocks.length; i++) {
+            var el = view.blocks[i].el;
+            if (el && el.parentNode) el.parentNode.removeChild(el);
+          }
+          view.blocks = [];
+          session.current = null;
+          blocksEl.textContent = "";
+          scheduleRender();
+        }
+
+        function onAltScreen(enabled) {
+          if (session.altScreen === enabled) return;
+          session.altScreen = enabled;
+          session.scratch.reset();
+          var block = session.current;
+          if (block) {
+            block.notice = enabled
+              ? "Full-screen application running on the host — output is not mirrored in the view-only guest."
+              : null;
+            block.headDirty = true;
+          }
+          scheduleRender();
+        }
+
+        var terminal = new Terminal({
+          getBuffer: targetBuffer,
+          onHook: onHook,
+          onAltScreen: onAltScreen,
+          onInBand: function (started) {
+            if (started) {
+              session.inBandDepth++;
+              if (session.current && session.state === "running") {
+                session.current.inBand = true;
+              }
+            } else if (session.inBandDepth > 0) {
+              session.inBandDepth--;
+            }
+          },
+          onTitle: function (title) {
+            titleEl.textContent = title || "";
+          },
+        });
+
+        /* ----------------------------------------------------------------- */
+        /* Scrollback (SerializedBlock JSON captured when the share started)  */
+        /* ----------------------------------------------------------------- */
+
+        function bufferFromAnsi(text, maxLines) {
+          var buffer = new LineBuffer(maxLines || MAX_LINES);
+          var offscreen = new Terminal({
+            getBuffer: function () {
+              return buffer;
+            },
+          });
+          offscreen.write(text);
+          return buffer;
+        }
+
+        function renderScrollback(scrollback) {
+          if (!scrollback || !scrollback.blocks) return;
+          for (var i = 0; i < scrollback.blocks.length; i++) {
+            var raw = scrollback.blocks[i].raw;
+            if (!raw) continue;
+            var serialized;
+            try {
+              serialized = JSON.parse(decodeUtf8(bytesFromJson(raw)));
+            } catch (err) {
+              continue;
+            }
+            var block = blockFromSerialized(serialized);
+            if (block) appendBlock(block);
+          }
+        }
+
+        function blockFromSerialized(serialized) {
+          var commandText = serialized.stylized_command
+            ? decodeUtf8(bytesFromJson(serialized.stylized_command))
+            : "";
+          var outputText = serialized.stylized_output
+            ? decodeUtf8(bytesFromJson(serialized.stylized_output))
+            : "";
+          if (!commandText.trim() && !outputText.trim()) return null;
+
+          var block = new Block(commandText.trim() ? "command" : "raw");
+          block.commandBuffer = bufferFromAnsi(commandText, 200);
+          block.buffer = bufferFromAnsi(outputText, MAX_LINES);
+          block.pwd = serialized.pwd || null;
+          block.git = serialized.git_branch_name || serialized.git_head || null;
+          block.exitCode =
+            typeof serialized.exit_code === "number" ? serialized.exit_code : null;
+          if (serialized.start_ts) {
+            var started = Date.parse(serialized.start_ts);
+            if (!isNaN(started)) block.startedAt = started;
+          }
+          if (serialized.completed_ts) {
+            var finished = Date.parse(serialized.completed_ts);
+            if (!isNaN(finished)) block.finishedAt = finished;
+          }
+          return block;
+        }
+
+        /* ----------------------------------------------------------------- */
+        /* Transport                                                          */
+        /* ----------------------------------------------------------------- */
+
+        function setStatus(text, kind) {
+          statusTextEl.textContent = text;
+          statusEl.className = "pill" + (kind ? " " + kind : "");
+        }
+
+        function setSize(cols, rows) {
+          sizeEl.textContent = cols && rows ? cols + "×" + rows : "";
+        }
+
+        function secretFromPath() {
+          var parts = location.pathname.split("/").filter(Boolean);
+          if (parts.length >= 2 && parts[0] === "local-session") return parts[1];
+          return null;
+        }
+
+        var decoder = new TextDecoder("utf-8", { fatal: false });
+        var joinedOnce = false;
+        var closedByServer = false;
+        var retryDelay = 1000;
+
+        function handleMessage(msg) {
+          if (msg.JoinedSuccessfully) {
+            var joined = msg.JoinedSuccessfully;
+            var size = joined.window_size || {};
+            setSize(size.num_cols, size.num_rows);
+            setStatus("live", "ok");
+            retryDelay = 1000;
+            if (!joinedOnce) {
+              renderScrollback(joined.scrollback);
+              joinedOnce = true;
+            } else {
+              appendDivider("— reconnected —");
+            }
+            scheduleRender();
+            return;
+          }
+
+          if (msg.SessionEnded) {
+            closedByServer = true;
+            setStatus("session ended", "err");
+            appendDivider("— the host ended this session —");
+            return;
+          }
+
+          if (msg.FailedToJoin) {
+            closedByServer = true;
+            setStatus("join failed", "err");
+            appendDivider("— could not join this session —");
+            return;
+          }
+
+          var ordered = msg.OrderedTerminalEvent;
+          if (!ordered || !ordered.event_type) return;
+          var event = ordered.event_type;
+
+          if (event.PtyBytesRead && event.PtyBytesRead.bytes) {
+            try {
+              var raw = lz4DecompressSizePrepended(
+                bytesFromJson(event.PtyBytesRead.bytes)
+              );
+              terminal.write(decoder.decode(raw, { stream: true }));
+              scheduleRender();
+            } catch (err) {
+              console.warn("failed to decode PtyBytesRead", err);
+            }
+            return;
+          }
+
+          if (event.CommandExecutionStarted && !session.hooksSeen) {
+            // Fallback block boundaries for hosts whose shell isn't running
+            // Warp's shell integration (raw ssh sessions, subshells, …).
+            startCommandBlock("");
+            return;
+          }
+
+          if (event.CommandExecutionFinished && !session.hooksSeen) {
+            finishCommandBlock(null);
+            return;
+          }
+
+          if (event.Resize && event.Resize.window_size) {
+            setSize(
+              event.Resize.window_size.num_cols,
+              event.Resize.window_size.num_rows
+            );
+          }
+        }
+
+        function connect(wsUrl) {
+          var ws = new WebSocket(wsUrl);
+
+          ws.addEventListener("open", function () {
+            setStatus("joining…");
+            ws.send(
+              JSON.stringify({
+                Initialize: {
+                  viewer_id: null,
+                  user_id: {
+                    anonymous_id: crypto.randomUUID(),
+                    firebase_id_token: null,
+                  },
+                  last_received_event_no: null,
+                  latest_block_id: null,
+                  telemetry_context: null,
+                  feature_support: {},
+                },
+              })
+            );
+          });
+
+          ws.addEventListener("message", function (event) {
+            var msg;
+            try {
+              msg = JSON.parse(event.data);
+            } catch (err) {
+              return;
+            }
+            handleMessage(msg);
+          });
+
+          ws.addEventListener("close", function () {
+            if (closedByServer) return;
+            setStatus("reconnecting…", "err");
+            setTimeout(function () {
+              connect(wsUrl);
+            }, retryDelay);
+            retryDelay = Math.min(retryDelay * 2, 10000);
+          });
+
+          ws.addEventListener("error", function () {
+            setStatus("connection error", "err");
+          });
+        }
+
+        async function boot() {
+          var secret = secretFromPath();
+          if (!secret) {
+            setStatus("invalid share URL", "err");
+            return;
+          }
+
+          var wsUrl;
+          try {
+            var response = await fetch(
+              "/local-session/" + encodeURIComponent(secret) + "/boot.json"
+            );
+            if (!response.ok) throw new Error("boot.json HTTP " + response.status);
+            wsUrl = (await response.json()).ws_url;
+          } catch (err) {
+            // Same-origin fallback when boot.json is unreachable.
+            var scheme = location.protocol === "https:" ? "wss" : "ws";
+            wsUrl = scheme + "://" + location.host + "/local-session/" + secret + "/ws";
+            console.warn("boot.json failed, using derived ws URL", err);
+          }
+
+          connect(wsUrl);
+        }
+
+        boot();
+      })();
+    </script>
+  </body>
+</html>

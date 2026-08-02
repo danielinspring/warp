@@ -2047,6 +2047,14 @@ impl EditorModel {
 
     pub fn clear_buffer(&mut self, ctx: &mut ModelContext<Self>) {
         self.buffer_handle().update(ctx, |buffer, ctx| {
+            // TEMP(debug): trace who clears a non-empty input buffer. Remove before commit.
+            if buffer.len() > CharOffset::zero() {
+                log::warn!(
+                    "TEMP_CLEAR clear_buffer len={:?}\n{}",
+                    buffer.len(),
+                    std::backtrace::Backtrace::force_capture()
+                );
+            }
             if let Err(error) = buffer.edit(Some(0.into()..buffer.len()), "", ctx) {
                 log::error!("error clearing text: {error}");
             };
