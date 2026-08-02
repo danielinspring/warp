@@ -12,7 +12,7 @@ const html = fs.readFileSync(path.join(__dirname, "lite_viewer.html"), "utf8");
 let script = /<script>([\s\S]*)<\/script>/.exec(html)[1];
 script = script.replace(
   "boot();",
-  "globalThis.__exports = { Screen: Screen, Terminal: Terminal, renderLineHtml: renderLineHtml, session: session, terminal: terminal, render: render, styleCss: styleCss, history: history, view: view, ingestScrollback: ingestScrollback, loadOlderHistory: loadOlderHistory, INITIAL_VISIBLE_BLOCKS: INITIAL_VISIBLE_BLOCKS, HISTORY_PAGE_SIZE: HISTORY_PAGE_SIZE, blocksEl: blocksEl, sendExecuteCommand: sendExecuteCommand, sendWriteToPty: sendWriteToPty, transport: transport, submitGuestCommand: submitGuestCommand, renderGuestBar: renderGuestBar, guest: guest, guestBarEl: guestBarEl, ginputEl: ginputEl };"
+  "globalThis.__exports = { Screen: Screen, Terminal: Terminal, renderLineHtml: renderLineHtml, session: session, terminal: terminal, render: render, styleCss: styleCss, history: history, view: view, ingestScrollback: ingestScrollback, loadOlderHistory: loadOlderHistory, INITIAL_VISIBLE_BLOCKS: INITIAL_VISIBLE_BLOCKS, HISTORY_PAGE_SIZE: HISTORY_PAGE_SIZE, blocksEl: blocksEl, sendExecuteCommand: sendExecuteCommand, sendWriteToPty: sendWriteToPty, transport: transport, submitGuestCommand: submitGuestCommand, renderGuestBar: renderGuestBar, guest: guest, guestBarEl: guestBarEl, ginputEl: ginputEl, renderMarkdown: renderMarkdown, upsertAgentExchange: upsertAgentExchange };"
 );
 
 function makeEl(tag) {
@@ -157,6 +157,8 @@ const {
   guest,
   guestBarEl,
   ginputEl,
+  renderMarkdown,
+  upsertAgentExchange,
 } = sandbox.__exports;
 
 /* --------------------------------------------------------------------- */
@@ -339,6 +341,63 @@ function driver(rows, cols) {
     (css) => css.indexOf("line-through") !== -1
   );
   check("SGR strikethrough still emits CSS", hasStrike, true);
+}
+
+// Agent markdown rendering.
+{
+  check(
+    "markdown renders headings",
+    renderMarkdown("### Core Purpose\n\nHello"),
+    "<h3>Core Purpose</h3><p>Hello</p>"
+  );
+  check(
+    "markdown renders unordered lists",
+    renderMarkdown("* one\n* two"),
+    "<ul><li>one</li><li>two</li></ul>"
+  );
+  check(
+    "markdown renders inline code and bold",
+    renderMarkdown("Use `./script/bootstrap` and **Warp**"),
+    "<p>Use <code>./script/bootstrap</code> and <strong>Warp</strong></p>"
+  );
+  check(
+    "markdown escapes raw HTML",
+    renderMarkdown("<script>alert(1)</script>"),
+    "<p>&lt;script&gt;alert(1)&lt;/script&gt;</p>"
+  );
+  check(
+    "markdown renders fenced code",
+    renderMarkdown("```\necho hi\n```"),
+    "<pre><code>echo hi</code></pre>"
+  );
+
+  upsertAgentExchange({
+    id: "ex-1",
+    query: "/agent what is this repo about?",
+    output: "### Key Features\n\n* Local agent\n* Terminal",
+    running: false,
+  });
+  const agentEl = sandbox.document.getElementById("blocks").lastChild;
+  check("agent block mounts", !!agentEl, true);
+  check("agent query is shown", agentEl.childNodes[1]._text, "/agent what is this repo about?");
+  check(
+    "agent output is rendered as HTML",
+    agentEl.childNodes[2]._html,
+    "<h3>Key Features</h3><ul><li>Local agent</li><li>Terminal</li></ul>"
+  );
+
+  upsertAgentExchange({
+    id: "ex-1",
+    query: "/agent what is this repo about?",
+    output: "### Key Features\n\n* Local agent\n* Terminal\n* Sharing",
+    running: true,
+  });
+  check(
+    "streamed agent update replaces the same block",
+    agentEl.childNodes[2]._html,
+    "<h3>Key Features</h3><ul><li>Local agent</li><li>Terminal</li><li>Sharing</li></ul>"
+  );
+  check("running agent shows status", agentEl.childNodes[0]._text, "responding…");
 }
 
 // Guest execute / write-to-pty payloads.

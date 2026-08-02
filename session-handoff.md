@@ -22,7 +22,7 @@ Local LAN share guests can watch the host session, run commands from the browser
 - Guest renders Warp-style blocks, alt-screen grid, history pagination, and restored-block scrollback.
 - Guests join as **Executor**. They type in a dedicated `#guestbar` command line that render passes never re-parent; `#typed` is only a read-only mirror of the host's input editor.
 - Enter runs the line when the host is idle, or writes it to the running command's stdin when one is active.
-- Agent Mode turns are mirrored as plain text (`LocalShareAgentExchange`), published on `UpdatedStreamingExchange` and replayed to late joiners; the viewer shows one agent block per turn, updated as it streams.
+- Agent Mode turns are mirrored as plain text (`LocalShareAgentExchange`), published on `UpdatedStreamingExchange` and replayed to late joiners; the viewer renders each turn as markdown (headings, lists, code) and updates it in place as it streams.
 - Agent prompt / control upstream messages from guests stay rejected. Link = auth for execute (toasts say so).
 - WarpOss.app rebuilt and relaunched with these changes.
 

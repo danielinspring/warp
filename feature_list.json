@@ -1009,6 +1009,26 @@
         "./script/format --check"
       ],
       "evidence": "2026-08-03: Typing was impossible because #typed is re-parented into the prompt's last row on every render (moving a focused contenteditable blurs it), the host mirror overwrote the draft, and editability was gated on session.state == 'prompt'. Replaced with a sibling #guestbar/#ginput that render never touches; #typed is a read-only mirror again. Enter routes to ExecuteCommand or WriteToPty(line + CR) by host state; ExecuteCommand falls back to a placeholder buffer id. Agent Mode: added LocalShareAgentExchange (hub ReplayLog.agent_exchanges, replayed after the backlog on join) published from TerminalView::handle_ai_history_model_event on BlocklistAIHistoryEvent::UpdatedStreamingExchange using display_user_query + format_output_for_copy; lite viewer renders/updates an agent block per exchange id. cargo test -p warp local_session_share --lib: 38 passed (new agent_exchange_is_mirrored_live_and_on_late_join). lite_viewer_tests.js: 46 checks passed. ./script/format --check passed. WarpOss rebuilt and relaunched."
+    },
+    {
+      "id": "feat-044",
+      "name": "Render Agent Mode markdown in the lite viewer",
+      "description": "Show Agent Mode answers as rendered markdown in the guest viewer instead of raw ## / * source text.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-043"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "Agent block output is rendered as HTML for headings, lists, bold/italic, inline code, fenced code, links, and blockquotes.",
+        "Raw HTML in agent text is escaped.",
+        "Streamed updates still replace the same agent block in place.",
+        "Focused lite_viewer harness passes."
+      ],
+      "verification": [
+        "node app/src/terminal/local_session_share/lite_viewer_tests.js"
+      ],
+      "evidence": "2026-08-03: Added renderMarkdown() in lite_viewer.html; upsertAgentExchange sets agentout.innerHTML. Sans-serif CSS for headings/lists/code. lite_viewer_tests.js: all checks passed including heading/list/code/escape/fence and in-place stream update. WarpOss rebuilt and relaunched."
     }
   ],
   "future_phases": [
@@ -1025,7 +1045,7 @@
     {
       "phase": "Phase D",
       "scope": [],
-      "note": "Phase D complete through feat-043 (guest command line + Agent Mode mirroring)."
+      "note": "Phase D complete through feat-044 (Agent Mode markdown in lite viewer)."
     }
   ]
 }
