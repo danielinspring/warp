@@ -753,6 +753,74 @@ fn agent_exchange_is_mirrored_live_and_on_late_join() {
     hub.stop();
 }
 
+#[test]
+fn late_join_replays_agent_exchanges_in_publish_order() {
+    let mut hub = LocalSessionShareHub::new();
+    let handle = hub.start(loopback_ip(), 0).expect("start should succeed");
+    let publisher = hub.event_publisher().expect("publisher");
+
+    // An agent turn sandwiched between two PTY frames has to replay in the
+    // middle, not at the end, or a guest that opens the link (or a rotated
+    // link) later sees a transcript in a different order than the host's.
+    publisher
+        .publish_pty_bytes(b"before-agent\r\n")
+        .expect("publish should succeed");
+    publisher
+        .publish_agent_exchange(LocalShareAgentExchange {
+            id: "exchange-1".to_string(),
+            query: "/agent what is this repo about?".to_string(),
+            output: "It is a terminal.".to_string(),
+            running: false,
+        })
+        .expect("publish should succeed");
+    publisher
+        .publish_pty_bytes(b"after-agent\r\n")
+        .expect("publish should succeed");
+    // A streamed update must not move the turn to the end of the replay.
+    publisher
+        .publish_agent_exchange(LocalShareAgentExchange {
+            id: "exchange-1".to_string(),
+            query: "/agent what is this repo about?".to_string(),
+            output: "It is a terminal. Written in Rust.".to_string(),
+            running: false,
+        })
+        .expect("publish should succeed");
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let (mut socket, _) = join_as_viewer(guest_ws_url(&handle)).await;
+
+        let mut kinds = Vec::new();
+        for _ in 0..8 {
+            let message = socket
+                .next()
+                .await
+                .expect("hub should send a frame")
+                .expect("frame should not error");
+            let Message::Text(text) = message else {
+                continue;
+            };
+            let json: serde_json::Value =
+                serde_json::from_str(text.as_ref()).expect("frame should be json");
+            if json.get("LocalShareAgentExchange").is_some() {
+                kinds.push("agent".to_string());
+            } else if json.get("OrderedTerminalEvent").is_some() {
+                kinds.push("pty".to_string());
+            }
+            if kinds.len() == 3 {
+                break;
+            }
+        }
+
+        assert_eq!(kinds, vec!["pty", "agent", "pty"]);
+    });
+
+    hub.stop();
+}
+
 /// Reads frames until the next `LocalShareAgentExchange` payload, skipping the
 /// typed-input snapshot and any ordered events in between.
 async fn next_agent_exchange(

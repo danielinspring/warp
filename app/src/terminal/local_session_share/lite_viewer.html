@@ -1981,6 +1981,7 @@
             if (dropped.el && dropped.el.parentNode) {
               dropped.el.parentNode.removeChild(dropped.el);
             }
+            if (dropped.agentId) delete agentBlocks[dropped.agentId];
           }
           scheduleRender();
           return block;
@@ -2020,9 +2021,14 @@
           el.__cmd = cmd;
           el.__out = out;
           block.el = el;
+          return mountBlockEl(block, el);
+        }
 
-          // Blocks can become renderable out of order (an empty one stays out of
-          // the DOM until it has content), so splice it in at its model position.
+        // Blocks can become renderable out of order (an empty one stays out of
+        // the DOM until it has content), so splice each one in at its model
+        // position rather than appending. Agent blocks go through this too, so
+        // `view.blocks` is the single source of truth for on-screen order.
+        function mountBlockEl(block, el) {
           var index = view.blocks.indexOf(block);
           for (var i = index + 1; i < view.blocks.length; i++) {
             var next = view.blocks[i].el;
@@ -2103,6 +2109,9 @@
         }
 
         function renderBlock(block) {
+          // Agent blocks own their own DOM (see upsertAgentExchange); they only
+          // live in view.blocks so they take their turn in the block order.
+          if (block.kind === "agent") return;
           if (!blockIsRenderable(block)) return;
           if (!block.el) {
             createBlockEl(block);
@@ -2288,8 +2297,17 @@
             el.appendChild(head);
             el.appendChild(cmd);
             el.appendChild(out);
-            blocksEl.appendChild(el);
-            entry = agentBlocks[id] = { el: el, head: head, cmd: cmd, out: out };
+            entry = agentBlocks[id] = {
+              kind: "agent",
+              agentId: id,
+              inBand: false,
+              el: el,
+              head: head,
+              cmd: cmd,
+              out: out,
+            };
+            appendBlock(entry);
+            mountBlockEl(entry, el);
           }
           entry.cmd.textContent = payload.query || "";
           var markdown = payload.output || "";
@@ -2410,10 +2428,14 @@
           guestBarEl.className = enabled ? "" : "off";
           if (!enabled) return;
           var running = session.state === "running";
-          ghintEl.textContent = running ? "Enter to send · ⌃C to stop" : "Enter to run";
+          ghintEl.textContent = running
+            ? "Enter to send · ⌃C to stop"
+            : "Enter to run · /agent to ask";
           ginputEl.setAttribute(
             "data-placeholder",
-            running ? "send input to the running command…" : "run a command on the host…"
+            running
+              ? "send input to the running command…"
+              : "run a command, or /agent <prompt>…"
           );
         }
 
@@ -2930,7 +2952,26 @@
           sendWriteToPty(bytes);
         });
 
+        // The first scrollback ingest mounts history across several animation
+        // frames. Anything that arrives meanwhile (replayed PTY frames, mirrored
+        // agent turns) belongs *after* that history, but would be spliced into
+        // the middle of it, so hold those messages until the ingest finishes.
+        var ingestingHistory = false;
+        var deferredMessages = [];
+
+        function flushDeferredMessages() {
+          ingestingHistory = false;
+          var queued = deferredMessages;
+          deferredMessages = [];
+          for (var i = 0; i < queued.length; i++) handleMessage(queued[i]);
+        }
+
         function handleMessage(msg) {
+          if (ingestingHistory && !msg.JoinedSuccessfully) {
+            deferredMessages.push(msg);
+            return;
+          }
+
           if (msg.LocalShareAgentExchange) {
             upsertAgentExchange(msg.LocalShareAgentExchange);
             return;
@@ -2973,6 +3014,7 @@
                       totalHistory
                   : "no prior blocks"
               );
+              ingestingHistory = true;
               ingestScrollback(
                 joined.scrollback,
                 function (done, total) {
@@ -2983,6 +3025,7 @@
                   );
                 },
                 function () {
+                  flushDeferredMessages();
                   progress.done();
                   focusGuestInput();
                 }

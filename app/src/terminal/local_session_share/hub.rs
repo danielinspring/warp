@@ -47,21 +47,42 @@ const LOCAL_SHARE_MAX_AGENT_EXCHANGES: usize = 64;
 /// `agent_exchanges` holds the latest plain-text snapshot of each Agent Mode
 /// turn, newest last, for the same reason: an agent answer is re-published on
 /// every streamed token, so only the current text of each turn is retained.
+///
+/// Both are stamped with a shared monotonic sequence so [`Self::replay`] can
+/// re-emit them interleaved. Replaying every agent turn after every PTY frame
+/// would put agent blocks at the bottom of a rejoining guest's transcript no
+/// matter where they actually happened.
 #[derive(Default)]
 struct ReplayLog {
-    frames: VecDeque<String>,
+    frames: VecDeque<(u64, String)>,
     bytes: usize,
     typed_input: String,
-    agent_exchanges: Vec<(String, String)>,
+    agent_exchanges: Vec<AgentExchangeSnapshot>,
+    next_seq: u64,
+}
+
+struct AgentExchangeSnapshot {
+    id: String,
+    /// Position of the turn's *first* publish in the frame stream. Streamed
+    /// updates keep it so a turn stays anchored where it started.
+    seq: u64,
+    json: String,
 }
 
 impl ReplayLog {
+    fn next_seq(&mut self) -> u64 {
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.saturating_add(1);
+        seq
+    }
+
     fn push(&mut self, frame: String) {
+        let seq = self.next_seq();
         self.bytes = self.bytes.saturating_add(frame.len());
-        self.frames.push_back(frame);
+        self.frames.push_back((seq, frame));
         // Keep the newest frame even if it alone is over budget.
         while self.bytes > LOCAL_SHARE_MAX_REPLAY_BYTES && self.frames.len() > 1 {
-            if let Some(dropped) = self.frames.pop_front() {
+            if let Some((_, dropped)) = self.frames.pop_front() {
                 self.bytes = self.bytes.saturating_sub(dropped.len());
             }
         }
@@ -70,22 +91,42 @@ impl ReplayLog {
     /// Returns false when `json` is already the retained snapshot for `id`, so
     /// the caller can skip a redundant broadcast.
     fn record_agent_exchange(&mut self, id: &str, json: String) -> bool {
-        if let Some(entry) = self
-            .agent_exchanges
-            .iter_mut()
-            .find(|(existing, _)| existing == id)
-        {
-            if entry.1 == json {
+        if let Some(entry) = self.agent_exchanges.iter_mut().find(|entry| entry.id == id) {
+            if entry.json == json {
                 return false;
             }
-            entry.1 = json;
+            entry.json = json;
             return true;
         }
-        self.agent_exchanges.push((id.to_owned(), json));
+        let seq = self.next_seq();
+        self.agent_exchanges.push(AgentExchangeSnapshot {
+            id: id.to_owned(),
+            seq,
+            json,
+        });
         while self.agent_exchanges.len() > LOCAL_SHARE_MAX_AGENT_EXCHANGES {
             self.agent_exchanges.remove(0);
         }
         true
+    }
+
+    /// PTY frames and agent turns merged back into publish order.
+    fn replay(&self) -> Vec<String> {
+        let mut merged: Vec<(u64, &str)> = self
+            .frames
+            .iter()
+            .map(|(seq, frame)| (*seq, frame.as_str()))
+            .chain(
+                self.agent_exchanges
+                    .iter()
+                    .map(|entry| (entry.seq, entry.json.as_str())),
+            )
+            .collect();
+        merged.sort_by_key(|(seq, _)| *seq);
+        merged
+            .into_iter()
+            .map(|(_, json)| json.to_owned())
+            .collect()
     }
 }
 
@@ -236,13 +277,8 @@ impl ShareState {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         JoinSnapshot {
-            backlog: replay.frames.iter().cloned().collect(),
+            backlog: replay.replay(),
             typed_input: replay.typed_input.clone(),
-            agent_exchanges: replay
-                .agent_exchanges
-                .iter()
-                .map(|(_, json)| json.clone())
-                .collect(),
             events: self.event_tx.subscribe(),
         }
     }
@@ -313,9 +349,9 @@ impl ShareState {
 /// Everything a newly connected guest needs to catch up, snapshotted under one
 /// lock so the join boundary has no gap and no duplicates.
 pub(crate) struct JoinSnapshot {
+    /// PTY frames and Agent Mode turn snapshots in publish order.
     pub(crate) backlog: Vec<String>,
     pub(crate) typed_input: String,
-    pub(crate) agent_exchanges: Vec<String>,
     pub(crate) events: broadcast::Receiver<String>,
 }
 

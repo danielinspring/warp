@@ -23,9 +23,11 @@ Local LAN share guests can watch the host session, run commands from the browser
 - Guests join as **Executor**. They type in a dedicated `#guestbar` command line that render passes never re-parent; `#typed` is only a read-only mirror of the host's input editor.
 - Enter runs the line when the host is idle, or writes it to the running command's stdin when one is active.
 - Agent Mode turns are mirrored as plain text (`LocalShareAgentExchange`), published on `UpdatedStreamingExchange` and replayed to late joiners; the viewer renders each turn as markdown (headings, lists, code) and updates it in place as it streams.
-- Agent prompt / control upstream messages from guests stay rejected. Link = auth for execute (toasts say so).
-- WarpOss.app rebuilt and relaunched with these changes.
+- Guests can start Agent Mode themselves: `Input::submit_line_on_behalf_of_shared_session_participant` runs `detect_command` first, so `/agent …` and skill commands go to the AI stack and everything else still runs in the shell.
+- Block order survives join and link rotation: `ReplayLog` stamps PTY frames and agent snapshots with one monotonic sequence and replays them merged, and the viewer holds incoming messages while the first scrollback ingest is still mounting history.
+- Agent prompt / control upstream messages from guests stay rejected — guests reach Agent Mode through `ExecuteCommand` routing, not `SendAgentPrompt`. Link = auth for execute (toasts say so).
+- WarpOss rebuilt with these changes.
 
 ## Recommended Next Step
 
-Dogfood both paths in one session: type `echo hello-from-guest` in the guest bar and press Enter, then run `/agent what is this repo about?` on the host and confirm the streamed answer appears in the browser.
+Dogfood the guest-initiated path: join the share in a browser, type `/agent what is this repo about?` in the guest bar, then rotate the link and rejoin to confirm the agent block replays in the same position the host shows.

@@ -1029,6 +1029,30 @@
         "node app/src/terminal/local_session_share/lite_viewer_tests.js"
       ],
       "evidence": "2026-08-03: Added renderMarkdown() in lite_viewer.html; upsertAgentExchange sets agentout.innerHTML. Sans-serif CSS for headings/lists/code. lite_viewer_tests.js: all checks passed including heading/list/code/escape/fence and in-place stream update. WarpOss rebuilt and relaunched."
+    },
+    {
+      "id": "feat-045",
+      "name": "Guest-initiated /agent and correct agent block order",
+      "description": "Let a local-share guest start Agent Mode with /agent from the browser, and keep mirrored agent turns in the host's block order on join and after a link rotation.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-044"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "A guest submitting '/agent <prompt>' starts an Agent Mode turn on the host instead of reaching the shell as a literal command.",
+        "Skill commands submitted by a guest route the same way; everything else still runs in the shell.",
+        "A slash command from a guest is not dropped just because a long-running command owns the PTY.",
+        "Join replays PTY frames and agent turns interleaved in publish order, so a rejoining or rotated-link guest sees the host's block order.",
+        "A mirrored agent turn arriving during the initial scrollback ingest lands after that history, not inside it.",
+        "Focused Rust and lite_viewer harnesses pass."
+      ],
+      "verification": [
+        "cargo test -p warp --lib local_session_share",
+        "node app/src/terminal/local_session_share/lite_viewer_tests.js",
+        "./script/format --check"
+      ],
+      "evidence": "2026-08-03: Guest '/agent add dan_docs to gitignore' reached the PTY verbatim (zsh: no such file or directory: /agent) because ExecuteCommand went straight to try_execute_command_on_behalf_of_shared_session_participant. Added Input::submit_line_on_behalf_of_shared_session_participant, which runs slash_command_model.detect_command first and dispatches execute_slash_command / execute_skill_command before falling back to the shell path; TerminalView::apply_local_share_guest_request calls it and skips the long-running guard for slash lines. Ordering: ReplayLog now stamps frames and agent snapshots with a shared monotonic seq and ReplayLog::replay() merges them, so JoinSnapshot.backlog is a single ordered stream (server.rs no longer sends agent turns last); the lite viewer mounts agent blocks through view.blocks via mountBlockEl and defers downstream messages while the first scrollback ingest is animation-frame slicing. cargo test -p warp --lib local_session_share: 39 passed (new late_join_replays_agent_exchanges_in_publish_order). lite_viewer_tests.js: 61 checks passed (new agent-block-ordering checks). ./script/format passed; cargo clippy -p warp --lib --all-features --tests reports no new warnings in the changed files. WarpOss rebuilt."
     }
   ],
   "future_phases": [
@@ -1045,7 +1069,7 @@
     {
       "phase": "Phase D",
       "scope": [],
-      "note": "Phase D complete through feat-044 (Agent Mode markdown in lite viewer)."
+      "note": "Phase D complete through feat-045 (guest-initiated /agent and agent block ordering)."
     }
   ]
 }

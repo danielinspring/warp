@@ -139,14 +139,9 @@ async fn handle_socket(socket: WebSocket, state: Arc<ShareState>) {
                         return;
                     }
                 }
+                // PTY frames and Agent Mode turns are already merged in publish
+                // order, so the guest rebuilds the same block order the host has.
                 for frame in snapshot.backlog {
-                    if sink.send(Message::Text(frame.into())).await.is_err() {
-                        return;
-                    }
-                }
-                // Agent turns last: they are appended to the end of the guest's
-                // block list, so they should land after the replayed PTY blocks.
-                for frame in snapshot.agent_exchanges {
                     if sink.send(Message::Text(frame.into())).await.is_err() {
                         return;
                     }

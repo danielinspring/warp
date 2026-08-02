@@ -12,7 +12,7 @@ const html = fs.readFileSync(path.join(__dirname, "lite_viewer.html"), "utf8");
 let script = /<script>([\s\S]*)<\/script>/.exec(html)[1];
 script = script.replace(
   "boot();",
-  "globalThis.__exports = { Screen: Screen, Terminal: Terminal, renderLineHtml: renderLineHtml, session: session, terminal: terminal, render: render, styleCss: styleCss, history: history, view: view, ingestScrollback: ingestScrollback, loadOlderHistory: loadOlderHistory, INITIAL_VISIBLE_BLOCKS: INITIAL_VISIBLE_BLOCKS, HISTORY_PAGE_SIZE: HISTORY_PAGE_SIZE, blocksEl: blocksEl, sendExecuteCommand: sendExecuteCommand, sendWriteToPty: sendWriteToPty, transport: transport, submitGuestCommand: submitGuestCommand, renderGuestBar: renderGuestBar, guest: guest, guestBarEl: guestBarEl, ginputEl: ginputEl, renderMarkdown: renderMarkdown, upsertAgentExchange: upsertAgentExchange };"
+  "globalThis.__exports = { Screen: Screen, Terminal: Terminal, renderLineHtml: renderLineHtml, session: session, terminal: terminal, render: render, styleCss: styleCss, history: history, view: view, ingestScrollback: ingestScrollback, loadOlderHistory: loadOlderHistory, INITIAL_VISIBLE_BLOCKS: INITIAL_VISIBLE_BLOCKS, HISTORY_PAGE_SIZE: HISTORY_PAGE_SIZE, blocksEl: blocksEl, sendExecuteCommand: sendExecuteCommand, sendWriteToPty: sendWriteToPty, transport: transport, submitGuestCommand: submitGuestCommand, renderGuestBar: renderGuestBar, guest: guest, guestBarEl: guestBarEl, ginputEl: ginputEl, renderMarkdown: renderMarkdown, upsertAgentExchange: upsertAgentExchange, handleMessage: handleMessage };"
 );
 
 function makeEl(tag) {
@@ -483,6 +483,72 @@ function driver(rows, cols) {
   session.state = "idle";
 }
 
+function utf8Bytes(text) {
+  return Array.from(Buffer.from(text, "utf8"));
+}
+
+function fakeScrollback(count) {
+  const blocks = [];
+  for (let i = 0; i < count; i++) {
+    const serialized = JSON.stringify({
+      stylized_command: utf8Bytes("cmd-" + i),
+      stylized_output: utf8Bytes("out-" + i),
+      pwd: "/tmp",
+      exit_code: 0,
+    });
+    blocks.push({ raw: utf8Bytes(serialized) });
+  }
+  return { blocks };
+}
+
+function mountedBlockClasses() {
+  return sandbox.__exports.blocksEl.childNodes
+    .map((el) => el.className)
+    .filter((name) => name.indexOf("block") === 0);
+}
+
+// A mirrored agent turn that arrives while the join's scrollback is still being
+// mounted belongs after that history, not spliced into the middle of it.
+async function testAgentBlockOrdering() {
+  const { handleMessage, view, history, blocksEl, session } = sandbox.__exports;
+
+  view.blocks.splice(0, view.blocks.length);
+  history.older.splice(0, history.older.length);
+  history.atStart = true;
+  history.markerEl = null;
+  history.loading = false;
+  blocksEl.childNodes.splice(0, blocksEl.childNodes.length);
+  blocksEl._text = "";
+  session.altScreen = false;
+
+  handleMessage({
+    JoinedSuccessfully: {
+      window_size: { num_cols: 80, num_rows: 24 },
+      viewer_id: "viewer-1",
+      scrollback: fakeScrollback(3),
+    },
+  });
+  // The ingest is animation-frame sliced, so nothing is mounted yet.
+  handleMessage({
+    LocalShareAgentExchange: {
+      id: "ex-order",
+      query: "/agent hi",
+      output: "hello",
+      running: false,
+    },
+  });
+  check("agent turn is held while history mounts", mountedBlockClasses(), []);
+
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  check("agent block lands after the replayed history", mountedBlockClasses(), [
+    "block",
+    "block",
+    "block",
+    "block agent",
+  ]);
+}
+
 // History pagination: mount a short tail, then page older blocks on demand.
 (async function testHistoryPagination() {
   const {
@@ -494,24 +560,6 @@ function driver(rows, cols) {
     HISTORY_PAGE_SIZE,
     blocksEl,
   } = sandbox.__exports;
-
-  function utf8Bytes(text) {
-    return Array.from(Buffer.from(text, "utf8"));
-  }
-
-  function fakeScrollback(count) {
-    const blocks = [];
-    for (let i = 0; i < count; i++) {
-      const serialized = JSON.stringify({
-        stylized_command: utf8Bytes("cmd-" + i),
-        stylized_output: utf8Bytes("out-" + i),
-        pwd: "/tmp",
-        exit_code: 0,
-      });
-      blocks.push({ raw: utf8Bytes(serialized) });
-    }
-    return { blocks };
-  }
 
   // Reset visible state left over from the alt-screen round-trip above.
   view.blocks.splice(0, view.blocks.length);
@@ -587,6 +635,8 @@ function driver(rows, cols) {
     view.blocks.map((b) => b.commandBuffer.toText()),
     Array.from({ length: TOTAL }, (_, i) => "cmd-" + i)
   );
+
+  await testAgentBlockOrdering();
 
   console.log(failures ? "\n" + failures + " FAILURES" : "\nall checks passed");
   process.exit(failures ? 1 : 0);

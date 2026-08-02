@@ -7023,6 +7023,65 @@ impl Input {
         )
     }
 
+    /// Routes one submitted line from a shared session participant the way host
+    /// Enter would: `/agent …` and other slash or skill commands go to the AI
+    /// stack, and anything else runs in the shell on their behalf.
+    ///
+    /// [`Self::try_execute_command_on_behalf_of_shared_session_participant`]
+    /// alone writes the line straight to the PTY, so a guest's `/agent add …`
+    /// reaches the shell verbatim and comes back as `no such file or
+    /// directory: /agent`.
+    ///
+    /// Returns `true` if the line was handled.
+    pub fn submit_line_on_behalf_of_shared_session_participant(
+        &mut self,
+        line: &str,
+        participant_id: ParticipantId,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        match self
+            .slash_command_model
+            .as_ref(ctx)
+            .detect_command(line, ctx)
+        {
+            SlashCommandEntryState::SlashCommand(detected_command) => {
+                // Some commands (e.g. /plan, /compact) report "not handled" to
+                // mean the whole line should go through as a plain prompt, so
+                // fall through to the shell path rather than dropping it.
+                if self.execute_slash_command(
+                    &detected_command.command,
+                    detected_command.argument.as_ref(),
+                    SlashCommandTrigger::input(),
+                    /*is_queued_prompt*/ false,
+                    ctx,
+                ) {
+                    return true;
+                }
+            }
+            SlashCommandEntryState::SkillCommand(detected_skill) => {
+                if self.execute_skill_command(
+                    detected_skill.reference,
+                    detected_skill.argument,
+                    /*queued_query_id*/ None,
+                    /*conversation_id_override*/ None,
+                    ctx,
+                ) {
+                    return true;
+                }
+            }
+            SlashCommandEntryState::None
+            | SlashCommandEntryState::Composing { .. }
+            | SlashCommandEntryState::DisabledUntilEmptyBuffer => {}
+        }
+
+        self.try_execute_command_on_behalf_of_shared_session_participant(
+            line,
+            participant_id,
+            /*preserve_input*/ false,
+            ctx,
+        )
+    }
+
     /// Freeze the editor and put it in a loading state.
     pub fn freeze_input_in_loading_state(&mut self, ctx: &mut ViewContext<Self>) -> String {
         let buffer_text = self.editor.as_ref(ctx).buffer_text(ctx);

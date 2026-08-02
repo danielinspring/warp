@@ -379,23 +379,26 @@ impl TerminalView {
                 participant_id,
                 command,
             } => {
+                // Slash commands (`/agent …`) never touch the PTY, so a busy
+                // shell is not a reason to drop them; the AI stack does its own
+                // "cannot start a conversation while a command is running" check.
+                let is_slash_command = command.trim_start().starts_with('/');
                 let is_long_running = self
                     .model
                     .lock()
                     .block_list()
                     .active_block()
                     .is_active_and_long_running();
-                if is_long_running {
+                if is_long_running && !is_slash_command {
                     log::info!(
                         "Ignoring local-share ExecuteCommand while a long-running command is active"
                     );
                     return;
                 }
                 self.input().update(ctx, |input, ctx| {
-                    input.try_execute_command_on_behalf_of_shared_session_participant(
+                    input.submit_line_on_behalf_of_shared_session_participant(
                         &command,
                         participant_id,
-                        false,
                         ctx,
                     );
                 });
