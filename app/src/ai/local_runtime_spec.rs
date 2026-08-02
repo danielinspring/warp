@@ -453,14 +453,12 @@ fn join_or_none(values: &[String]) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalRuntimeAttachment {
     Active,
-    NotConnectedToLocalRuntime,
 }
 
 impl LocalRuntimeAttachment {
     pub fn label(&self) -> &'static str {
         match self {
             Self::Active => "active",
-            Self::NotConnectedToLocalRuntime => "not connected to local runtime",
         }
     }
 }

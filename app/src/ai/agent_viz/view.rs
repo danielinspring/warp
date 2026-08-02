@@ -18,7 +18,7 @@ use warpui::{
 use crate::ai::agent_viz::model::AgentVizModel;
 use crate::ai::agent_viz::render;
 use crate::ai::local_runtime_event_bus::{self, RunScopedEvent};
-use crate::ai::local_runtime_spec::{self, LocalRuntimeAttachment, McpServerInfo, SkillInfo};
+use crate::ai::local_runtime_spec::{self, McpServerInfo, SkillInfo};
 use crate::appearance::Appearance;
 use crate::code::editor::scroll::{ScrollPosition, ScrollTrigger};
 use crate::code::editor::view::{CodeEditorRenderOptions, CodeEditorView};
@@ -164,9 +164,6 @@ impl AgentVizView {
         .finish()
     }
 }
-
-// Suppress unused warning until LocalRuntimeAttachment::Active is wired.
-const _: LocalRuntimeAttachment = LocalRuntimeAttachment::NotConnectedToLocalRuntime;
 
 impl Entity for AgentVizView {
     type Event = AgentVizViewEvent;

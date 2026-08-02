@@ -218,13 +218,13 @@ mod tests {
 
         let mcp = vec![McpServerInfo {
             name: "github".into(),
-            status: LocalRuntimeAttachment::NotConnectedToLocalRuntime,
+            status: LocalRuntimeAttachment::Active,
         }];
         let skills = vec![SkillInfo {
             name: "review-pr".into(),
             description: "Review pull requests".into(),
             source: "Bundled".into(),
-            status: LocalRuntimeAttachment::NotConnectedToLocalRuntime,
+            status: LocalRuntimeAttachment::Active,
         }];
 
         let snap = render_snapshot(&model, &mcp, &skills, Vec::new);
