@@ -713,13 +713,13 @@
           if (style.bold) out += "font-weight:600;";
           if (style.dim) out += "opacity:.62;";
           if (style.italic) out += "font-style:italic;";
-          if (style.underline && style.strike) {
-            out += "text-decoration:underline line-through;";
-          } else if (style.underline) {
-            out += "text-decoration:underline;";
-          } else if (style.strike) {
-            out += "text-decoration:line-through;";
-          }
+          // Deliberately skip SGR underline. Claude Code (and some other TUIs)
+          // leave SGR 4 set for the whole alternate screen and never send 24/0;
+          // native terminals paint the decoration inside the cell under the
+          // glyph ink so it disappears, but CSS `text-decoration` sits below
+          // the baseline and turns every row into a ruled line. Strikethrough
+          // does not have that failure mode, so keep it.
+          if (style.strike) out += "text-decoration:line-through;";
           return out;
         }
 

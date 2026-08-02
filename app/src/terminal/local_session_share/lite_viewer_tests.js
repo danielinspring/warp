@@ -12,7 +12,7 @@ const html = fs.readFileSync(path.join(__dirname, "lite_viewer.html"), "utf8");
 let script = /<script>([\s\S]*)<\/script>/.exec(html)[1];
 script = script.replace(
   "boot();",
-  "globalThis.__exports = { Screen: Screen, Terminal: Terminal, renderLineHtml: renderLineHtml, session: session, terminal: terminal, render: render };"
+  "globalThis.__exports = { Screen: Screen, Terminal: Terminal, renderLineHtml: renderLineHtml, session: session, terminal: terminal, render: render, styleCss: styleCss };"
 );
 
 function makeEl(tag) {
@@ -284,6 +284,26 @@ function driver(rows, cols) {
   terminal.write("\u001b[?1049l");
   check("?1049l leaves the alternate screen", session.altScreen, false);
   check("body returns to the block view", document.body.className, "");
+}
+
+// Claude Code leaves SGR 4 stuck across the whole UI; CSS underlines would
+// rule every row, so the viewer must not emit text-decoration:underline.
+{
+  const { write } = driver(2, 20);
+  write("\u001b[4munderlined");
+  const hasUnderlineCss = sandbox.__exports.styleCss.some(
+    (css) => css.indexOf("underline") !== -1
+  );
+  check(
+    "SGR underline does not emit CSS text-decoration",
+    hasUnderlineCss,
+    false
+  );
+  write("\u001b[0m\u001b[9mstruck");
+  const hasStrike = sandbox.__exports.styleCss.some(
+    (css) => css.indexOf("line-through") !== -1
+  );
+  check("SGR strikethrough still emits CSS", hasStrike, true);
 }
 
 console.log(failures ? "\n" + failures + " FAILURES" : "\nall checks passed");

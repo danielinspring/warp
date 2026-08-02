@@ -491,7 +491,7 @@
         "cargo clippy -p local_agent_runtime --all-targets --tests -- -D warnings",
         "./script/format --check"
       ],
-      "evidence": "2026-07-31: ProviderError::Unauthorized (non-retryable) for 401/403; empty API keys filtered; discovery prefers /v1/models for keyed hosts, /v1 URLs, and non-:11434 hosts; Settings branded Ollama / OpenAI-compatible with LM Studio/Groq examples; editors persist on Edited; model picker uses Ollama vs OpenAI-compatible label; legacy client accepts string/object tool args. Also fixed local_agent_runtime clippy Instant→instant::Instant. cargo test -p local_agent_runtime: 24 unit + 23 integration passed (1 ignored live). cargo test -p warp ollama: 5 passed. clippy -D warnings passed. format --check passed."
+      "evidence": "2026-07-31: ProviderError::Unauthorized (non-retryable) for 401/403; empty API keys filtered; discovery prefers /v1/models for keyed hosts, /v1 URLs, and non-:11434 hosts; Settings branded Ollama / OpenAI-compatible with LM Studio/Groq examples; editors persist on Edited; model picker uses Ollama vs OpenAI-compatible label; legacy client accepts string/object tool args. Also fixed local_agent_runtime clippy Instant\u2192instant::Instant. cargo test -p local_agent_runtime: 24 unit + 23 integration passed (1 ignored live). cargo test -p warp ollama: 5 passed. clippy -D warnings passed. format --check passed."
     },
     {
       "id": "feat-022",
@@ -607,7 +607,7 @@
         "cargo test -p warp local_session_share --lib",
         "./script/format --check"
       ],
-      "evidence": "2026-07-31: Local WS speaks viewer Initialize→JoinedSuccessfully (empty scrollback, Role::Reader); publish_pty_bytes LZ4+OrderedTerminalEvent broadcast; WriteToPty/Execute/Agent/Control → InsufficientPermissions. cargo test local_session_share: 22 passed. format --check passed."
+      "evidence": "2026-07-31: Local WS speaks viewer Initialize\u2192JoinedSuccessfully (empty scrollback, Role::Reader); publish_pty_bytes LZ4+OrderedTerminalEvent broadcast; WriteToPty/Execute/Agent/Control \u2192 InsufficientPermissions. cargo test local_session_share: 22 passed. format --check passed."
     },
     {
       "id": "feat-027",
@@ -660,7 +660,7 @@
     {
       "id": "feat-029",
       "name": "Local LAN share pane banner + overflow + rotate",
-      "description": "Show an inline sharing-active banner on the host pane; expose Copy/Stop/Rotate in the pane header overflow menu; Command Palette rotate for secret rotation (PRODUCT.md P4, P9–P12).",
+      "description": "Show an inline sharing-active banner on the host pane; expose Copy/Stop/Rotate in the pane header overflow menu; Command Palette rotate for secret rotation (PRODUCT.md P4, P9\u2013P12).",
       "phase": "Phase D",
       "dependencies": [
         "feat-028"
@@ -726,7 +726,7 @@
     {
       "id": "feat-032",
       "name": "Local LAN share bind address picker",
-      "description": "Let the host choose a non-loopback LAN/Tailscale bind address (or all-interfaces with warning) when starting a local share (PRODUCT.md P6–P8, P28).",
+      "description": "Let the host choose a non-loopback LAN/Tailscale bind address (or all-interfaces with warning) when starting a local share (PRODUCT.md P6\u2013P8, P28).",
       "phase": "Phase D",
       "dependencies": [
         "feat-028"
@@ -864,7 +864,7 @@
         "./script/format --check",
         "cargo clippy -p warp --lib --all-features --tests"
       ],
-      "evidence": "2026-08-02: Root cause of missing history on the guest: tokio broadcast only delivers to existing receivers and the WS handler subscribed at upgrade, while the scrollback snapshot is frozen at share start — so anything the host ran between starting the share and a guest opening the link was dropped. Added ReplayLog (VecDeque + byte cap, 8 MiB) to ShareState, atomic ShareState::join (backlog snapshot + subscribe under the publish lock), and a two-phase WS handler that replays the backlog after JoinedSuccessfully. New tests: events_published_before_join_are_replayed_to_a_late_guest, replay_log_drops_oldest_frames_past_the_cap. cargo test -p warp local_session_share --lib: 33 passed. ./script/format --check: passed. clippy: no new warnings. WarpOss debug bundle rebuilt and relaunched."
+      "evidence": "2026-08-02: Root cause of missing history on the guest: tokio broadcast only delivers to existing receivers and the WS handler subscribed at upgrade, while the scrollback snapshot is frozen at share start \u2014 so anything the host ran between starting the share and a guest opening the link was dropped. Added ReplayLog (VecDeque + byte cap, 8 MiB) to ShareState, atomic ShareState::join (backlog snapshot + subscribe under the publish lock), and a two-phase WS handler that replays the backlog after JoinedSuccessfully. New tests: events_published_before_join_are_replayed_to_a_late_guest, replay_log_drops_oldest_frames_past_the_cap. cargo test -p warp local_session_share --lib: 33 passed. ./script/format --check: passed. clippy: no new warnings. WarpOss debug bundle rebuilt and relaunched."
     },
     {
       "id": "feat-038",
@@ -910,19 +910,39 @@
         "cargo test -p warp local_session_share --lib",
         "./script/format --check"
       ],
-      "evidence": "2026-08-02: Guests running `claude` on the host saw only 'Full-screen application running on the host — output is not mirrored'. Alt-screen output addresses cells absolutely and cannot be expressed in the block model, so added a Screen grid emulator to lite_viewer.html (scroll region, IL/DL/ICH/DCH/ECH, ED/EL with bg-aware erase style, deferred wrap, ESC D/E/M/7/8, DECTCEM cursor) plus a #screen overlay that takes over the view while alt screen is active and auto-fits the font to the host geometry. Verified by app/src/terminal/local_session_share/lite_viewer_tests.js, a stub-DOM node harness driving synthetic VT sequences: 20 checks passed (CUP placement, ED2, scroll region isolation, deferred wrap, IL/DL, ESC M, bg erase, cursor cell, resize, and the ?1049h/?1049l round trip). cargo test -p warp local_session_share --lib: 34 passed. format --check passed. WarpOss rebuilt."
+      "evidence": "2026-08-02: Guests running `claude` on the host saw only 'Full-screen application running on the host \u2014 output is not mirrored'. Alt-screen output addresses cells absolutely and cannot be expressed in the block model, so added a Screen grid emulator to lite_viewer.html (scroll region, IL/DL/ICH/DCH/ECH, ED/EL with bg-aware erase style, deferred wrap, ESC D/E/M/7/8, DECTCEM cursor) plus a #screen overlay that takes over the view while alt screen is active and auto-fits the font to the host geometry. Verified by app/src/terminal/local_session_share/lite_viewer_tests.js, a stub-DOM node harness driving synthetic VT sequences: 20 checks passed (CUP placement, ED2, scroll region isolation, deferred wrap, IL/DL, ESC M, bg erase, cursor cell, resize, and the ?1049h/?1049l round trip). cargo test -p warp local_session_share --lib: 34 passed. format --check passed. WarpOss rebuilt."
+    },
+    {
+      "id": "feat-040",
+      "name": "Local share viewer: suppress stuck SGR underlines",
+      "description": "Stop the lite viewer from painting CSS text-decoration underlines for SGR 4, so Claude Code's stuck global underline does not rule every row the way native terminals hide cell decorations under glyph ink.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-039"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "SGR underline does not emit CSS text-decoration:underline in the lite viewer style table.",
+        "SGR strikethrough still emits line-through.",
+        "Focused viewer harness and format check pass."
+      ],
+      "verification": [
+        "node app/src/terminal/local_session_share/lite_viewer_tests.js",
+        "./script/format --check"
+      ],
+      "evidence": "2026-08-02: Claude Code leaves SGR 4 set for the whole alt-screen UI (github.com/anthropics/claude-code/issues/46719). Warp paints underlines inside the cell under glyph ink so they disappear; CSS text-decoration sat below the baseline and underlined every row. decorations() no longer emits underline (strike kept). lite_viewer_tests.js: 22 checks passed including the new underline/strike assertions."
     }
   ],
   "future_phases": [
     {
       "phase": "Phase B",
       "scope": [],
-      "note": "Phase B complete (feat-013–018)."
+      "note": "Phase B complete (feat-013\u2013018)."
     },
     {
       "phase": "Phase C",
       "scope": [],
-      "note": "Phase C complete (feat-009–012, feat-019–024)."
+      "note": "Phase C complete (feat-009\u2013012, feat-019\u2013024)."
     },
     {
       "phase": "Phase D",

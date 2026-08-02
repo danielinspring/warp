@@ -3,7 +3,7 @@
 ## Current State
 
 **Last Updated:** 2026-08-02  
-**Active Feature:** (none — feat-039 complete)  
+**Active Feature:** (none — feat-040 complete)  
 **Status:** Idle  
 
 ## What's Done
@@ -43,13 +43,17 @@
   - `?1049h` / `?1047h` / `?47h` swaps the whole view to the grid (blocks, footer and jump button hide) and back out on exit, leaving a note on the owning block that its output was not captured.
   - Grid geometry follows the host's `JoinedSuccessfully` / `Resize` window size, and the font auto-scales from a measured monospace ratio so the host's grid fits the guest viewport.
 
-## Verification (feat-036–039)
+- feat-040: Stuck SGR underlines from full-screen apps no longer rule every guest row.
+  - Claude Code leaves SGR 4 set for the whole UI; Warp hides it inside the cell under glyph ink, but CSS `text-decoration` sat below the baseline.
+  - The lite viewer keeps tracking underline for style identity but no longer emits underline CSS (strikethrough unchanged).
 
-- `node app/src/terminal/local_session_share/lite_viewer_tests.js` (stub-DOM harness driving the viewer script with synthetic VT sequences): 20 checks passed — CUP placement, `ED 2`, scroll-region isolation, deferred wrap, IL/DL, `ESC M`, background-aware erase, cursor cell, resize, and the `?1049h`/`?1049l` round trip.  
+## Verification (feat-036–040)
+
+- `node app/src/terminal/local_session_share/lite_viewer_tests.js`: 22 checks passed (alt-screen grid + underline suppression)  
 - `cargo test -p warp local_session_share --lib`: 34 passed (typed-input live + late-join)  
 - `./script/format --check`: passed  
 - `cargo bundle --profile dev --bin warp-oss --target aarch64-apple-darwin` from `app/`: bundled `WarpOss.app`; relaunched.
 
 ## Next
 
-Dogfood: Start Local Share → open the link → run `claude` (or `top`) on the host → confirm the guest switches to the full-screen grid, repaints as the app redraws, and returns to blocks on exit.
+Dogfood: Start Local Share → open the link → run `claude` on the host → confirm the guest grid has no hairline under every row.

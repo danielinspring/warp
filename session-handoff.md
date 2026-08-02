@@ -27,7 +27,8 @@ Local LAN share guest opens a real viewer — Warp-style blocks by default (buil
 - Guests that open the link after the share started now get the history they missed: the hub keeps an 8 MiB replay log of published frames and sends it after `JoinedSuccessfully`, before the live stream. Pre-share history still comes from the start-time scrollback snapshot, whose size is now logged.
 - Host typing is mirrored live as `LocalShareTypedInput` plain-text snapshots into the guest footer (Warp's editor does not echo through PTY), rendered inside the last prompt row so it continues on the prompt's line.
 - Full-screen apps (`claude`, `vim`, `top`) are mirrored: the guest switches to a real alternate-screen grid sized to the host's cols x rows, and returns to blocks when the app exits.
+- Stuck SGR 4 underlines from Claude Code are not painted as CSS text-decoration (native terminals hide them under glyph ink; CSS was ruling every row).
 
 ## Recommended Next Step
 
-In WarpOss: Start **Local Share**, open the link, run `claude` (or `top`) on the host, and confirm the guest switches to the full-screen grid and repaints as the app redraws.
+In WarpOss: Start **Local Share**, open the link, run `claude`, and confirm the guest grid has no underline hairline under every row.
