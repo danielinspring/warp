@@ -2430,12 +2430,12 @@
           var running = session.state === "running";
           ghintEl.textContent = running
             ? "Enter to send · ⌃C to stop"
-            : "Enter to run · /agent to ask";
+            : "Enter to run · /agent new · follow-up while agent is open";
           ginputEl.setAttribute(
             "data-placeholder",
             running
               ? "send input to the running command…"
-              : "run a command, or /agent <prompt>…"
+              : "command, /agent <prompt>, or follow-up while agent is open…"
           );
         }
 
@@ -2869,8 +2869,9 @@
         }
 
         function submitGuestCommand() {
-          var command = guestDraft();
+          var command = guestDraft().trim();
           ginputEl.textContent = "";
+          if (!command) return;
           if (session.state === "running") {
             // A command already owns the PTY, so the line is stdin for it
             // rather than a new command to run.

@@ -1053,6 +1053,29 @@
         "./script/format --check"
       ],
       "evidence": "2026-08-03: Guest '/agent add dan_docs to gitignore' reached the PTY verbatim (zsh: no such file or directory: /agent) because ExecuteCommand went straight to try_execute_command_on_behalf_of_shared_session_participant. Added Input::submit_line_on_behalf_of_shared_session_participant, which runs slash_command_model.detect_command first and dispatches execute_slash_command / execute_skill_command before falling back to the shell path; TerminalView::apply_local_share_guest_request calls it and skips the long-running guard for slash lines. Ordering: ReplayLog now stamps frames and agent snapshots with a shared monotonic seq and ReplayLog::replay() merges them, so JoinSnapshot.backlog is a single ordered stream (server.rs no longer sends agent turns last); the lite viewer mounts agent blocks through view.blocks via mountBlockEl and defers downstream messages while the first scrollback ingest is animation-frame slicing. cargo test -p warp --lib local_session_share: 39 passed (new late_join_replays_agent_exchanges_in_publish_order). lite_viewer_tests.js: 61 checks passed (new agent-block-ordering checks). ./script/format passed; cargo clippy -p warp --lib --all-features --tests reports no new warnings in the changed files. WarpOss rebuilt."
+    },
+    {
+      "id": "feat-046",
+      "name": "Guest Agent View follow-ups without /agent",
+      "description": "While the host Agent View is open, local-share guest plain-text lines continue the current conversation instead of hitting the shell. /agent still always starts a new conversation.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-045"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "/agent <prompt> from a guest still starts a new Agent Mode conversation.",
+        "When Agent View is active on the host, a guest line without a leading slash is submitted as a follow-up via submit_user_query_now.",
+        "When Agent View is not active, non-slash guest lines still run in the shell.",
+        "Long-running PTY commands do not drop Agent View follow-ups.",
+        "Focused typecheck and lite_viewer harness pass."
+      ],
+      "verification": [
+        "cargo check -p warp --lib",
+        "node app/src/terminal/local_session_share/lite_viewer_tests.js",
+        "./script/format"
+      ],
+      "evidence": "2026-08-04: After feat-045, guest '/agent …' worked but follow-ups like 'what is this about?' still hit the shell (zsh: no matches found: about?). Extended Input::submit_line_on_behalf_of_shared_session_participant so that when AgentMode+AgentView are on and agent_view_controller.is_active(), a non-empty plain line calls submit_user_query_now (selected conversation, else new). TerminalView::apply_local_share_guest_request also skips the long-running guard when Agent View is active. Lite viewer placeholder/hint updated. /agent slash path unchanged (always new). cargo check -p warp --lib ok; lite_viewer_tests.js all checks passed; ./script/format clean."
     }
   ],
   "future_phases": [
@@ -1069,7 +1092,7 @@
     {
       "phase": "Phase D",
       "scope": [],
-      "note": "Phase D complete through feat-045 (guest-initiated /agent and agent block ordering)."
+      "note": "Phase D complete through feat-046 (guest Agent View follow-ups)."
     }
   ]
 }

@@ -7025,12 +7025,18 @@ impl Input {
 
     /// Routes one submitted line from a shared session participant the way host
     /// Enter would: `/agent …` and other slash or skill commands go to the AI
-    /// stack, and anything else runs in the shell on their behalf.
+    /// stack; while Agent View is already open, a plain line is a follow-up in
+    /// the current conversation; otherwise the line runs in the shell.
     ///
     /// [`Self::try_execute_command_on_behalf_of_shared_session_participant`]
     /// alone writes the line straight to the PTY, so a guest's `/agent add …`
     /// reaches the shell verbatim and comes back as `no such file or
-    /// directory: /agent`.
+    /// directory: /agent`. Without the Agent View branch, a guest follow-up
+    /// like `what is this about?` also hits the shell (zsh glob / command not
+    /// found) instead of the waiting conversation.
+    ///
+    /// `/agent` itself still always starts a new conversation — that matches
+    /// the host slash-command definition.
     ///
     /// Returns `true` if the line was handled.
     pub fn submit_line_on_behalf_of_shared_session_participant(
@@ -7047,7 +7053,7 @@ impl Input {
             SlashCommandEntryState::SlashCommand(detected_command) => {
                 // Some commands (e.g. /plan, /compact) report "not handled" to
                 // mean the whole line should go through as a plain prompt, so
-                // fall through to the shell path rather than dropping it.
+                // fall through rather than dropping it.
                 if self.execute_slash_command(
                     &detected_command.command,
                     detected_command.argument.as_ref(),
@@ -7072,6 +7078,20 @@ impl Input {
             SlashCommandEntryState::None
             | SlashCommandEntryState::Composing { .. }
             | SlashCommandEntryState::DisabledUntilEmptyBuffer => {}
+        }
+
+        // Host already in Agent View: plain text is a follow-up, same as typing
+        // into the agent input and pressing Enter. Keeps `/agent` as "new
+        // conversation" while letting guests continue the open one.
+        if FeatureFlag::AgentMode.is_enabled()
+            && FeatureFlag::AgentView.is_enabled()
+            && self.agent_view_controller.as_ref(ctx).is_active()
+        {
+            let prompt = line.trim();
+            if !prompt.is_empty() {
+                self.submit_user_query_now(prompt.to_owned(), ctx);
+                return true;
+            }
         }
 
         self.try_execute_command_on_behalf_of_shared_session_participant(
