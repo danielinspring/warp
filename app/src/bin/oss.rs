@@ -23,10 +23,12 @@ fn main() -> Result<()> {
     );
     if cfg!(debug_assertions) {
         state = state.with_additional_features(warp_core::features::DEBUG_FLAGS);
-        // Dogfood local LAN session share on debug OSS builds (footer Local Share chip).
-        state = state
-            .with_additional_features(&[warp_core::features::FeatureFlag::LocalLanSessionShare]);
     }
+    // Local LAN session share only exists in OSS builds, so it ships enabled on
+    // all of them. Gating it on `debug_assertions` hid it from every bundled
+    // (release-lto) app, which is the only way most people run this.
+    state =
+        state.with_additional_features(&[warp_core::features::FeatureFlag::LocalLanSessionShare]);
     #[cfg(feature = "local_ollama_runtime_tool_use")]
     {
         state = state.with_additional_features(&[
