@@ -24,8 +24,8 @@ pub use host::{
     LOCAL_SHARE_START_FAILED_TOAST,
 };
 pub use hub::{
-    HubError, LocalSessionShareHub, LocalShareAgentExchange, LocalShareEventPublisher, ShareHandle,
-    LOCAL_SHARE_MAX_SCROLLBACK_BYTES, WASM_BUNDLE_DIR_ENV,
+    HubError, LocalSessionShareHub, LocalShareAgentExchange, LocalShareAgentPendingAction,
+    LocalShareEventPublisher, ShareHandle, LOCAL_SHARE_MAX_SCROLLBACK_BYTES, WASM_BUNDLE_DIR_ENV,
 };
-pub use protocol::LocalShareGuestRequest;
+pub use protocol::{LocalShareAgentDecision, LocalShareGuestRequest};
 pub use secret::ShareSecret;

@@ -12,7 +12,9 @@ use session_sharing_protocol::viewer::{DownstreamMessage, UpstreamMessage};
 use tower_http::services::ServeDir;
 
 use super::hub::{typed_input_message_json, ShareState};
-use super::protocol::{handle_upstream, joined_successfully, UpstreamDisposition};
+use super::protocol::{
+    handle_upstream, joined_successfully, parse_local_share_upstream, UpstreamDisposition,
+};
 
 /// Guest page served when no Warp WASM bundle is staged. Speaks the real
 /// session-sharing-protocol WS dialect and rebuilds Warp's block UI in the
@@ -164,6 +166,15 @@ async fn handle_socket(socket: WebSocket, state: Arc<ShareState>) {
             inbound = stream.next() => {
                 match inbound {
                     Some(Ok(Message::Text(text))) => {
+                        // Local-share-only envelopes are not part of the cloud
+                        // protocol, so they have to be claimed before the
+                        // `UpstreamMessage` parse rejects them as garbage.
+                        if let Some(request) = parse_local_share_upstream(text.as_ref(), &viewer_id) {
+                            if let Err(err) = state.enqueue_guest_request(request) {
+                                log::warn!("Failed to enqueue local-share guest request: {err}");
+                            }
+                            continue;
+                        }
                         let Ok(message) = UpstreamMessage::from_json(text.as_ref()) else {
                             continue;
                         };

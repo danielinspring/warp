@@ -20,6 +20,53 @@ pub enum LocalShareGuestRequest {
         participant_id: ParticipantId,
         bytes: Vec<u8>,
     },
+    /// The guest answered the mirrored "OK if I run this?" agent card.
+    AgentActionDecision {
+        participant_id: ParticipantId,
+        action_id: String,
+        decision: LocalShareAgentDecision,
+        /// Present when the guest edited a requested command before running it.
+        command: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalShareAgentDecision {
+    Run,
+    Reject,
+}
+
+/// Parses the lite viewer's own upstream envelopes.
+///
+/// Agent approval has no equivalent in the cloud session-sharing protocol, so
+/// rather than widen that shared `UpstreamMessage` enum, the guest sends a
+/// local-share-only envelope over the same socket — the mirror direction
+/// already does this with `LocalShareAgentExchange` and `LocalShareTypedInput`.
+pub(crate) fn parse_local_share_upstream(
+    text: &str,
+    viewer_id: &ParticipantId,
+) -> Option<LocalShareGuestRequest> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    let decision = value.get("LocalShareAgentDecision")?;
+    let action_id = decision.get("action_id")?.as_str()?.to_owned();
+    let decision_kind = match decision.get("decision")?.as_str()? {
+        "run" => LocalShareAgentDecision::Run,
+        "reject" => LocalShareAgentDecision::Reject,
+        other => {
+            log::warn!("Ignoring unknown local-share agent decision: {other}");
+            return None;
+        }
+    };
+    let command = decision
+        .get("command")
+        .and_then(|command| command.as_str())
+        .map(str::to_owned);
+    Some(LocalShareGuestRequest::AgentActionDecision {
+        participant_id: viewer_id.clone(),
+        action_id,
+        decision: decision_kind,
+        command,
+    })
 }
 
 /// Builds an interactive [`DownstreamMessage::JoinedSuccessfully`] for a newly
@@ -271,6 +318,57 @@ mod tests {
             } => assert_eq!(bytes, b"x"),
             _ => panic!("unexpected disposition for WriteToPty"),
         }
+    }
+
+    #[test]
+    fn agent_decision_envelope_is_parsed() {
+        let viewer_id = ParticipantId::new();
+        let request = parse_local_share_upstream(
+            r#"{"LocalShareAgentDecision":{"action_id":"act-1","decision":"run","command":"ls -la"}}"#,
+            &viewer_id,
+        )
+        .expect("expected an agent decision");
+        let LocalShareGuestRequest::AgentActionDecision {
+            action_id,
+            decision,
+            command,
+            ..
+        } = request
+        else {
+            panic!("expected AgentActionDecision");
+        };
+        assert_eq!(action_id, "act-1");
+        assert_eq!(decision, LocalShareAgentDecision::Run);
+        assert_eq!(command.as_deref(), Some("ls -la"));
+    }
+
+    #[test]
+    fn agent_reject_needs_no_command() {
+        let request = parse_local_share_upstream(
+            r#"{"LocalShareAgentDecision":{"action_id":"act-2","decision":"reject"}}"#,
+            &ParticipantId::new(),
+        )
+        .expect("expected an agent decision");
+        let LocalShareGuestRequest::AgentActionDecision {
+            decision, command, ..
+        } = request
+        else {
+            panic!("expected AgentActionDecision");
+        };
+        assert_eq!(decision, LocalShareAgentDecision::Reject);
+        assert!(command.is_none());
+    }
+
+    #[test]
+    fn non_local_share_json_is_not_an_agent_decision() {
+        let viewer_id = ParticipantId::new();
+        assert!(parse_local_share_upstream(r#"{"Ping":{}}"#, &viewer_id).is_none());
+        assert!(parse_local_share_upstream("not json", &viewer_id).is_none());
+        assert!(parse_local_share_upstream(
+            r#"{"LocalShareAgentDecision":{"action_id":"a","decision":"maybe"}}"#,
+            &viewer_id
+        )
+        .is_none());
     }
 
     #[test]

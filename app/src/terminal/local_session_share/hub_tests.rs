@@ -7,6 +7,7 @@ use session_sharing_protocol::common::{
 use session_sharing_protocol::viewer::{DownstreamMessage, InitPayload, UpstreamMessage};
 use tokio_tungstenite::tungstenite::Message;
 
+use super::super::protocol::LocalShareAgentDecision;
 use super::*;
 
 fn loopback_ip() -> IpAddr {
@@ -706,6 +707,75 @@ fn write_to_pty_from_guest_is_enqueued_for_host() {
 }
 
 #[test]
+fn agent_approval_card_is_mirrored_and_answered_by_guest() {
+    let mut hub = LocalSessionShareHub::new();
+    let handle = hub.start(loopback_ip(), 0).expect("start should succeed");
+    let publisher = hub.event_publisher().expect("publisher");
+    let guest_rx = hub
+        .take_guest_request_receiver()
+        .expect("guest request receiver");
+
+    publisher
+        .publish_agent_exchange(LocalShareAgentExchange {
+            id: "exchange-1".to_string(),
+            query: "/agent find out what's this repo".to_string(),
+            output: "Let me check the repository.".to_string(),
+            running: true,
+            pending_action: Some(LocalShareAgentPendingAction {
+                action_id: "action-1".to_string(),
+                kind: "command".to_string(),
+                title: "OK if I run this command and read the output?".to_string(),
+                detail: "cat README.md".to_string(),
+            }),
+        })
+        .expect("publish should succeed");
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let (mut socket, _) = join_as_viewer(guest_ws_url(&handle)).await;
+
+        let mirrored = next_agent_exchange(&mut socket).await;
+        let pending = &mirrored["pending_action"];
+        assert_eq!(pending["action_id"], "action-1");
+        assert_eq!(pending["kind"], "command");
+        assert_eq!(pending["detail"], "cat README.md");
+
+        socket
+            .send(Message::Text(
+                r#"{"LocalShareAgentDecision":{"action_id":"action-1","decision":"run","command":"cat README.md"}}"#
+                    .into(),
+            ))
+            .await
+            .expect("decision should send");
+
+        // The decision envelope has no ack; give the WS handler a moment.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    });
+
+    let request = guest_rx
+        .try_recv()
+        .expect("host should receive the guest decision");
+    match request {
+        LocalShareGuestRequest::AgentActionDecision {
+            action_id,
+            decision,
+            command,
+            ..
+        } => {
+            assert_eq!(action_id, "action-1");
+            assert_eq!(decision, LocalShareAgentDecision::Run);
+            assert_eq!(command.as_deref(), Some("cat README.md"));
+        }
+        other => panic!("unexpected guest request: {other:?}"),
+    }
+
+    hub.stop();
+}
+
+#[test]
 fn agent_exchange_is_mirrored_live_and_on_late_join() {
     let mut hub = LocalSessionShareHub::new();
     let handle = hub.start(loopback_ip(), 0).expect("start should succeed");
@@ -719,6 +789,7 @@ fn agent_exchange_is_mirrored_live_and_on_late_join() {
             query: "/agent what is this repo about?".to_string(),
             output: "It is a terminal.".to_string(),
             running: true,
+            pending_action: None,
         })
         .expect("publish should succeed");
 
@@ -741,6 +812,7 @@ fn agent_exchange_is_mirrored_live_and_on_late_join() {
                 query: "/agent what is this repo about?".to_string(),
                 output: "It is a terminal. Written in Rust.".to_string(),
                 running: false,
+                pending_action: None,
             })
             .expect("publish should succeed");
 
@@ -771,6 +843,7 @@ fn late_join_replays_agent_exchanges_in_publish_order() {
             query: "/agent what is this repo about?".to_string(),
             output: "It is a terminal.".to_string(),
             running: false,
+            pending_action: None,
         })
         .expect("publish should succeed");
     publisher
@@ -783,6 +856,7 @@ fn late_join_replays_agent_exchanges_in_publish_order() {
             query: "/agent what is this repo about?".to_string(),
             output: "It is a terminal. Written in Rust.".to_string(),
             running: false,
+            pending_action: None,
         })
         .expect("publish should succeed");
 

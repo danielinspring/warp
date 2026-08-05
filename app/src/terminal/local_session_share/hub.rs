@@ -367,17 +367,43 @@ pub struct LocalShareAgentExchange {
     pub output: String,
     /// True while the answer is still streaming.
     pub running: bool,
+    /// Set while this turn is paused on the host's "OK if I run this?" card.
+    pub pending_action: Option<LocalShareAgentPendingAction>,
+}
+
+/// The agent tool call a turn is paused on, mirrored so a guest can approve or
+/// reject it instead of waiting for someone to be at the host machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalShareAgentPendingAction {
+    /// Host-side `AIAgentActionId`, echoed back with the guest's decision.
+    pub action_id: String,
+    /// `command`, `mcp_tool`, `file_edits` or `action`; picks the guest's icon
+    /// and decides whether the detail is editable before running.
+    pub kind: String,
+    /// The question the host card asks, e.g. "OK if I run this command…".
+    pub title: String,
+    /// The command line, tool call or edit summary the card is asking about.
+    pub detail: String,
 }
 
 pub(crate) fn agent_exchange_message_json(
     exchange: &LocalShareAgentExchange,
 ) -> Result<String, HubError> {
+    let pending_action = exchange.pending_action.as_ref().map(|pending| {
+        serde_json::json!({
+            "action_id": pending.action_id,
+            "kind": pending.kind,
+            "title": pending.title,
+            "detail": pending.detail,
+        })
+    });
     serde_json::to_string(&serde_json::json!({
         "LocalShareAgentExchange": {
             "id": exchange.id,
             "query": exchange.query,
             "output": exchange.output,
             "running": exchange.running,
+            "pending_action": pending_action,
         }
     }))
     .map_err(HubError::Serialize)
