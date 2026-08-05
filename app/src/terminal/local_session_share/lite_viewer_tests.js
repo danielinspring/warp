@@ -483,6 +483,97 @@ function driver(rows, cols) {
   session.state = "idle";
 }
 
+// The agent's "OK if I run this command?" card. Without a mirror of it the turn
+// just stops mid-sentence for a guest, with nothing to click.
+{
+  const sent = [];
+  transport.ws = {
+    readyState: 1, // OPEN
+    send(payload) {
+      sent.push(JSON.parse(payload));
+    },
+  };
+
+  upsertAgentExchange({
+    id: "ex-approve",
+    query: "/agent find out what's this repo",
+    output: "Let me check the repository.",
+    running: true,
+    pending_action: {
+      action_id: "action-1",
+      kind: "command",
+      title: "OK if I run this command and read the output?",
+      detail: "cat README.md",
+    },
+  });
+
+  const block = sandbox.document.getElementById("blocks").lastChild;
+  const card = block.childNodes[3];
+  const title = card.childNodes[0];
+  const detail = card.childNodes[1];
+  const row = card.childNodes[2];
+  const reject = row.childNodes[1];
+  const run = row.childNodes[2];
+
+  check("approval card is shown while blocked", card.className, "approval");
+  check(
+    "approval title mirrors the host card",
+    title._text,
+    "OK if I run this command and read the output?"
+  );
+  check("approval detail shows the command", detail._text, "cat README.md");
+  check("a requested command stays editable", detail.contentEditable, "true");
+  check(
+    "a blocked turn says so instead of 'responding…'",
+    block.childNodes[0]._text,
+    "waiting for approval"
+  );
+
+  detail.textContent = "cat README.md | head";
+  run.dispatch("click");
+  check("Run sends the guest's edited command", sent[0], {
+    LocalShareAgentDecision: {
+      action_id: "action-1",
+      decision: "run",
+      command: "cat README.md | head",
+    },
+  });
+  check("answering disables the card", [reject.disabled, run.disabled], [true, true]);
+
+  sent.length = 0;
+  run.dispatch("click");
+  check("a second click cannot run the command twice", sent.length, 0);
+
+  upsertAgentExchange({
+    id: "ex-approve",
+    query: "/agent find out what's this repo",
+    output: "Let me check the repository.\n\nWarp is a terminal.",
+    running: true,
+  });
+  check("card hides once the host moves on", card.className, "approval hidden");
+
+  upsertAgentExchange({
+    id: "ex-approve",
+    query: "/agent find out what's this repo",
+    output: "Let me check the repository.",
+    running: true,
+    pending_action: {
+      action_id: "action-2",
+      kind: "mcp_tool",
+      title: "OK if I call this MCP tool?",
+      detail: "search",
+    },
+  });
+  check("a new action re-enables the card", [reject.disabled, run.disabled], [false, false]);
+  check("an MCP call is not editable", detail.contentEditable, "false");
+
+  sent.length = 0;
+  reject.dispatch("click");
+  check("Reject sends no command to run", sent[0], {
+    LocalShareAgentDecision: { action_id: "action-2", decision: "reject" },
+  });
+}
+
 function utf8Bytes(text) {
   return Array.from(Buffer.from(text, "utf8"));
 }

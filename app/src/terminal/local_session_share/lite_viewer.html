@@ -374,6 +374,74 @@
         border-top: 1px solid var(--line);
         margin: 0.8em 0;
       }
+
+      /* Mirror of the host's "OK if I run this command?" card. Without it the
+         turn just stops mid-sentence for a guest, with no way to unblock it. */
+      .approval {
+        margin-top: 10px;
+        border: 1px solid var(--accent);
+        border-radius: 7px;
+        background: var(--chip);
+        padding: 9px 11px;
+      }
+      .approval.hidden {
+        display: none;
+      }
+      .atitle {
+        font-size: 12.5px;
+        font-weight: 600;
+        color: var(--fg);
+      }
+      .adetail {
+        margin-top: 7px;
+        padding: 6px 8px;
+        border: 1px solid var(--line);
+        border-radius: 5px;
+        background: var(--bg);
+        font-family: var(--mono);
+        font-size: 12.5px;
+        white-space: pre-wrap;
+        word-break: break-word;
+        outline: none;
+      }
+      .adetail[contenteditable="true"]:focus {
+        border-color: var(--accent);
+      }
+      .arow {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 9px;
+      }
+      .ahint {
+        flex: 1 1 auto;
+        color: var(--faint);
+        font-size: 11.5px;
+      }
+      .abtn {
+        flex: 0 0 auto;
+        padding: 4px 12px;
+        border: 1px solid var(--line);
+        border-radius: 5px;
+        background: transparent;
+        color: var(--fg);
+        font: inherit;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      .abtn:hover:enabled {
+        border-color: var(--accent);
+      }
+      .abtn.run {
+        border-color: var(--accent);
+        background: var(--accent);
+        color: var(--bg);
+        font-weight: 600;
+      }
+      .abtn:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
       .divider {
         padding: 6px 16px;
         color: var(--faint);
@@ -2281,6 +2349,106 @@
           return html.join("");
         }
 
+        // Builds the Reject / Run card once per agent block. The host only
+        // tells us *which* action is pending, so the card is reused and simply
+        // hidden between tool calls rather than rebuilt for each one.
+        function createApprovalCard(entry) {
+          var card = document.createElement("div");
+          card.className = "approval hidden";
+          var title = document.createElement("div");
+          title.className = "atitle";
+          var detail = document.createElement("div");
+          detail.className = "adetail";
+          detail.spellcheck = false;
+          var row = document.createElement("div");
+          row.className = "arow";
+          var hint = document.createElement("span");
+          hint.className = "ahint";
+          var reject = document.createElement("button");
+          reject.className = "abtn";
+          reject.type = "button";
+          reject.textContent = "Reject";
+          var run = document.createElement("button");
+          run.className = "abtn run";
+          run.type = "button";
+          run.textContent = "Run";
+          row.appendChild(hint);
+          row.appendChild(reject);
+          row.appendChild(run);
+          card.appendChild(title);
+          card.appendChild(detail);
+          card.appendChild(row);
+
+          reject.addEventListener("click", function () {
+            answerApproval(entry, "reject");
+          });
+          run.addEventListener("click", function () {
+            answerApproval(entry, "run");
+          });
+          detail.addEventListener("keydown", function (event) {
+            if (event.key !== "Enter" || event.shiftKey) return;
+            event.preventDefault();
+            answerApproval(entry, "run");
+          });
+
+          entry.approval = {
+            el: card,
+            title: title,
+            detail: detail,
+            hint: hint,
+            reject: reject,
+            run: run,
+            actionId: null,
+            answered: false,
+          };
+          return card;
+        }
+
+        function answerApproval(entry, decision) {
+          var card = entry.approval;
+          if (!card || !card.actionId || card.answered) return;
+          var command =
+            card.detail.contentEditable === "true"
+              ? (card.detail.textContent || "").replace(/\u00a0/g, " ")
+              : null;
+          var sent = sendAgentDecision(card.actionId, decision, command);
+          if (!sent) {
+            card.hint.textContent = "not connected";
+            return;
+          }
+          // Stay disabled until the host republishes the turn, so a slow host
+          // cannot be told to run the same command twice.
+          card.answered = true;
+          card.reject.disabled = true;
+          card.run.disabled = true;
+          card.detail.contentEditable = "false";
+          card.hint.textContent = decision === "run" ? "running…" : "rejecting…";
+        }
+
+        function renderApproval(entry, pending) {
+          var card = entry.approval;
+          if (!pending) {
+            card.el.className = "approval hidden";
+            card.actionId = null;
+            card.answered = false;
+            return;
+          }
+          if (card.actionId !== pending.action_id) {
+            card.actionId = pending.action_id;
+            card.answered = false;
+            card.reject.disabled = false;
+            card.run.disabled = false;
+            card.detail.textContent = pending.detail || "";
+            // Editing the text only makes sense when the host will actually run
+            // it; for an MCP call or an edit list it is a description.
+            var editable = pending.kind === "command";
+            card.detail.contentEditable = editable ? "true" : "false";
+            card.hint.textContent = editable ? "edit before running" : "";
+          }
+          card.title.textContent = pending.title || "Waiting for your approval";
+          card.el.className = "approval";
+        }
+
         function upsertAgentExchange(payload) {
           var id = payload && payload.id;
           if (!id) return;
@@ -2306,6 +2474,7 @@
               cmd: cmd,
               out: out,
             };
+            el.appendChild(createApprovalCard(entry));
             appendBlock(entry);
             mountBlockEl(entry, el);
           }
@@ -2315,7 +2484,13 @@
             entry.lastMarkdown = markdown;
             entry.out.innerHTML = renderMarkdown(markdown);
           }
-          entry.head.textContent = payload.running ? "responding…" : "";
+          var pending = payload.pending_action || null;
+          renderApproval(entry, pending);
+          entry.head.textContent = pending
+            ? "waiting for approval"
+            : payload.running
+              ? "responding…"
+              : "";
           entry.head.className = payload.running ? "bhead live" : "bhead";
           entry.el.dataset.state = payload.running ? "running" : "ok";
           if (view.following) scrollToBottom();
@@ -2845,6 +3020,14 @@
           });
         }
 
+        // Agent approval has no cloud session-sharing equivalent, so it rides
+        // the same socket in a local-share-only envelope.
+        function sendAgentDecision(actionId, decision, command) {
+          var payload = { action_id: actionId, decision: decision };
+          if (typeof command === "string") payload.command = command;
+          return sendJson({ LocalShareAgentDecision: payload });
+        }
+
         function sendWriteToPty(bytes) {
           if (!transport.viewerId) return false;
           var seq = transport.ptySeq++;
@@ -2918,6 +3101,9 @@
           if (session.altScreen) return;
           if (event.metaKey || event.ctrlKey || event.altKey) return;
           if (event.target === ginputEl) return;
+          // An approval card's command is editable too; stealing focus mid-edit
+          // would silently drop the guest's changes.
+          if (event.target && event.target.contentEditable === "true") return;
           if (event.key.length !== 1) return;
           focusGuestInput();
         });
