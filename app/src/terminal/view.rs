@@ -7220,6 +7220,19 @@ impl TerminalView {
         event: &BlocklistAIActionEvent,
         ctx: &mut ViewContext<Self>,
     ) {
+        // Approval state is action-model state, so the streaming-exchange
+        // mirror never fires for it; local-share guests would see the turn stop
+        // mid-sentence with no card and no way to unblock it.
+        #[cfg(not(target_family = "wasm"))]
+        if matches!(
+            event,
+            BlocklistAIActionEvent::ActionBlockedOnUserConfirmation(..)
+                | BlocklistAIActionEvent::ExecutingAction(..)
+                | BlocklistAIActionEvent::FinishedAction { .. }
+        ) {
+            self.publish_local_share_agent_action_state(event.action_id(), ctx);
+        }
+
         match event {
             BlocklistAIActionEvent::ActionBlockedOnUserConfirmation(_) => {
                 let is_agent_in_control = self

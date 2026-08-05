@@ -11,18 +11,24 @@ use super::{
     InlineBannerItem, InlineBannerType, SharedSessionBanners, TerminalAction, TerminalView,
 };
 use crate::ai::agent::conversation::AIConversationId;
-use crate::ai::agent::AIAgentExchangeId;
+use crate::ai::agent::{AIAgentAction, AIAgentActionId, AIAgentActionType, AIAgentExchangeId};
 use crate::ai::blocklist::BlocklistAIHistoryModel;
 use crate::features::FeatureFlag;
 use crate::menu::{MenuItem, MenuItemFields};
 use crate::terminal::local_session_share::{
     all_interfaces_label, bind_candidate_label, is_all_interfaces, non_loopback_candidates,
-    resolve_palette_bind_ip, LocalSessionShareHub, LocalShareAgentExchange, LocalShareGuestRequest,
+    resolve_palette_bind_ip, LocalSessionShareHub, LocalShareAgentDecision,
+    LocalShareAgentExchange, LocalShareAgentPendingAction, LocalShareGuestRequest,
     COPY_LOCAL_SHARE_LINK_TEXT, LOCAL_SHARE_ACTIVE_TOAST, LOCAL_SHARE_ALL_INTERFACES_WARNING,
     LOCAL_SHARE_BLOCKS_CLOUD_TOAST, LOCAL_SHARE_CLOUD_BLOCK_TOAST, LOCAL_SHARE_LITE_VIEWER_TOAST,
     LOCAL_SHARE_ROTATED_TOAST, LOCAL_SHARE_START_FAILED_TOAST,
 };
 use crate::view_components::DismissibleToast;
+
+/// Ceiling on a mirrored agent transcript. Tool results are included so guests
+/// can see what the agent actually ran, and a single `cat` of a large file
+/// would otherwise push megabytes through the guest socket on every token.
+const MAX_MIRRORED_AGENT_OUTPUT_BYTES: usize = 32 * 1024;
 
 impl TerminalView {
     /// Command Palette entry: resolve a bind address and start (or re-copy).
@@ -328,10 +334,19 @@ impl TerminalView {
             .iter()
             .find_map(|input| input.display_user_query(initial_query.as_ref()))
             .unwrap_or_default();
-        // `None` action model: tool-call detail is host-side UI state, and the
-        // lite viewer only renders the transcript text.
-        let output = exchange.format_output_for_copy(None);
-        if query.is_empty() && output.is_empty() {
+
+        let action_model = self.ai_action_model.as_ref(ctx);
+        // Passing the action model folds tool-call results into the transcript,
+        // so a guest sees which commands the agent ran rather than only its prose.
+        let output = truncate_mirrored_output(exchange.format_output_for_copy(Some(action_model)));
+        // An approval card belongs to the turn that requested the tool call, not
+        // to whatever turn happens to be streaming.
+        let pending_action = action_model
+            .action_awaiting_confirmation(&conversation_id)
+            .filter(|action| conversation.exchange_id_for_action(&action.id) == Some(exchange_id))
+            .map(mirrored_pending_action);
+
+        if query.is_empty() && output.is_empty() && pending_action.is_none() {
             return;
         }
 
@@ -340,10 +355,58 @@ impl TerminalView {
             query,
             output,
             running: !exchange.output_status.is_finished(),
+            pending_action,
         };
         if let Err(err) = publisher.publish_agent_exchange(exchange) {
             log::warn!("Failed to publish local LAN share agent exchange: {err}");
         }
+    }
+
+    /// Re-publishes the turn that owns `action_id` after its approval state
+    /// changed.
+    ///
+    /// Whether an action is blocked lives in `BlocklistAIActionModel`, not in
+    /// the exchange transcript, so the streaming-exchange mirror never fires
+    /// when a card appears or is answered.
+    pub(crate) fn publish_local_share_agent_action_state(
+        &self,
+        action_id: &AIAgentActionId,
+        ctx: &AppContext,
+    ) {
+        if self.local_session_share_hub.event_publisher().is_none() {
+            return;
+        }
+        let history_model = BlocklistAIHistoryModel::as_ref(ctx);
+        let Some(conversation_id) = history_model.active_conversation_id(self.view_id) else {
+            return;
+        };
+        let Some(exchange_id) = history_model
+            .conversation(&conversation_id)
+            .and_then(|conversation| conversation.exchange_id_for_action(action_id))
+        else {
+            return;
+        };
+        self.publish_local_share_agent_exchange(conversation_id, exchange_id, ctx);
+    }
+
+    /// Runs or rejects the agent action a guest answered in its mirrored card.
+    fn apply_local_share_agent_decision(
+        &mut self,
+        action_id: String,
+        decision: LocalShareAgentDecision,
+        command: Option<String>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let action_id = AIAgentActionId::from(action_id);
+        let accept = matches!(decision, LocalShareAgentDecision::Run);
+        let resolved = self.ai_action_model.update(ctx, |action_model, ctx| {
+            action_model.resolve_action_awaiting_confirmation(&action_id, accept, command, ctx)
+        });
+        if !resolved {
+            log::info!("Ignoring local-share agent decision for an action that is not awaiting confirmation");
+            return;
+        }
+        self.publish_local_share_agent_action_state(&action_id, ctx);
     }
 
     /// Spawns a recursive listener that applies guest ExecuteCommand / WriteToPty
@@ -423,6 +486,12 @@ impl TerminalView {
                 }
                 self.write_viewer_bytes_to_pty(bytes, ctx);
             }
+            LocalShareGuestRequest::AgentActionDecision {
+                action_id,
+                decision,
+                command,
+                ..
+            } => self.apply_local_share_agent_decision(action_id, decision, command, ctx),
         }
     }
 
@@ -434,4 +503,59 @@ impl TerminalView {
 /// Construct a hub for a new TerminalView (desktop).
 pub(crate) fn new_hub() -> LocalSessionShareHub {
     LocalSessionShareHub::new()
+}
+
+fn truncate_mirrored_output(mut output: String) -> String {
+    if output.len() <= MAX_MIRRORED_AGENT_OUTPUT_BYTES {
+        return output;
+    }
+    let mut cut = MAX_MIRRORED_AGENT_OUTPUT_BYTES;
+    while cut > 0 && !output.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    output.truncate(cut);
+    output.push_str("\n\n…output truncated for the shared view.");
+    output
+}
+
+/// Flattens the host's approval card into the four strings a guest needs to
+/// render it: which action, what kind of card, the question, and the detail.
+fn mirrored_pending_action(action: &AIAgentAction) -> LocalShareAgentPendingAction {
+    let (kind, title, detail) = match &action.action {
+        AIAgentActionType::RequestCommandOutput { command, .. } => (
+            "command",
+            "OK if I run this command and read the output?".to_owned(),
+            command.clone(),
+        ),
+        AIAgentActionType::CallMCPTool { name, input, .. } => (
+            "mcp_tool",
+            "OK if I call this MCP tool?".to_owned(),
+            match serde_json::to_string_pretty(input) {
+                Ok(input) => format!("{name}\n{input}"),
+                Err(_) => name.clone(),
+            },
+        ),
+        AIAgentActionType::RequestFileEdits { file_edits, title } => (
+            "file_edits",
+            title
+                .clone()
+                .unwrap_or_else(|| "OK if I apply these edits?".to_owned()),
+            file_edits
+                .iter()
+                .filter_map(|edit| edit.file())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        _ => (
+            "action",
+            format!("OK if I run {}?", action.action.user_friendly_name()),
+            action.action.to_string(),
+        ),
+    };
+    LocalShareAgentPendingAction {
+        action_id: action.id.to_string(),
+        kind: kind.to_owned(),
+        title,
+        detail,
+    }
 }
