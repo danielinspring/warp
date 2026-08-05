@@ -1075,7 +1075,33 @@
         "node app/src/terminal/local_session_share/lite_viewer_tests.js",
         "./script/format"
       ],
-      "evidence": "2026-08-04: After feat-045, guest '/agent …' worked but follow-ups like 'what is this about?' still hit the shell (zsh: no matches found: about?). Extended Input::submit_line_on_behalf_of_shared_session_participant so that when AgentMode+AgentView are on and agent_view_controller.is_active(), a non-empty plain line calls submit_user_query_now (selected conversation, else new). TerminalView::apply_local_share_guest_request also skips the long-running guard when Agent View is active. Lite viewer placeholder/hint updated. /agent slash path unchanged (always new). cargo check -p warp --lib ok; lite_viewer_tests.js all checks passed; ./script/format clean."
+      "evidence": "2026-08-04: After feat-045, guest '/agent \u2026' worked but follow-ups like 'what is this about?' still hit the shell (zsh: no matches found: about?). Extended Input::submit_line_on_behalf_of_shared_session_participant so that when AgentMode+AgentView are on and agent_view_controller.is_active(), a non-empty plain line calls submit_user_query_now (selected conversation, else new). TerminalView::apply_local_share_guest_request also skips the long-running guard when Agent View is active. Lite viewer placeholder/hint updated. /agent slash path unchanged (always new). cargo check -p warp --lib ok; lite_viewer_tests.js all checks passed; ./script/format clean."
+    },
+    {
+      "id": "feat-047",
+      "name": "Mirror agent tool approval to local-share guests",
+      "description": "The host's \"OK if I run this command and read the output?\" card is mirrored into the lite viewer, and the guest's Run / Reject answer is applied on the host so a paused Agent Mode turn can be unblocked from the browser.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-046"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "A turn blocked on user confirmation publishes a pending_action (action id, kind, title, detail) to guests.",
+        "The lite viewer renders a Reject / Run card and marks the turn as waiting for approval.",
+        "A requested command is editable in the guest card before running; MCP calls and edit lists are not.",
+        "Run / Reject reach the host and resolve the same action the host card would have.",
+        "A stale or duplicate guest decision is a no-op instead of running an action twice.",
+        "Mirrored transcripts include tool-call results so guests can see what the agent ran.",
+        "Focused Rust tests, the lite_viewer harness, and formatting pass."
+      ],
+      "verification": [
+        "cargo nextest run -p warp local_session_share",
+        "node app/src/terminal/local_session_share/lite_viewer_tests.js",
+        "./script/format",
+        "cargo clippy -p warp --lib --all-features"
+      ],
+      "evidence": "2026-08-05: Guests saw an agent turn stop mid-sentence with no approval UI because blocked-action state lives in BlocklistAIActionModel, not in the exchange transcript. Added BlocklistAIActionModel::{action_awaiting_confirmation, conversation_awaiting_confirmation, resolve_action_awaiting_confirmation}; LocalShareAgentExchange gained pending_action and now formats output with the action model so tool results appear (capped at 32 KiB). TerminalView republishes the owning turn on ActionBlockedOnUserConfirmation / ExecutingAction / FinishedAction. Guests answer over a local-share-only LocalShareAgentDecision envelope parsed ahead of UpstreamMessage. cargo nextest run -p warp local_session_share: 43 passed, 0 failed. lite_viewer_tests.js: all checks passed (12 new approval checks). ./script/format clean; cargo clippy -p warp --lib --all-features introduced no new warnings in touched files."
     }
   ],
   "future_phases": [
@@ -1092,7 +1118,7 @@
     {
       "phase": "Phase D",
       "scope": [],
-      "note": "Phase D complete through feat-046 (guest Agent View follow-ups)."
+      "note": "Phase D complete through feat-046 (guest Agent View follow-ups). feat-047 mirrors the agent tool-approval card and lets guests answer it."
     }
   ]
 }
