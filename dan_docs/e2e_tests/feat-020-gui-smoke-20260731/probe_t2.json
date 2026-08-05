@@ -1,0 +1,44 @@
+{
+  "steps": [
+    {
+      "name": "update_todos",
+      "arguments": {
+        "todos": [
+          {
+            "id": "t1",
+            "title": "Read config",
+            "description": "check settings"
+          },
+          {
+            "id": "t2",
+            "title": "Write patch"
+          },
+          {
+            "id": "t3",
+            "title": "Run tests"
+          }
+        ]
+      }
+    },
+    {
+      "name": "update_todos",
+      "arguments": {
+        "todos": [
+          {
+            "id": "t2",
+            "title": "Write patch (v2)"
+          },
+          {
+            "id": "t3",
+            "title": "Run tests"
+          }
+        ]
+      }
+    }
+  ],
+  "assert_pending_ids": [
+    "t2",
+    "t3"
+  ],
+  "write_snapshot_to": "/Users/lt-018/codish/open_soures/warp/dan_docs/e2e_tests/feat-020-gui-smoke-20260731/t2_execute_snapshot.json"
+}

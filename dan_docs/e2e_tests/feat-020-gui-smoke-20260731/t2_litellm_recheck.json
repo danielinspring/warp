@@ -1,0 +1,21 @@
+{
+  "t2_gui_proxy": {
+    "ids": [
+      "t2",
+      "t3"
+    ],
+    "compliant": true,
+    "args": {
+      "todos": [
+        {
+          "id": "t2",
+          "title": "Write patch (v2)"
+        },
+        {
+          "id": "t3",
+          "title": "Run tests"
+        }
+      ]
+    }
+  }
+}
