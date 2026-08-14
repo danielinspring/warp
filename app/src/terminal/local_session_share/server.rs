@@ -1,18 +1,18 @@
 use std::sync::Arc;
 
+use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
-use axum::http::{header, HeaderMap, StatusCode, Uri};
+use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::{Html, IntoResponse, Json, Response};
 use axum::routing::get;
-use axum::Router;
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
-use session_sharing_protocol::viewer::{DownstreamMessage, UpstreamMessage};
+use session_sharing_protocol::viewer::{DownstreamMessage, SessionEndedReason, UpstreamMessage};
 use tower_http::services::ServeDir;
 
-use super::hub::{typed_input_message_json, ShareState};
-use super::protocol::{handle_upstream, joined_successfully, UpstreamDisposition};
+use super::hub::{ShareState, typed_input_message_json};
+use super::protocol::{UpstreamDisposition, handle_upstream, joined_successfully};
 
 /// Guest page served when no Warp WASM bundle is staged. Speaks the real
 /// session-sharing-protocol WS dialect and rebuilds Warp's block UI in the
@@ -110,52 +110,91 @@ async fn ws_upgrade(
     if !state.check_secret(&secret) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    ws.on_upgrade(move |socket| handle_socket(socket, state))
+    ws.on_upgrade(move |socket| handle_socket(socket, state, secret))
 }
 
-async fn handle_socket(socket: WebSocket, state: Arc<ShareState>) {
+fn session_ended_message() -> DownstreamMessage {
+    DownstreamMessage::SessionEnded {
+        reason: SessionEndedReason::EndedBySharer,
+    }
+}
+
+async fn handle_socket(socket: WebSocket, state: Arc<ShareState>, secret: String) {
     let (mut sink, mut stream) = socket.split();
+    let mut generation = state.subscribe_generation();
+    let joined_generation = *generation.borrow();
+    // Re-check after subscribe so a rotate between HTTP upgrade and this task
+    // cannot leave an Executor socket authorized under the new generation.
+    if !state.guest_still_authorized(&secret, joined_generation) {
+        let _ = send_downstream(&mut sink, session_ended_message()).await;
+        return;
+    }
 
     // Join phase: nothing is streamed to a guest before it identifies itself,
     // so subscribing only once `Initialize` arrives loses nothing — and lets
     // the backlog snapshot and the subscription be taken atomically.
     let (mut events, viewer_id) = loop {
-        match stream.next().await {
-            Some(Ok(Message::Text(text))) => {
-                let Ok(UpstreamMessage::Initialize(_)) = UpstreamMessage::from_json(text.as_ref())
-                else {
-                    continue;
-                };
-                let (reply, viewer_id) =
-                    joined_successfully(state.window_size(), state.scrollback());
-                if send_downstream(&mut sink, reply).await.is_err() {
+        tokio::select! {
+            inbound = stream.next() => {
+                match inbound {
+                    Some(Ok(Message::Text(text))) => {
+                        if !state.guest_still_authorized(&secret, joined_generation) {
+                            let _ = send_downstream(&mut sink, session_ended_message()).await;
+                            return;
+                        }
+                        let Ok(UpstreamMessage::Initialize(_)) =
+                            UpstreamMessage::from_json(text.as_ref())
+                        else {
+                            continue;
+                        };
+                        let (reply, viewer_id) =
+                            joined_successfully(state.window_size(), state.scrollback());
+                        if send_downstream(&mut sink, reply).await.is_err() {
+                            return;
+                        }
+                        let snapshot = state.join();
+                        if !state.guest_still_authorized(&secret, joined_generation) {
+                            let _ = send_downstream(&mut sink, session_ended_message()).await;
+                            return;
+                        }
+                        // Typed-input snapshot first so the guest footer can update
+                        // while a large scrollback backlog is still flushing.
+                        if let Ok(json) = typed_input_message_json(&snapshot.typed_input) {
+                            if sink.send(Message::Text(json.into())).await.is_err() {
+                                return;
+                            }
+                        }
+                        // PTY frames and Agent Mode turns are already merged in publish
+                        // order, so the guest rebuilds the same block order the host has.
+                        for frame in snapshot.backlog {
+                            if !state.guest_still_authorized(&secret, joined_generation) {
+                                let _ = send_downstream(&mut sink, session_ended_message()).await;
+                                return;
+                            }
+                            if sink.send(Message::Text(frame.into())).await.is_err() {
+                                return;
+                            }
+                        }
+                        break (snapshot.events, viewer_id);
+                    }
+                    Some(Ok(Message::Ping(payload))) => {
+                        if sink.send(Message::Pong(payload)).await.is_err() {
+                            return;
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => return,
+                    Some(Ok(_)) => {}
+                    Some(Err(_)) => return,
+                }
+            }
+            changed = generation.changed() => {
+                if changed.is_err()
+                    || !state.guest_still_authorized(&secret, joined_generation)
+                {
+                    let _ = send_downstream(&mut sink, session_ended_message()).await;
                     return;
                 }
-                let snapshot = state.join();
-                // Typed-input snapshot first so the guest footer can update
-                // while a large scrollback backlog is still flushing.
-                if let Ok(json) = typed_input_message_json(&snapshot.typed_input) {
-                    if sink.send(Message::Text(json.into())).await.is_err() {
-                        return;
-                    }
-                }
-                // PTY frames and Agent Mode turns are already merged in publish
-                // order, so the guest rebuilds the same block order the host has.
-                for frame in snapshot.backlog {
-                    if sink.send(Message::Text(frame.into())).await.is_err() {
-                        return;
-                    }
-                }
-                break (snapshot.events, viewer_id);
             }
-            Some(Ok(Message::Ping(payload))) => {
-                if sink.send(Message::Pong(payload)).await.is_err() {
-                    return;
-                }
-            }
-            Some(Ok(Message::Close(_))) | None => return,
-            Some(Ok(_)) => {}
-            Some(Err(_)) => return,
         }
     };
 
@@ -164,6 +203,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<ShareState>) {
             inbound = stream.next() => {
                 match inbound {
                     Some(Ok(Message::Text(text))) => {
+                        if !state.guest_still_authorized(&secret, joined_generation) {
+                            let _ = send_downstream(&mut sink, session_ended_message()).await;
+                            return;
+                        }
                         let Ok(message) = UpstreamMessage::from_json(text.as_ref()) else {
                             continue;
                         };
@@ -175,6 +218,13 @@ async fn handle_socket(socket: WebSocket, state: Arc<ShareState>) {
                                 }
                             }
                             UpstreamDisposition::GuestRequest { request, ack } => {
+                                // Recheck immediately before enqueue so a rotate
+                                // that raced this inbound frame cannot execute.
+                                if !state.guest_still_authorized(&secret, joined_generation) {
+                                    let _ = send_downstream(&mut sink, session_ended_message())
+                                        .await;
+                                    return;
+                                }
                                 if let Err(err) = state.enqueue_guest_request(request) {
                                     log::warn!("Failed to enqueue local-share guest request: {err}");
                                 }
@@ -197,6 +247,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<ShareState>) {
                 }
             }
             event = events.recv() => {
+                if !state.guest_still_authorized(&secret, joined_generation) {
+                    let _ = send_downstream(&mut sink, session_ended_message()).await;
+                    return;
+                }
                 match event {
                     Ok(json) => {
                         if sink.send(Message::Text(json.into())).await.is_err() {
@@ -204,10 +258,18 @@ async fn handle_socket(socket: WebSocket, state: Arc<ShareState>) {
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                        // Skip lagged frames; a follow-up may send SessionEnded.
+                        // Skip lagged frames; rotate/stop send SessionEnded instead.
                         continue;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                }
+            }
+            changed = generation.changed() => {
+                if changed.is_err()
+                    || !state.guest_still_authorized(&secret, joined_generation)
+                {
+                    let _ = send_downstream(&mut sink, session_ended_message()).await;
+                    return;
                 }
             }
         }
