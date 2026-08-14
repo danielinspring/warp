@@ -216,6 +216,104 @@ fn rotate_secret_invalidates_old_url_and_serves_new_one() {
 }
 
 #[test]
+fn rotate_secret_revokes_already_connected_websocket_executors() {
+    let mut hub = LocalSessionShareHub::new();
+    let handle = hub.start(loopback_ip(), 0).expect("start should succeed");
+    let guest_rx = hub
+        .take_guest_request_receiver()
+        .expect("guest request receiver");
+    let old_ws = guest_ws_url(&handle);
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let (mut socket, _) = join_as_viewer(old_ws).await;
+
+        hub.rotate_secret()
+            .expect("rotate should succeed while the old guest is connected");
+
+        let ended = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                match socket.next().await {
+                    Some(Ok(Message::Text(text))) => {
+                        if matches!(
+                            DownstreamMessage::from_json(text.as_ref()),
+                            Ok(DownstreamMessage::SessionEnded { .. })
+                        ) {
+                            return true;
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => return true,
+                    Some(Ok(_)) => {}
+                    Some(Err(_)) => return true,
+                }
+            }
+        })
+        .await
+        .expect("revoked guest should be disconnected promptly");
+        assert!(ended, "old guest should receive SessionEnded or a close");
+
+        let request = UpstreamMessage::ExecuteCommand {
+            buffer_id: session_sharing_protocol::common::BufferId::from("buf".to_string()),
+            command: "echo should-not-run".to_string(),
+        };
+        let _ = socket
+            .send(Message::Text(request.to_json().unwrap().into()))
+            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    });
+
+    assert!(
+        guest_rx.try_recv().is_err(),
+        "rotated-away guest must not enqueue ExecuteCommand"
+    );
+
+    hub.stop();
+}
+
+#[test]
+fn rotate_secret_new_link_can_still_execute() {
+    let mut hub = LocalSessionShareHub::new();
+    let first = hub.start(loopback_ip(), 0).expect("start should succeed");
+    let guest_rx = hub
+        .take_guest_request_receiver()
+        .expect("guest request receiver");
+    let second = hub.rotate_secret().expect("rotate should succeed");
+    assert_ne!(first.secret.as_str(), second.secret.as_str());
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let (mut socket, _) = join_as_viewer(guest_ws_url(&second)).await;
+        let request = UpstreamMessage::ExecuteCommand {
+            buffer_id: session_sharing_protocol::common::BufferId::from("buf".to_string()),
+            command: "echo from-new-link".to_string(),
+        };
+        socket
+            .send(Message::Text(request.to_json().unwrap().into()))
+            .await
+            .expect("execute request should send");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    });
+
+    let request = guest_rx
+        .try_recv()
+        .expect("host should receive ExecuteCommand from the new secret");
+    match request {
+        LocalShareGuestRequest::ExecuteCommand { command, .. } => {
+            assert_eq!(command, "echo from-new-link");
+        }
+        other => panic!("unexpected guest request: {other:?}"),
+    }
+
+    hub.stop();
+}
+
+#[test]
 fn rotate_secret_fails_when_not_active() {
     let mut hub = LocalSessionShareHub::new();
     let err = hub
@@ -307,10 +405,12 @@ fn initialize_receives_joined_successfully_as_executor() {
         assert!(scrollback.blocks.is_empty());
         assert_eq!(window_size.num_rows, 24);
         assert_eq!(window_size.num_cols, 80);
-        assert!(participant_list
-            .viewers
-            .iter()
-            .all(|viewer| viewer.role == Role::Executor));
+        assert!(
+            participant_list
+                .viewers
+                .iter()
+                .all(|viewer| viewer.role == Role::Executor)
+        );
     });
 
     hub.stop();

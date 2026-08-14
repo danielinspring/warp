@@ -7,9 +7,9 @@ use std::sync::{Arc, Mutex, RwLock};
 use session_sharing_protocol::common::{OrderedTerminalEventType, Scrollback, WindowSize};
 use session_sharing_protocol::viewer::DownstreamMessage;
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{broadcast, oneshot, watch};
 
-use super::protocol::{compress_pty_bytes, ordered_event_downstream, LocalShareGuestRequest};
+use super::protocol::{LocalShareGuestRequest, compress_pty_bytes, ordered_event_downstream};
 use super::secret::ShareSecret;
 use super::server;
 
@@ -178,6 +178,10 @@ pub(crate) struct ShareState {
     /// Optional directory containing `index.html`, `wasm/`, and `assets/` for
     /// serving the Warp WASM viewer over the share URL.
     wasm_bundle_dir: Option<PathBuf>,
+    /// Bumped on rotate/stop so already-connected WebSockets notice that their
+    /// secret is no longer valid. HTTP checks the secret on each request;
+    /// upgraded sockets otherwise keep Executor access forever.
+    generation: watch::Sender<u64>,
 }
 
 impl ShareState {
@@ -187,6 +191,7 @@ impl ShareState {
         guest_tx: async_channel::Sender<LocalShareGuestRequest>,
     ) -> Self {
         let (event_tx, _) = broadcast::channel(EVENT_BROADCAST_CAPACITY);
+        let (generation, _) = watch::channel(0u64);
         Self {
             secret: RwLock::new(Some(secret)),
             window_size: RwLock::new(WindowSize::default()),
@@ -199,6 +204,7 @@ impl ShareState {
             replay: Mutex::new(ReplayLog::default()),
             guest_tx,
             wasm_bundle_dir,
+            generation,
         }
     }
 
@@ -220,6 +226,26 @@ impl ShareState {
             .is_some_and(|secret| secret.matches(candidate))
     }
 
+    pub(crate) fn subscribe_generation(&self) -> watch::Receiver<u64> {
+        self.generation.subscribe()
+    }
+
+    fn generation_value(&self) -> u64 {
+        *self.generation.borrow()
+    }
+
+    /// True while this socket's URL secret still matches and the share has not
+    /// been rotated or stopped since the socket subscribed.
+    pub(crate) fn guest_still_authorized(&self, candidate: &str, joined_generation: u64) -> bool {
+        self.generation_value() == joined_generation && self.check_secret(candidate)
+    }
+
+    fn revoke_connected_guests(&self) {
+        self.generation.send_modify(|generation| {
+            *generation = generation.wrapping_add(1);
+        });
+    }
+
     fn set_secret(&self, secret: ShareSecret) {
         *self
             .secret
@@ -232,6 +258,7 @@ impl ShareState {
             .secret
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        self.revoke_connected_guests();
     }
 
     pub(crate) fn window_size(&self) -> WindowSize {
@@ -594,11 +621,16 @@ impl LocalSessionShareHub {
 
     /// Invalidates the current secret and issues a new one, keeping the same
     /// bind address (PRODUCT.md P12). Guests on the old URL lose access and
-    /// are not silently migrated to the new secret.
+    /// are not silently migrated to the new secret — including guests whose
+    /// WebSocket is already open (HTTP secret checks do not run again after
+    /// the upgrade).
     pub fn rotate_secret(&mut self) -> Result<ShareHandle, HubError> {
         let active = self.active.as_mut().ok_or(HubError::NotActive)?;
         let new_secret = ShareSecret::generate();
+        // Swap the secret first so in-flight WS frames cannot enqueue execute
+        // / write-to-pty against the old URL, then wake connected sockets.
         active.state.set_secret(new_secret.clone());
+        active.state.revoke_connected_guests();
         active.secret = new_secret.clone();
 
         Ok(ShareHandle {
