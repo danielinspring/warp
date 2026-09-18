@@ -13,6 +13,8 @@ pub enum Experiment {
     AgentOnboardingControl,
     AgentOnboardingSkippable,
     AgentOnboardingUnskippable,
+    OnboardingChooseHowToStartControl,
+    OnboardingChooseHowToStartExperiment,
     BuildPlanAutoReloadBannerToggle,
     BuildPlanAutoReloadControl,
     BuildPlanAutoReloadPostPurchaseModal,
@@ -26,6 +28,8 @@ pub enum Experiment {
     FreeTierToBuildConversionInterstitialEmail,
     FreeTierToBuildConversionInterstitialOnly,
     LinuxLaunchExperiment,
+    MacosRunnersControl,
+    MacosRunnersExperiment,
     MultiAgentControl,
     MultiAgentExperiment,
     MultiArmReverseAiTrialControl,
@@ -67,6 +71,8 @@ pub enum Experiment {
     FreeUserInitialCreditsThreeHundred,
     OzMultiHarnessControl,
     OzMultiHarnessExperiment,
+    SshRemoteServerControl,
+    SshRemoteServerExperiment,
     #[cynic(fallback)]
     Other(String),
 }

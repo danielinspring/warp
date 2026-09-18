@@ -4,14 +4,15 @@
 //! - [`ping`] — fetches the current run by task ID and prints its info.
 //! - [`report_artifact`] — reports an artifact (e.g. a PR) back to the Oz platform.
 use anyhow::Result;
+use warp_cli::GlobalOptions;
 use warp_cli::agent::OutputFormat;
 use warp_cli::harness_support::{
     FinishTaskArgs, HarnessSupportArgs, HarnessSupportCommand, NotifyUserArgs, ReportArtifactArgs,
-    ReportArtifactCommand, TaskStatus,
+    ReportArtifactCommand, ReportExternalReferenceArgs, ReportShutdownArgs, TaskStatus,
 };
-use warp_cli::GlobalOptions;
 use warp_core::features::FeatureFlag;
-use warpui::{platform::TerminationMode, AppContext, ModelHandle, SingletonEntity};
+use warpui::platform::TerminationMode;
+use warpui::{AppContext, ModelHandle, SingletonEntity};
 
 use super::common::set_ambient_task_context_from_run_id;
 use crate::ai::ambient_agents::AmbientAgentTaskId;
@@ -37,11 +38,17 @@ pub fn run(
         HarnessSupportCommand::ReportArtifact(report_args) => {
             report_artifact(ctx, runner, report_args, global_options.output_format)
         }
+        HarnessSupportCommand::ReportExternalReference(args) => {
+            report_external_reference(ctx, runner, args, global_options.output_format)
+        }
         HarnessSupportCommand::NotifyUser(notify_args) => {
             notify_user(ctx, runner, notify_args, global_options.output_format)
         }
         HarnessSupportCommand::FinishTask(finish_args) => {
             finish_task(ctx, runner, finish_args, global_options.output_format)
+        }
+        HarnessSupportCommand::ReportShutdown(shutdown_args) => {
+            report_shutdown(ctx, runner, shutdown_args, global_options.output_format)
         }
     }
 }
@@ -132,6 +139,66 @@ fn report_artifact(
     Ok(())
 }
 
+/// Report a URL-addressable external reference back to the Oz platform.
+///
+/// Validates that `--metadata` (when provided) parses as a JSON object before any
+/// network call, then builds an `Artifact::ExternalReference` and reports it via
+/// the same `report-artifact` endpoint used by pull requests.
+fn report_external_reference(
+    ctx: &mut AppContext,
+    runner: ModelHandle<HarnessSupportRunner>,
+    args: ReportExternalReferenceArgs,
+    output_format: OutputFormat,
+) -> Result<()> {
+    let metadata = match args.metadata {
+        Some(raw) => {
+            let parsed: serde_json::Value = serde_json::from_str(&raw)
+                .map_err(|_| anyhow::anyhow!("--metadata must be a JSON object"))?;
+            if !parsed.is_object() {
+                anyhow::bail!("--metadata must be a JSON object");
+            }
+            Some(parsed)
+        }
+        None => None,
+    };
+
+    let artifact = Artifact::ExternalReference {
+        reference_type: args.reference_type,
+        url: args.url,
+        title: args.title,
+        metadata,
+    };
+
+    runner.update(ctx, |_, ctx| {
+        let client = ServerApiProvider::as_ref(ctx).get_harness_support_client();
+
+        ctx.spawn(
+            async move { client.report_artifact(&artifact).await },
+            move |_, result, ctx| match result {
+                Ok(response) => {
+                    match output_format {
+                        OutputFormat::Json | OutputFormat::Ndjson => {
+                            let json = serde_json::to_string(&response).unwrap_or_else(|e| {
+                                serde_json::json!({"error": e.to_string()}).to_string()
+                            });
+                            println!("{json}");
+                        }
+                        OutputFormat::Pretty | OutputFormat::Text => {
+                            println!("Artifact reported: {}", response.artifact_uid);
+                        }
+                    }
+                    ctx.terminate_app(TerminationMode::ForceTerminate, None);
+                }
+                Err(err) => {
+                    super::report_fatal_error(err, ctx);
+                }
+            },
+        );
+    });
+
+    Ok(())
+}
+
 /// Send a progress notification to the task's originating platform.
 fn notify_user(
     ctx: &mut AppContext,
@@ -189,6 +256,55 @@ fn finish_task(
                         }
                         OutputFormat::Pretty | OutputFormat::Text => {
                             println!("Task finished.");
+                        }
+                    }
+                    ctx.terminate_app(TerminationMode::ForceTerminate, None);
+                }
+                Err(err) => {
+                    super::report_fatal_error(err, ctx);
+                }
+            },
+        );
+    });
+
+    Ok(())
+}
+
+/// Report that the agent process is shutting down.
+///
+/// Routes to `report_clean_shutdown` or `report_error_shutdown` on the API client
+/// depending on whether error arguments were provided.
+fn report_shutdown(
+    ctx: &mut AppContext,
+    runner: ModelHandle<HarnessSupportRunner>,
+    args: ReportShutdownArgs,
+    output_format: OutputFormat,
+) -> Result<()> {
+    runner.update(ctx, |_, ctx| {
+        let client = ServerApiProvider::as_ref(ctx).get_harness_support_client();
+
+        ctx.spawn(
+            async move {
+                match (args.error_category, args.error_message, args.exit_code) {
+                    (Some(category), Some(message), exit_code) => {
+                        client
+                            .report_error_shutdown(category, message, exit_code)
+                            .await
+                    }
+                    (None, None, None) => client.report_clean_shutdown().await,
+                    _ => anyhow::bail!(
+                        "--error-category and --error-message must be provided together; --exit-code is only valid for abnormal shutdown"
+                    ),
+                }
+            },
+            move |_, result, ctx| match result {
+                Ok(()) => {
+                    match output_format {
+                        OutputFormat::Json | OutputFormat::Ndjson => {
+                            println!("{{}}");
+                        }
+                        OutputFormat::Pretty | OutputFormat::Text => {
+                            println!("Shutdown reported.");
                         }
                     }
                     ctx.terminate_app(TerminationMode::ForceTerminate, None);
