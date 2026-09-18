@@ -190,6 +190,7 @@ use focus_state::PaneGroupFocusState;
 #[path = "mod_tests.rs"]
 mod tests;
 
+pub use pane::agent_viz_pane::AgentVizPane;
 pub use pane::ai_document_pane::AIDocumentPane;
 pub use pane::ai_fact_pane::AIFactPane;
 pub use pane::code_diff_pane::CodeDiffPane;
@@ -2014,6 +2015,20 @@ impl PaneGroup {
             LeafContents::ExecutionProfileEditor | LeafContents::CustomRouterEditor => {
                 // Editor panes are not restored from persistence.
                 Err(anyhow::anyhow!("Can't restore editor panes"))
+            }
+            LeafContents::AgentViz => {
+                // Agent viz panes are derived from in-process runtime events
+                // and are not restored across launches.
+                Err(anyhow::anyhow!(
+                    "Agent viz pane should not have been persisted, as it cannot be restored"
+                ))
+            }
+            LeafContents::Welcome { .. } => {
+                // Welcome panes are ephemeral entrypoint panes and are not
+                // restored across launches.
+                Err(anyhow::anyhow!(
+                    "Welcome pane should not have been persisted, as it cannot be restored"
+                ))
             }
             LeafContents::NetworkLog => {
                 // Network log panes are intentionally not restored. Two

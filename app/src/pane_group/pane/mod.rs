@@ -8,6 +8,7 @@
 //! The [`PaneContent`] interface requires implementers to maintain a [`PaneId`] for their pane.
 //! The [`PaneId`] must be created via a [`PaneView<BackingView>`]. The [`PaneId`] is consequently
 //! used to render a [`PaneView`] which internally renders the pane, including the [`BackingView`].
+pub(super) mod agent_viz_pane;
 pub(super) mod ai_document_pane;
 pub(super) mod ai_fact_pane;
 pub(super) mod code_diff_pane;
@@ -27,6 +28,8 @@ pub(super) mod notebook_pane;
 pub(super) mod settings_pane;
 pub(super) mod terminal_pane;
 pub mod view;
+pub(super) mod welcome_pane;
+pub(crate) mod welcome_view;
 pub mod workflow_pane;
 
 use std::any::Any;
@@ -44,6 +47,7 @@ use warpui::{
 
 pub use self::view::{PaneHeaderAction, PaneHeaderCustomAction, PaneView, PaneViewEvent};
 use super::{ActivationReason, LeafContents, PaneGroup, PaneGroupAction};
+use crate::ai::agent_viz::view::AgentVizView;
 use crate::ai::ai_document_view::AIDocumentView;
 use crate::ai::blocklist::inline_action::code_diff_view::CodeDiffView;
 use crate::ai::execution_profiles::editor::ExecutionProfileEditorView;
@@ -58,6 +62,7 @@ use crate::notebooks::file::FileNotebookView;
 use crate::notebooks::notebook::NotebookView;
 use crate::pane_group::focus_state::PaneFocusHandle;
 use crate::pane_group::pane::get_started_view::GetStartedView;
+use crate::pane_group::pane::welcome_view::WelcomeView;
 use crate::server::network_log_view::NetworkLogView;
 use crate::server::telemetry::SharingDialogSource;
 use crate::settings::PaneSettings;
@@ -146,6 +151,8 @@ pub(crate) enum IPaneType {
     ExecutionProfileEditor,
     GetStarted,
     NetworkLog,
+    AgentViz,
+    Welcome,
     DeferredPlaceholder,
     /// A pane type only for tests.
     #[cfg(test)]
@@ -170,6 +177,8 @@ impl Display for IPaneType {
             IPaneType::ExecutionProfileEditor => write!(f, "Execution Profile Editor"),
             IPaneType::GetStarted => write!(f, "GetStarted"),
             IPaneType::NetworkLog => write!(f, "Network Log"),
+            IPaneType::AgentViz => write!(f, "Agent Office"),
+            IPaneType::Welcome => write!(f, "Welcome"),
             IPaneType::DeferredPlaceholder => write!(f, "Placeholder"),
             #[cfg(test)]
             IPaneType::Dummy => write!(f, "Dummy"),
@@ -269,9 +278,19 @@ impl PaneId {
         Self::new_from_ctx(IPaneType::GetStarted, ctx)
     }
 
+    /// Creates a [`PaneId`] from a [`ViewContext<PaneView<WelcomeView>>`].
+    pub fn from_welcome_pane_ctx(ctx: &ViewContext<PaneView<WelcomeView>>) -> Self {
+        Self::new_from_ctx(IPaneType::Welcome, ctx)
+    }
+
     /// Creates a [`PaneId`] from a [`ViewContext<PaneView<NetworkLogView>>`].
     pub fn from_network_log_pane_ctx(ctx: &ViewContext<PaneView<NetworkLogView>>) -> Self {
         Self::new_from_ctx(IPaneType::NetworkLog, ctx)
+    }
+
+    /// Creates a [`PaneId`] from a [`ViewContext<PaneView<AgentVizView>>`].
+    pub fn from_agent_viz_pane_ctx(ctx: &ViewContext<PaneView<AgentVizView>>) -> Self {
+        Self::new_from_ctx(IPaneType::AgentViz, ctx)
     }
 
     /// Creates a [`PaneId`] from a [`PaneView<TerminalView>`] entity ID.
@@ -371,11 +390,23 @@ impl PaneId {
         Self::new(IPaneType::GetStarted, get_started_pane_view)
     }
 
+    /// Creates a [`PaneId`] from a [`PaneView<WelcomeView>`] entity ID.
+    pub fn from_welcome_pane_view(welcome_pane_view: &ViewHandle<PaneView<WelcomeView>>) -> Self {
+        Self::new(IPaneType::Welcome, welcome_pane_view)
+    }
+
     /// Creates a [`PaneId`] from a [`PaneView<NetworkLogView>`] entity ID.
     pub fn from_network_log_pane_view(
         network_log_pane_view: &ViewHandle<PaneView<NetworkLogView>>,
     ) -> Self {
         Self::new(IPaneType::NetworkLog, network_log_pane_view)
+    }
+
+    /// Creates a [`PaneId`] from a [`PaneView<AgentVizView>`] entity ID.
+    pub fn from_agent_viz_pane_view(
+        agent_viz_pane_view: &ViewHandle<PaneView<AgentVizView>>,
+    ) -> Self {
+        Self::new(IPaneType::AgentViz, agent_viz_pane_view)
     }
 
     #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
@@ -496,6 +527,12 @@ impl PaneId {
             }
             IPaneType::NetworkLog => {
                 ChildView::<PaneView<NetworkLogView>>::with_id(self.0.pane_view_id).finish()
+            }
+            IPaneType::AgentViz => {
+                ChildView::<PaneView<AgentVizView>>::with_id(self.0.pane_view_id).finish()
+            }
+            IPaneType::Welcome => {
+                ChildView::<PaneView<WelcomeView>>::with_id(self.0.pane_view_id).finish()
             }
             IPaneType::DeferredPlaceholder => warpui::elements::Empty::new().finish(),
             #[cfg(test)]

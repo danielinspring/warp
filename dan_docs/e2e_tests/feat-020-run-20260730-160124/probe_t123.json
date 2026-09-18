@@ -1,0 +1,54 @@
+{
+  "steps": [
+    {
+      "name": "update_todos",
+      "arguments": {
+        "todos": [
+          {
+            "description": "check settings",
+            "id": "t1",
+            "title": "Read config"
+          },
+          {
+            "id": "t2",
+            "title": "Write patch"
+          },
+          {
+            "id": "t3",
+            "title": "Run tests"
+          }
+        ]
+      }
+    },
+    {
+      "name": "update_todos",
+      "arguments": {
+        "todos": [
+          {
+            "id": "t2",
+            "title": "Write patch (v2)"
+          },
+          {
+            "id": "t3",
+            "title": "Run tests"
+          }
+        ]
+      }
+    },
+    {
+      "name": "mark_todos_completed",
+      "arguments": {
+        "completed_ids": [
+          "t2"
+        ]
+      }
+    }
+  ],
+  "assert_pending_ids": [
+    "t3"
+  ],
+  "assert_completed_ids": [
+    "t2"
+  ],
+  "write_snapshot_to": "/Users/lt-018/codish/open_soures/warp/dan_docs/e2e_tests/feat-020-run-20260730-160124/T1T2T3_execute_snapshot.json"
+}

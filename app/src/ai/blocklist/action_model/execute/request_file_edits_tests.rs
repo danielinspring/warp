@@ -71,8 +71,8 @@ fn register_storage(
 ) -> Rc<TestStorageState> {
     let state = TestStorageState::new();
     let storage = Box::new(TestStorage(state.clone()));
-    executor.update(app, |executor, _| {
-        executor.register_requested_edits(action_id, storage);
+    executor.update(app, |executor, ctx| {
+        executor.register_requested_edits(action_id, storage, ctx);
     });
     state
 }

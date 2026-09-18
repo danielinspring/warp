@@ -17,6 +17,12 @@ use crate::search::item::SearchItem;
 use crate::search::result_renderer::ItemHighlightState;
 use crate::ui_components::icons::Icon as UiIcon;
 
+/// Mac and windows are insensitive, Linux probably IS sensitive
+/// WARNING: Don't use this function for use cases dependent on the session, e.g. a remote session or WSL on Windows. It only considers this specific host.
+pub fn os_probably_case_sensitive() -> bool {
+    !(cfg!(target_os = "macos") || cfg!(target_family = "windows"))
+}
+
 /// Stores data needed to display a project search result item in Command Search.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectSearchItem {

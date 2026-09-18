@@ -552,6 +552,40 @@ impl BlocklistAIActionModel {
         self.blocked_action_for_conversation(&conversation_id)
     }
 
+    /// Returns the action `conversation_id` is currently waiting for the user
+    /// to approve, if any.
+    ///
+    /// Remote surfaces that mirror the approval card (the local LAN session
+    /// share) have no `RequestedCommandView` to read from, so they resolve the
+    /// card's contents from the model instead.
+    pub fn action_awaiting_confirmation(
+        &self,
+        conversation_id: &AIConversationId,
+    ) -> Option<&AIAgentAction> {
+        let action = self.blocked_action_for_conversation(conversation_id)?;
+        self.get_action_status(&action.id)
+            .is_some_and(|status| status.is_blocked())
+            .then_some(action)
+    }
+
+    /// Reverse of [`Self::action_awaiting_confirmation`]: the conversation whose
+    /// approval card is showing `action_id`.
+    ///
+    /// Returning `None` for anything that is not currently blocked is what keeps
+    /// a remote approval from running an action the guest never saw a card for.
+    pub fn conversation_awaiting_confirmation(
+        &self,
+        action_id: &AIAgentActionId,
+    ) -> Option<AIConversationId> {
+        self.pending_actions
+            .keys()
+            .copied()
+            .find(|conversation_id| {
+                self.action_awaiting_confirmation(conversation_id)
+                    .is_some_and(|action| &action.id == action_id)
+            })
+    }
+
     /// Returns a pending action by its ID, searching across all conversations.
     pub fn get_pending_action_by_id(&self, action_id: &AIAgentActionId) -> Option<&AIAgentAction> {
         self.pending_actions
@@ -1296,6 +1330,27 @@ impl BlocklistAIActionModel {
             .collect_vec()
     }
 
+    /// Removes one finished result without moving the rest of the batch into past results.
+    ///
+    /// The local Ollama runtime uses this after it has consumed a Warp-executed tool result so the
+    /// controller does not later treat that same result as a backend-style follow-up input.
+    pub(super) fn take_finished_action_result(
+        &mut self,
+        conversation_id: AIConversationId,
+        action_id: &AIAgentActionId,
+    ) -> Option<AIAgentActionResult> {
+        let results = self.finished_action_results.get_mut(&conversation_id)?;
+        let index = results.iter().position(|result| result.id == *action_id)?;
+        let result = results.remove(index);
+        if results.is_empty() {
+            self.finished_action_results.remove(&conversation_id);
+            self.action_order.remove(&conversation_id);
+        }
+        self.past_action_results
+            .insert(result.id.clone(), result.clone());
+        Some((*result).clone())
+    }
+
     /// Clears finished action results for a conversation. Used when reverting.
     pub(super) fn clear_finished_action_results(&mut self, conversation_id: AIConversationId) {
         self.action_order.remove(&conversation_id);
@@ -1337,6 +1392,46 @@ impl BlocklistAIActionModel {
         };
 
         self.execute_action(action_id, conversation_id, ctx);
+    }
+
+    /// Applies a Run / Reject decision made outside the host's own UI — today,
+    /// by a local LAN session share guest that was shown a mirror of the
+    /// approval card.
+    ///
+    /// Returns `false` when `action_id` is no longer the action awaiting
+    /// confirmation, which is what turns a stale remote card into a no-op
+    /// rather than into a surprise execution.
+    pub fn resolve_action_awaiting_confirmation(
+        &mut self,
+        action_id: &AIAgentActionId,
+        accept: bool,
+        command: Option<String>,
+        ctx: &mut ModelContext<Self>,
+    ) -> bool {
+        let Some(conversation_id) = self.conversation_awaiting_confirmation(action_id) else {
+            return false;
+        };
+
+        if !accept {
+            self.cancel_action_with_id(
+                conversation_id,
+                action_id,
+                CancellationReason::ManuallyCancelled,
+                ctx,
+            );
+            return true;
+        }
+
+        // Only a requested command can be edited before it runs; for anything
+        // else the remote text is a description, not something to execute.
+        let is_requested_command = self
+            .action_awaiting_confirmation(&conversation_id)
+            .is_some_and(|action| action.is_request_command_output());
+        match command.filter(|_| is_requested_command) {
+            Some(command) => self.handle_requested_command_accepted(action_id, command, ctx),
+            None => self.execute_action(action_id, conversation_id, ctx),
+        }
+        true
     }
 
     fn handle_action_result(

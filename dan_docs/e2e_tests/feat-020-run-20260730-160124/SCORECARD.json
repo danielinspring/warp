@@ -1,0 +1,84 @@
+{
+  "T0": true,
+  "T1": true,
+  "T2": true,
+  "T3": true,
+  "T4a": true,
+  "T4b": true,
+  "T5": "structural_pass",
+  "T6": "unit_pass",
+  "T7": "unit_pass",
+  "T8": "unit_pass",
+  "T9": true,
+  "T10": "hydrate_unit_pass",
+  "execute_snaps": {
+    "T123": {
+      "completed": [
+        {
+          "description": "",
+          "id": "t2",
+          "title": "Write patch (v2)"
+        }
+      ],
+      "pending": [
+        {
+          "description": "",
+          "id": "t3",
+          "title": "Run tests"
+        }
+      ]
+    },
+    "T4": {
+      "completed": [
+        {
+          "description": "",
+          "id": "t2",
+          "title": "Write patch (v2)"
+        }
+      ],
+      "pending": [
+        {
+          "description": "",
+          "id": "t3",
+          "title": "Run tests"
+        },
+        {
+          "description": "",
+          "id": "t4",
+          "title": "Open PR"
+        }
+      ]
+    },
+    "T7": {
+      "completed": [],
+      "pending": [
+        {
+          "description": "",
+          "id": "t3",
+          "title": "Run tests"
+        },
+        {
+          "description": "",
+          "id": "t4",
+          "title": "Open PR"
+        }
+      ]
+    },
+    "T8": {
+      "completed": [
+        {
+          "description": "",
+          "id": "t3",
+          "title": "Run tests"
+        }
+      ],
+      "pending": [
+        {
+          "description": "",
+          "id": "t4",
+          "title": "Open PR"
+        }
+      ]
+    }
+  }
+}

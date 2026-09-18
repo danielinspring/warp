@@ -57,6 +57,12 @@ pub enum FeatureFlag {
     /// Enables the joining / viewing of shared sessions (_not_ creation).
     ViewingSharedSessions,
 
+    /// Enables sharing a live terminal pane over the local network (LAN or
+    /// Tailscale) via a host-local HTTP+WS hub, gated by a URL secret.
+    /// Distinct from `CreatingSharedSessions` / `ViewingSharedSessions`,
+    /// which are for Warp's cloud-relayed shared sessions.
+    LocalLanSessionShare,
+
     /// Enabling context chips functionality for prompt
     ContextChips,
 
@@ -587,6 +593,9 @@ pub enum FeatureFlag {
     /// Enables computer use functionality in local clients.
     LocalComputerUse,
 
+    /// Routes Ollama agent tool use through the local runtime instead of the legacy single-turn path.
+    LocalOllamaRuntimeToolUse,
+
     /// Enables background, per-window computer use: driving a specific window directly without
     /// raising it or moving the cursor.  Currently only supported on macOS.
     BackgroundComputerUse,
@@ -1069,6 +1078,11 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
     FeatureFlag::WarpControlCli,
     FeatureFlag::TerminalLifecycleRecovery,
     FeatureFlag::PromptCacheExpiryWarning,
+    FeatureFlag::PinnedTabs,
+    FeatureFlag::ContextWindowUsageBreakdown,
+    FeatureFlag::CloudRunners,
+    FeatureFlag::WaitForEventsParentRegistration,
+    FeatureFlag::LocalLanSessionShare,
     FeatureFlag::JupyterNotebookRendering,
     FeatureFlag::MultiLevelOrchestration,
     FeatureFlag::McpJsonTreeView,
@@ -1183,11 +1197,18 @@ impl FeatureFlag {
             MarkdownTables => {
                 Some("Enables rendering and interaction support for markdown tables in notebooks.")
             }
+            OzIdentityFederation => Some("Enables automatic authentication from Oz to AWS and GCP"),
             SettingsFile => Some(
                 "Enables configuring Warp via a user-editable `settings.toml` file, with hot reload and error reporting for invalid values.",
             ),
             GitOperationsInCodeReview => Some(
                 "Enables commit, push, and create-PR actions directly from the code review panel.",
+            ),
+            AsyncFind => Some(
+                "Runs terminal find on a background thread to keep the UI responsive while searching large outputs.",
+            ),
+            LocalLanSessionShare => Some(
+                "Enables sharing a live terminal pane over the local network (LAN or Tailscale) via a URL secret, without Warp cloud as the relay.",
             ),
             _ => None,
         }

@@ -1,0 +1,29 @@
+=== Automated residuals Fri Jul 31 08:17:14 KST 2026 ===
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.79s
+     Running unittests src/lib.rs (/Users/lt-018/.cache/cargo-target/debug/deps/warp-944b7a48782f3ca4)
+
+running 1 test
+test ai::local_runtime_bridge::tests::todo_tools_are_always_available_and_kept_in_plan_mode ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5514 filtered out; finished in 0.04s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.70s
+     Running unittests src/lib.rs (/Users/lt-018/.cache/cargo-target/debug/deps/warp-944b7a48782f3ca4)
+
+running 1 test
+test ai::local_todos::tests::t10_hydrate_from_tasks_replay ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5514 filtered out; finished in 0.04s
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.70s
+     Running unittests src/lib.rs (/Users/lt-018/.cache/cargo-target/debug/deps/warp-944b7a48782f3ca4)
+
+running 1 test
+test ai::local_todos::tests::e2e_t1_create_t2_replace_then_mark_complete ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 5514 filtered out; finished in 0.00s
+
+ M app/src/editor/view/model/mod.rs
+?? dan_docs/e2e_tests/feat-020-gui-smoke-20260731/
+?? dan_docs/notes.md
+?? dan_docs/temp.md

@@ -268,6 +268,14 @@ impl TerminalView {
                 self.auto_stop_sharing_on_cli_end = false;
                 self.stop_sharing_session(SharedSessionActionSource::FooterChip, ctx);
             }
+            #[cfg(not(target_family = "wasm"))]
+            UseAgentToolbarEvent::StartLocalLanShare => {
+                self.start_local_lan_share(ctx);
+            }
+            #[cfg(not(target_family = "wasm"))]
+            UseAgentToolbarEvent::StopLocalLanShare => {
+                self.stop_local_lan_share(ctx);
+            }
             UseAgentToolbarEvent::OpenRichInput => {
                 if self.has_active_cli_agent_input_session(ctx) {
                     self.close_cli_agent_rich_input_and_disable_auto_toggle(ctx);
@@ -1278,6 +1286,14 @@ impl UseAgentToolbar {
             AgentInputFooterEvent::StopRemoteControl => {
                 ctx.emit(UseAgentToolbarEvent::StopRemoteControl);
             }
+            #[cfg(not(target_family = "wasm"))]
+            AgentInputFooterEvent::StartLocalLanShare => {
+                ctx.emit(UseAgentToolbarEvent::StartLocalLanShare);
+            }
+            #[cfg(not(target_family = "wasm"))]
+            AgentInputFooterEvent::StopLocalLanShare => {
+                ctx.emit(UseAgentToolbarEvent::StopLocalLanShare);
+            }
             AgentInputFooterEvent::OpenRichInput => {
                 ctx.emit(UseAgentToolbarEvent::OpenRichInput);
             }
@@ -1380,6 +1396,12 @@ pub enum UseAgentToolbarEvent {
     },
     /// Stop remote control (stop the active shared session).
     StopRemoteControl,
+    /// Start a local LAN / Tailscale share for this pane.
+    #[cfg(not(target_family = "wasm"))]
+    StartLocalLanShare,
+    /// Stop the active local LAN / Tailscale share for this pane.
+    #[cfg(not(target_family = "wasm"))]
+    StopLocalLanShare,
     /// Open the rich input editor for composing a prompt.
     OpenRichInput,
     /// Hide the rich input editor (same as Escape).

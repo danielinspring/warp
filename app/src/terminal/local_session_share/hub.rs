@@ -1,0 +1,733 @@
+use std::collections::VecDeque;
+use std::net::{IpAddr, SocketAddr};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
+
+use session_sharing_protocol::common::{OrderedTerminalEventType, Scrollback, WindowSize};
+use session_sharing_protocol::viewer::DownstreamMessage;
+use tokio::net::TcpListener;
+use tokio::sync::{broadcast, oneshot};
+
+use super::protocol::{compress_pty_bytes, ordered_event_downstream, LocalShareGuestRequest};
+use super::secret::ShareSecret;
+use super::server;
+
+/// Environment variable consulted when [`LocalSessionShareHub::start`] is
+/// called without an explicit WASM bundle directory.
+pub const WASM_BUNDLE_DIR_ENV: &str = "WARP_LOCAL_SHARE_WASM_DIR";
+
+/// Maximum scrollback snapshot size served to local-share guests on join
+/// (PRODUCT.md P20). Older blocks are dropped from the front when capping.
+pub const LOCAL_SHARE_MAX_SCROLLBACK_BYTES: u64 = 10 * 1024 * 1024;
+
+/// Maximum size of the replay log of already-published events, kept so a guest
+/// that opens the link some time after the share started still receives the
+/// history it missed. Oldest frames are dropped once the log exceeds this.
+pub const LOCAL_SHARE_MAX_REPLAY_BYTES: usize = 8 * 1024 * 1024;
+
+const EVENT_BROADCAST_CAPACITY: usize = 256;
+
+/// How many Agent Mode turns are retained for late joiners. Agent answers are
+/// mirrored as whole-text snapshots, so this bounds memory independently of the
+/// byte-capped PTY replay log.
+const LOCAL_SHARE_MAX_AGENT_EXCHANGES: usize = 64;
+
+/// Serialized downstream frames published since the share started.
+///
+/// [`broadcast`] only delivers to receivers that already exist, so without this
+/// log everything the host did between "start share" and a guest opening the
+/// link would be invisible to that guest: the scrollback snapshot is frozen at
+/// share start, and the live stream begins at join.
+///
+/// `typed_input` is the host's current Warp input-editor text. It is kept here
+/// (under the same lock as join/publish) so late guests get the in-progress
+/// command without every keystroke bloating [`Self::frames`].
+///
+/// `agent_exchanges` holds the latest plain-text snapshot of each Agent Mode
+/// turn, newest last, for the same reason: an agent answer is re-published on
+/// every streamed token, so only the current text of each turn is retained.
+///
+/// Both are stamped with a shared monotonic sequence so [`Self::replay`] can
+/// re-emit them interleaved. Replaying every agent turn after every PTY frame
+/// would put agent blocks at the bottom of a rejoining guest's transcript no
+/// matter where they actually happened.
+#[derive(Default)]
+struct ReplayLog {
+    frames: VecDeque<(u64, String)>,
+    bytes: usize,
+    typed_input: String,
+    agent_exchanges: Vec<AgentExchangeSnapshot>,
+    next_seq: u64,
+}
+
+struct AgentExchangeSnapshot {
+    id: String,
+    /// Position of the turn's *first* publish in the frame stream. Streamed
+    /// updates keep it so a turn stays anchored where it started.
+    seq: u64,
+    json: String,
+}
+
+impl ReplayLog {
+    fn next_seq(&mut self) -> u64 {
+        let seq = self.next_seq;
+        self.next_seq = self.next_seq.saturating_add(1);
+        seq
+    }
+
+    fn push(&mut self, frame: String) {
+        let seq = self.next_seq();
+        self.bytes = self.bytes.saturating_add(frame.len());
+        self.frames.push_back((seq, frame));
+        // Keep the newest frame even if it alone is over budget.
+        while self.bytes > LOCAL_SHARE_MAX_REPLAY_BYTES && self.frames.len() > 1 {
+            if let Some((_, dropped)) = self.frames.pop_front() {
+                self.bytes = self.bytes.saturating_sub(dropped.len());
+            }
+        }
+    }
+
+    /// Returns false when `json` is already the retained snapshot for `id`, so
+    /// the caller can skip a redundant broadcast.
+    fn record_agent_exchange(&mut self, id: &str, json: String) -> bool {
+        if let Some(entry) = self.agent_exchanges.iter_mut().find(|entry| entry.id == id) {
+            if entry.json == json {
+                return false;
+            }
+            entry.json = json;
+            return true;
+        }
+        let seq = self.next_seq();
+        self.agent_exchanges.push(AgentExchangeSnapshot {
+            id: id.to_owned(),
+            seq,
+            json,
+        });
+        while self.agent_exchanges.len() > LOCAL_SHARE_MAX_AGENT_EXCHANGES {
+            self.agent_exchanges.remove(0);
+        }
+        true
+    }
+
+    /// PTY frames and agent turns merged back into publish order.
+    fn replay(&self) -> Vec<String> {
+        let mut merged: Vec<(u64, &str)> = self
+            .frames
+            .iter()
+            .map(|(seq, frame)| (*seq, frame.as_str()))
+            .chain(
+                self.agent_exchanges
+                    .iter()
+                    .map(|entry| (entry.seq, entry.json.as_str())),
+            )
+            .collect();
+        merged.sort_by_key(|(seq, _)| *seq);
+        merged
+            .into_iter()
+            .map(|(_, json)| json.to_owned())
+            .collect()
+    }
+}
+
+/// A live local session share, returned by [`LocalSessionShareHub::start`]
+/// and [`LocalSessionShareHub::rotate_secret`]. Holding onto this is not
+/// required to keep the share alive; the hub owns the lifetime.
+#[derive(Debug, Clone)]
+pub struct ShareHandle {
+    /// The full share URL, including the secret, for example
+    /// `http://192.168.1.23:51234/local-session/<secret>` (PRODUCT.md P5).
+    pub url: String,
+    pub secret: ShareSecret,
+    pub addr: SocketAddr,
+    /// True when a full Warp WASM bundle was resolved and will be served
+    /// instead of the built-in lite viewer.
+    pub has_wasm_viewer: bool,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum HubError {
+    #[error("a local session share is already active on this hub")]
+    AlreadyActive,
+    #[error("no local session share is active on this hub")]
+    NotActive,
+    #[error("failed to bind local session share listener on {addr}: {source}")]
+    Bind {
+        addr: SocketAddr,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to start local session share runtime: {0}")]
+    Runtime(#[source] std::io::Error),
+    #[error("failed to serialize session-sharing-protocol message: {0}")]
+    Serialize(#[source] serde_json::Error),
+}
+
+/// Shared, mutable state read by the axum handlers on every request. Kept
+/// separate from [`LocalSessionShareHub`] so it can be cheaply cloned into
+/// the router without exposing hub lifecycle methods to request handlers.
+pub(crate) struct ShareState {
+    secret: RwLock<Option<ShareSecret>>,
+    window_size: RwLock<WindowSize>,
+    scrollback: RwLock<Scrollback>,
+    next_event_no: AtomicUsize,
+    event_tx: broadcast::Sender<String>,
+    replay: Mutex<ReplayLog>,
+    /// Guest → host mutating requests (execute / write-to-pty).
+    guest_tx: async_channel::Sender<LocalShareGuestRequest>,
+    /// Optional directory containing `index.html`, `wasm/`, and `assets/` for
+    /// serving the Warp WASM viewer over the share URL.
+    wasm_bundle_dir: Option<PathBuf>,
+}
+
+impl ShareState {
+    fn new(
+        secret: ShareSecret,
+        wasm_bundle_dir: Option<PathBuf>,
+        guest_tx: async_channel::Sender<LocalShareGuestRequest>,
+    ) -> Self {
+        let (event_tx, _) = broadcast::channel(EVENT_BROADCAST_CAPACITY);
+        Self {
+            secret: RwLock::new(Some(secret)),
+            window_size: RwLock::new(WindowSize::default()),
+            scrollback: RwLock::new(Scrollback {
+                blocks: vec![],
+                is_alt_screen_active: false,
+            }),
+            next_event_no: AtomicUsize::new(0),
+            event_tx,
+            replay: Mutex::new(ReplayLog::default()),
+            guest_tx,
+            wasm_bundle_dir,
+        }
+    }
+
+    pub(crate) fn wasm_bundle_dir(&self) -> Option<&std::path::Path> {
+        self.wasm_bundle_dir.as_deref()
+    }
+
+    pub(crate) fn has_wasm_viewer(&self) -> bool {
+        self.wasm_bundle_dir
+            .as_ref()
+            .is_some_and(|dir| dir.join("index.html").is_file())
+    }
+
+    pub(crate) fn check_secret(&self, candidate: &str) -> bool {
+        self.secret
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .is_some_and(|secret| secret.matches(candidate))
+    }
+
+    fn set_secret(&self, secret: ShareSecret) {
+        *self
+            .secret
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(secret);
+    }
+
+    fn invalidate(&self) {
+        *self
+            .secret
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
+    pub(crate) fn window_size(&self) -> WindowSize {
+        *self
+            .window_size
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn set_window_size(&self, size: WindowSize) {
+        *self
+            .window_size
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = size;
+    }
+
+    pub(crate) fn scrollback(&self) -> Scrollback {
+        self.scrollback
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn set_scrollback(&self, scrollback: Scrollback) {
+        *self
+            .scrollback
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = scrollback;
+    }
+
+    /// Snapshots the replay log (and current typed input) and subscribes to
+    /// the live stream under the same lock [`Self::publish_downstream`] /
+    /// [`Self::publish_typed_input`] hold, so a joining guest sees every
+    /// frame published since the share started, each exactly once, plus the
+    /// host's in-progress input-editor text.
+    ///
+    /// Together with the scrollback snapshot (the session as of share start),
+    /// this gives a late guest the complete history: scrollback covers
+    /// everything before the share, the replay log everything after it.
+    pub(crate) fn join(&self) -> JoinSnapshot {
+        let replay = self
+            .replay
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        JoinSnapshot {
+            backlog: replay.replay(),
+            typed_input: replay.typed_input.clone(),
+            events: self.event_tx.subscribe(),
+        }
+    }
+
+    /// Forwards a guest mutating request to the host pane. Fails only if the
+    /// host has already stopped listening (share ending).
+    pub(crate) fn enqueue_guest_request(
+        &self,
+        request: LocalShareGuestRequest,
+    ) -> Result<(), HubError> {
+        self.guest_tx
+            .try_send(request)
+            .map_err(|_| HubError::NotActive)
+    }
+
+    fn publish_downstream(&self, message: DownstreamMessage) -> Result<(), HubError> {
+        let json = message.to_json().map_err(HubError::Serialize)?;
+        let mut replay = self
+            .replay
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        replay.push(json.clone());
+        // No active subscribers is fine — host may publish before guests join.
+        let _ = self.event_tx.send(json);
+        Ok(())
+    }
+
+    fn publish_event_type(&self, event_type: OrderedTerminalEventType) -> Result<(), HubError> {
+        let event_no = self.next_event_no.fetch_add(1, Ordering::SeqCst);
+        self.publish_downstream(ordered_event_downstream(event_no, event_type))
+    }
+
+    /// Publishes the host's current input-editor text to guests. Unlike PTY
+    /// frames this is not appended to the durable replay log — only the latest
+    /// value is retained for late joiners — because every keystroke would
+    /// otherwise dominate the log.
+    fn publish_typed_input(&self, text: String) -> Result<(), HubError> {
+        let json = typed_input_message_json(&text)?;
+        let mut replay = self
+            .replay
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if replay.typed_input == text {
+            return Ok(());
+        }
+        replay.typed_input = text;
+        let _ = self.event_tx.send(json);
+        Ok(())
+    }
+
+    /// Publishes one Agent Mode turn as plain text. Agent conversations are not
+    /// PTY output — they are native Warp UI — so without this mirror a guest
+    /// sees nothing at all while the host runs `/agent`.
+    fn publish_agent_exchange(&self, exchange: LocalShareAgentExchange) -> Result<(), HubError> {
+        let json = agent_exchange_message_json(&exchange)?;
+        let mut replay = self
+            .replay
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !replay.record_agent_exchange(&exchange.id, json.clone()) {
+            return Ok(());
+        }
+        let _ = self.event_tx.send(json);
+        Ok(())
+    }
+}
+
+/// Everything a newly connected guest needs to catch up, snapshotted under one
+/// lock so the join boundary has no gap and no duplicates.
+pub(crate) struct JoinSnapshot {
+    /// PTY frames and Agent Mode turn snapshots in publish order.
+    pub(crate) backlog: Vec<String>,
+    pub(crate) typed_input: String,
+    pub(crate) events: broadcast::Receiver<String>,
+}
+
+/// One Agent Mode turn, flattened to the plain text a guest can render.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalShareAgentExchange {
+    /// Stable per-turn id, so a streamed update replaces the previous snapshot
+    /// instead of appending a new block.
+    pub id: String,
+    /// The user's query, as shown on the host (including any `/agent` prefix).
+    pub query: String,
+    /// The agent's answer so far, flattened to markdown-ish plain text.
+    pub output: String,
+    /// True while the answer is still streaming.
+    pub running: bool,
+    /// Set while this turn is paused on the host's "OK if I run this?" card.
+    pub pending_action: Option<LocalShareAgentPendingAction>,
+}
+
+/// The agent tool call a turn is paused on, mirrored so a guest can approve or
+/// reject it instead of waiting for someone to be at the host machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalShareAgentPendingAction {
+    /// Host-side `AIAgentActionId`, echoed back with the guest's decision.
+    pub action_id: String,
+    /// `command`, `mcp_tool`, `file_edits` or `action`; picks the guest's icon
+    /// and decides whether the detail is editable before running.
+    pub kind: String,
+    /// The question the host card asks, e.g. "OK if I run this command…".
+    pub title: String,
+    /// The command line, tool call or edit summary the card is asking about.
+    pub detail: String,
+}
+
+pub(crate) fn agent_exchange_message_json(
+    exchange: &LocalShareAgentExchange,
+) -> Result<String, HubError> {
+    let pending_action = exchange.pending_action.as_ref().map(|pending| {
+        serde_json::json!({
+            "action_id": pending.action_id,
+            "kind": pending.kind,
+            "title": pending.title,
+            "detail": pending.detail,
+        })
+    });
+    serde_json::to_string(&serde_json::json!({
+        "LocalShareAgentExchange": {
+            "id": exchange.id,
+            "query": exchange.query,
+            "output": exchange.output,
+            "running": exchange.running,
+            "pending_action": pending_action,
+        }
+    }))
+    .map_err(HubError::Serialize)
+}
+
+/// JSON envelope for live typed-input mirrors. Kept as a free function so the
+/// WS join path can emit the same shape for the late-joiner snapshot without
+/// going through the publisher.
+pub(crate) fn typed_input_message_json(text: &str) -> Result<String, HubError> {
+    serde_json::to_string(&serde_json::json!({
+        "LocalShareTypedInput": { "text": text }
+    }))
+    .map_err(HubError::Serialize)
+}
+
+/// Cloneable handle for publishing host PTY/events into an active local share
+/// without holding the [`LocalSessionShareHub`] lock on the TerminalModel path.
+#[derive(Clone)]
+pub struct LocalShareEventPublisher {
+    state: Arc<ShareState>,
+}
+
+impl LocalShareEventPublisher {
+    /// Publishes raw host PTY output to connected guests (LZ4 size-prepended).
+    pub fn publish_pty_bytes(&self, bytes: &[u8]) -> Result<(), HubError> {
+        let compressed = compress_pty_bytes(bytes);
+        self.state
+            .publish_event_type(OrderedTerminalEventType::PtyBytesRead { bytes: compressed })
+    }
+
+    pub fn publish_event(&self, event_type: OrderedTerminalEventType) -> Result<(), HubError> {
+        self.state.publish_event_type(event_type)
+    }
+
+    /// Publishes the host's current Warp input-editor text for live mirroring.
+    pub fn publish_typed_input(&self, text: String) -> Result<(), HubError> {
+        self.state.publish_typed_input(text)
+    }
+
+    /// Publishes one Agent Mode turn as plain text for live mirroring.
+    pub fn publish_agent_exchange(
+        &self,
+        exchange: LocalShareAgentExchange,
+    ) -> Result<(), HubError> {
+        self.state.publish_agent_exchange(exchange)
+    }
+
+    pub fn set_window_size(&self, size: WindowSize) {
+        self.state.set_window_size(size);
+    }
+}
+
+/// The currently running share for a [`LocalSessionShareHub`], including the
+/// private tokio runtime that drives its axum server. Dropping (or explicitly
+/// tearing down) this struct stops accepting new connections.
+struct ActiveShare {
+    state: Arc<ShareState>,
+    addr: SocketAddr,
+    secret: ShareSecret,
+    /// Receiver for guest execute / write-to-pty requests. Taken once by the
+    /// host TerminalView when the share starts.
+    guest_rx: Option<async_channel::Receiver<LocalShareGuestRequest>>,
+    /// The tokio runtime driving the axum server for this share. We use a
+    /// private runtime per hub, mirroring `crates/http_server`, because the
+    /// local session share hub must be independently start/stoppable and is
+    /// not tied to the loopback-only `HttpServer` singleton.
+    runtime: tokio::runtime::Runtime,
+    shutdown: oneshot::Sender<()>,
+}
+
+/// Owns at most one active local network share (PRODUCT.md P3). A terminal
+/// pane will own one `LocalSessionShareHub` instance in a follow-up PR; this
+/// hub only knows about binding, secrets, and HTTP/WS serving, not panes.
+#[derive(Default)]
+pub struct LocalSessionShareHub {
+    active: Option<ActiveShare>,
+}
+
+impl LocalSessionShareHub {
+    pub fn new() -> Self {
+        Self { active: None }
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.active.is_some()
+    }
+
+    /// Returns the handle for the currently active share, if any, without
+    /// rotating the secret. Lets the host re-copy the current link
+    /// (PRODUCT.md P9).
+    pub fn current_handle(&self) -> Option<ShareHandle> {
+        self.active.as_ref().map(|active| ShareHandle {
+            url: build_url(active.addr, &active.secret),
+            secret: active.secret.clone(),
+            addr: active.addr,
+            has_wasm_viewer: active.state.has_wasm_viewer(),
+        })
+    }
+
+    /// Binds a new local session share on `bind_ip:port` (use port `0` for
+    /// an OS-assigned ephemeral port) and starts serving it. Fails if a
+    /// share is already active on this hub (PRODUCT.md P3) or if the address
+    /// cannot be bound (PRODUCT.md P8).
+    ///
+    /// When `wasm_bundle_dir` is `None`, falls back to
+    /// [`WASM_BUNDLE_DIR_ENV`] if set.
+    pub fn start(&mut self, bind_ip: IpAddr, port: u16) -> Result<ShareHandle, HubError> {
+        self.start_with_options(bind_ip, port, None)
+    }
+
+    /// Like [`start`](Self::start), but accepts an explicit WASM bundle
+    /// directory. When `wasm_bundle_dir` is `None`, falls back to
+    /// [`WASM_BUNDLE_DIR_ENV`].
+    pub fn start_with_options(
+        &mut self,
+        bind_ip: IpAddr,
+        port: u16,
+        wasm_bundle_dir: Option<PathBuf>,
+    ) -> Result<ShareHandle, HubError> {
+        if self.active.is_some() {
+            return Err(HubError::AlreadyActive);
+        }
+
+        let requested_addr = SocketAddr::new(bind_ip, port);
+        let std_listener =
+            std::net::TcpListener::bind(requested_addr).map_err(|source| HubError::Bind {
+                addr: requested_addr,
+                source,
+            })?;
+        std_listener
+            .set_nonblocking(true)
+            .map_err(|source| HubError::Bind {
+                addr: requested_addr,
+                source,
+            })?;
+        let addr = std_listener.local_addr().map_err(|source| HubError::Bind {
+            addr: requested_addr,
+            source,
+        })?;
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .map_err(HubError::Runtime)?;
+
+        let wasm_bundle_dir = resolve_wasm_bundle_dir(wasm_bundle_dir);
+        let has_wasm_viewer = wasm_bundle_dir
+            .as_ref()
+            .is_some_and(|dir| dir.join("index.html").is_file());
+        if !has_wasm_viewer {
+            log::info!(
+                "Local session share serving built-in lite viewer (set {WASM_BUNDLE_DIR_ENV} or Resources/local_share_wasm for full Warp WASM)"
+            );
+        }
+        let secret = ShareSecret::generate();
+        let (guest_tx, guest_rx) = async_channel::unbounded();
+        let state = Arc::new(ShareState::new(secret.clone(), wasm_bundle_dir, guest_tx));
+        let router = server::build_router(state.clone());
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        runtime.spawn(async move {
+            let listener = match TcpListener::from_std(std_listener) {
+                Ok(listener) => listener,
+                Err(err) => {
+                    log::error!("Failed to start local session share listener: {err}");
+                    return;
+                }
+            };
+
+            let result = axum::serve(listener, router)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await;
+            if let Err(err) = result {
+                log::error!("Local session share server exited with error: {err}");
+            }
+        });
+
+        let handle = ShareHandle {
+            url: build_url(addr, &secret),
+            secret: secret.clone(),
+            addr,
+            has_wasm_viewer,
+        };
+
+        self.active = Some(ActiveShare {
+            state,
+            addr,
+            secret,
+            guest_rx: Some(guest_rx),
+            runtime,
+            shutdown: shutdown_tx,
+        });
+
+        Ok(handle)
+    }
+
+    /// Immediately invalidates the current secret and tears down the server,
+    /// closing guest connections (PRODUCT.md P10, P11).
+    pub fn stop(&mut self) {
+        let Some(active) = self.active.take() else {
+            return;
+        };
+        // Invalidate first so any in-flight request racing the shutdown
+        // still gets rejected rather than served.
+        active.state.invalidate();
+        let _ = active.shutdown.send(());
+        // `shutdown_background` returns immediately and cancels outstanding
+        // tasks in the background, so `stop()` never blocks the caller.
+        active.runtime.shutdown_background();
+    }
+
+    /// Invalidates the current secret and issues a new one, keeping the same
+    /// bind address (PRODUCT.md P12). Guests on the old URL lose access and
+    /// are not silently migrated to the new secret.
+    pub fn rotate_secret(&mut self) -> Result<ShareHandle, HubError> {
+        let active = self.active.as_mut().ok_or(HubError::NotActive)?;
+        let new_secret = ShareSecret::generate();
+        active.state.set_secret(new_secret.clone());
+        active.secret = new_secret.clone();
+
+        Ok(ShareHandle {
+            url: build_url(active.addr, &new_secret),
+            secret: new_secret,
+            addr: active.addr,
+            has_wasm_viewer: active.state.has_wasm_viewer(),
+        })
+    }
+
+    /// Updates the window size advertised to guests on join and used for
+    /// subsequent Resize events the host may publish.
+    pub fn set_window_size(&self, size: WindowSize) -> Result<(), HubError> {
+        let active = self.active.as_ref().ok_or(HubError::NotActive)?;
+        active.state.set_window_size(size);
+        Ok(())
+    }
+
+    /// Sets the scrollback snapshot served to guests on
+    /// [`DownstreamMessage::JoinedSuccessfully`]. Oversized snapshots are
+    /// capped by dropping oldest blocks until under
+    /// [`LOCAL_SHARE_MAX_SCROLLBACK_BYTES`] (PRODUCT.md P20).
+    pub fn set_scrollback(&self, mut scrollback: Scrollback) -> Result<(), HubError> {
+        let active = self.active.as_ref().ok_or(HubError::NotActive)?;
+        cap_scrollback(&mut scrollback, LOCAL_SHARE_MAX_SCROLLBACK_BYTES);
+        active.state.set_scrollback(scrollback);
+        Ok(())
+    }
+
+    /// Returns a cloneable publisher for the active share, if any. Used by
+    /// [`TerminalModel`] to fan PTY bytes into the hub without owning the hub.
+    pub fn event_publisher(&self) -> Option<LocalShareEventPublisher> {
+        self.active.as_ref().map(|active| LocalShareEventPublisher {
+            state: active.state.clone(),
+        })
+    }
+
+    /// Takes the guest-request receiver for this share. Call once after
+    /// [`Self::start`] so the host pane can apply ExecuteCommand / WriteToPty.
+    pub fn take_guest_request_receiver(
+        &mut self,
+    ) -> Option<async_channel::Receiver<LocalShareGuestRequest>> {
+        self.active.as_mut()?.guest_rx.take()
+    }
+
+    /// Publishes raw host PTY output to connected guests. Bytes are LZ4
+    /// size-prepended to match the cloud sharer path.
+    pub fn publish_pty_bytes(&self, bytes: &[u8]) -> Result<(), HubError> {
+        let publisher = self.event_publisher().ok_or(HubError::NotActive)?;
+        publisher.publish_pty_bytes(bytes)
+    }
+
+    /// Publishes an ordered terminal event to connected guests.
+    pub fn publish_event(&self, event_type: OrderedTerminalEventType) -> Result<(), HubError> {
+        let publisher = self.event_publisher().ok_or(HubError::NotActive)?;
+        publisher.publish_event(event_type)
+    }
+}
+
+impl Drop for LocalSessionShareHub {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+fn build_url(addr: SocketAddr, secret: &ShareSecret) -> String {
+    let host = match addr.ip() {
+        IpAddr::V4(v4) => v4.to_string(),
+        IpAddr::V6(v6) => format!("[{v6}]"),
+    };
+    format!("http://{host}:{}/local-session/{secret}", addr.port())
+}
+
+fn resolve_wasm_bundle_dir(explicit: Option<PathBuf>) -> Option<PathBuf> {
+    explicit
+        .or_else(|| std::env::var_os(WASM_BUNDLE_DIR_ENV).map(PathBuf::from))
+        .or_else(bundled_wasm_dir_next_to_exe)
+        .filter(|dir| dir.join("index.html").is_file())
+}
+
+/// Looks for `Contents/Resources/local_share_wasm` next to a macOS app binary,
+/// or `local_share_wasm` beside the executable on other layouts.
+fn bundled_wasm_dir_next_to_exe() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe_dir = exe.parent()?;
+
+    let candidates = [
+        exe_dir.join("../Resources/local_share_wasm"),
+        exe_dir.join("local_share_wasm"),
+        exe_dir.join("../local_share_wasm"),
+    ];
+    candidates
+        .into_iter()
+        .find(|dir| dir.join("index.html").is_file())
+}
+
+/// Drops oldest scrollback blocks until `scrollback` fits under `max_bytes`.
+pub(crate) fn cap_scrollback(scrollback: &mut Scrollback, max_bytes: u64) {
+    while scrollback.num_bytes().as_u64() > max_bytes && !scrollback.blocks.is_empty() {
+        scrollback.blocks.remove(0);
+    }
+}
+
+#[cfg(test)]
+#[path = "hub_tests.rs"]
+mod tests;

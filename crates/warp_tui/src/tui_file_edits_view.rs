@@ -314,9 +314,9 @@ impl TuiFileEditsView {
             // Live actions stay executor-backed; registering a storage here
             // lets preprocessing seed the authoritative resolved diffs.
             let executor = action_model.as_ref(ctx).request_file_edits_executor(ctx);
-            executor.update(ctx, |executor, _| {
+            executor.update(ctx, |executor, ctx| {
                 let handle = TuiDiffStorageHandle::new(storage.clone());
-                executor.register_requested_edits(&action_id, Box::new(handle));
+                executor.register_requested_edits(&action_id, Box::new(handle), ctx);
             });
         }
 

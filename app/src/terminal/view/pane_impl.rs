@@ -703,6 +703,38 @@ impl BackingView for TerminalView {
             );
         }
 
+        #[cfg(not(target_family = "wasm"))]
+        if FeatureFlag::LocalLanSessionShare.is_enabled() {
+            if self.is_local_lan_share_active() {
+                if !items.is_empty() {
+                    items.push(MenuItem::Separator);
+                }
+                items.push(
+                    MenuItemFields::new("Copy local network share link")
+                        .with_on_select_action(TerminalAction::CopyLocalLanShareLink)
+                        .into_item(),
+                );
+                items.push(
+                    MenuItemFields::new("Rotate local network share link")
+                        .with_on_select_action(TerminalAction::RotateLocalLanShareLink)
+                        .into_item(),
+                );
+                items.push(
+                    MenuItemFields::new("Stop local network share")
+                        .with_on_select_action(TerminalAction::StopLocalLanShare)
+                        .into_item(),
+                );
+            } else if !shared_session_status.is_sharer_or_viewer() {
+                let bind_items = Self::local_lan_share_bind_menu_items();
+                if !bind_items.is_empty() {
+                    if !items.is_empty() {
+                        items.push(MenuItem::Separator);
+                    }
+                    items.extend(bind_items);
+                }
+            }
+        }
+
         // Split-pane related items.
         if self.split_pane_state(ctx).is_in_split_pane() {
             if !items.is_empty() {

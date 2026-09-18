@@ -1,23 +1,32 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::anyhow;
 use chrono::{DateTime, Local, TimeDelta};
 use futures::channel::oneshot;
+use local_agent_runtime::{ToolCallResult, ToolExecutionError};
 use uuid::Uuid;
 use warp_errors::report_error;
 #[cfg(not(target_family = "wasm"))]
 use warp_multi_agent_api as maa_api;
 use warp_multi_agent_api::response_event;
 use warpui::r#async::Timer;
-use warpui::{Entity, ModelContext, SingletonEntity};
+use warpui::{Entity, ModelContext, ModelHandle, SingletonEntity};
 
 use crate::ai::agent::api::{self, ConvertToAPITypeError, generate_multi_agent_output};
 use crate::ai::agent::conversation::AIConversationId;
-use crate::ai::agent::{AIIdentifiers, CancellationReason};
+use crate::ai::agent::{AIAgentActionId, AIIdentifiers, CancellationReason};
+use crate::ai::blocklist::action_model::{BlocklistAIActionEvent, BlocklistAIActionModel};
+use crate::ai::local_runtime_bridge::{
+    action_result_to_tool_call_result_client_actions, action_result_to_tool_result,
+    ToolExecutionRequest,
+};
 use crate::network::NetworkStatus;
 use crate::send_telemetry_from_ctx;
+use crate::BlocklistAIHistoryModel;
 use crate::server::retry_strategies::backoff_after_attempts;
 use crate::server::server_api::{AIApiError, ServerApiProvider};
 use crate::server::team_scope::RequestTeamScope;
@@ -299,11 +308,20 @@ pub struct ResponseStream {
     /// stream id remains stable.
     current_request_id: Option<Uuid>,
 
+    local_runtime_tool_loop: bool,
+    action_model: Option<ModelHandle<BlocklistAIActionModel>>,
+    pending_local_runtime_tool_results: HashMap<AIAgentActionId, PendingLocalRuntimeToolResult>,
+
     /// Captured once at construction, so retries keep the team the request started on.
     team_scope: RequestTeamScope,
 
     #[cfg(test)]
     suppress_request_spawn: bool,
+}
+
+struct PendingLocalRuntimeToolResult {
+    response_tx: oneshot::Sender<Result<ToolCallResult, ToolExecutionError>>,
+    request_id: String,
 }
 
 impl ResponseStream {
@@ -366,6 +384,9 @@ impl ResponseStream {
             error_event_emitted: false,
             deferred_retry_pending: false,
             current_request_id: Some(Uuid::new_v4()),
+            local_runtime_tool_loop: false,
+            action_model: None,
+            pending_local_runtime_tool_results: HashMap::new(),
             team_scope: RequestTeamScope::from_scope(&TeamlessScopeForTest),
             suppress_request_spawn: true,
         }
@@ -376,13 +397,64 @@ impl ResponseStream {
         ai_identifiers: AIIdentifiers,
         recovery: RecoveryBudget,
         team_scope: RequestTeamScope,
+        action_model: ModelHandle<BlocklistAIActionModel>,
         ctx: &mut ModelContext<Self>,
     ) -> Self {
         let (cancellation_tx, cancellation_rx) = oneshot::channel();
         let start_time = Local::now();
 
         let request_id = Uuid::new_v4();
-        Self::spawn_request(request_id, params.clone(), team_scope, cancellation_rx, ctx);
+        let local_runtime_tool_loop = params.ollama_config.is_some()
+            && warp_core::features::FeatureFlag::LocalOllamaRuntimeToolUse.is_enabled();
+
+        if local_runtime_tool_loop {
+            let params_clone = params.clone();
+            let (tool_request_tx, tool_request_rx) = async_channel::unbounded();
+            let ollama_config = params_clone
+                .ollama_config
+                .clone()
+                .expect("checked local runtime requires ollama_config");
+            // Resolve project/home/bundled skills on the UI thread for local discovery (feat-016).
+            let cwd_path = params_clone
+                .session_context
+                .current_working_directory()
+                .as_ref()
+                .map(|cwd| {
+                    warp_util::local_or_remote_path::LocalOrRemotePath::Local(
+                        std::path::PathBuf::from(cwd),
+                    )
+                });
+            let available_skills = crate::ai::skills::SkillManager::as_ref(ctx)
+                .get_skills_for_working_directory(cwd_path.as_ref(), ctx);
+            let _ = ctx.spawn(
+                async move {
+                    Ok(
+                        crate::ai::local_runtime_integration::run_with_local_runtime(
+                            ollama_config,
+                            params_clone,
+                            available_skills,
+                            tool_request_tx,
+                            cancellation_rx,
+                        ),
+                    )
+                },
+                move |me, stream, ctx| {
+                    me.handle_response_stream_result(request_id, stream, ctx);
+                },
+            );
+
+            ctx.spawn_stream_local(
+                tool_request_rx,
+                |me, request, ctx| me.handle_local_runtime_tool_request(request, ctx),
+                |_, _| {},
+            );
+
+            ctx.subscribe_to_model(&action_model, |me, _, event, ctx| {
+                me.handle_local_runtime_action_event(event, ctx);
+            });
+        } else {
+            Self::spawn_request(request_id, params.clone(), team_scope, cancellation_rx, ctx);
+        }
         Self {
             id: ResponseStreamId(Uuid::new_v4().to_string()),
             params,
@@ -399,6 +471,9 @@ impl ResponseStream {
             error_event_emitted: false,
             deferred_retry_pending: false,
             current_request_id: Some(request_id),
+            local_runtime_tool_loop,
+            action_model: local_runtime_tool_loop.then_some(action_model),
+            pending_local_runtime_tool_results: HashMap::new(),
             team_scope,
             #[cfg(test)]
             suppress_request_spawn: false,
@@ -407,6 +482,10 @@ impl ResponseStream {
 
     pub fn id(&self) -> &ResponseStreamId {
         &self.id
+    }
+
+    pub fn owns_tool_loop(&self) -> bool {
+        self.local_runtime_tool_loop
     }
 
     /// Returns true if we should attempt to resume the conversation after the stream finishes.
@@ -754,12 +833,151 @@ impl ResponseStream {
             return;
         };
         let _ = cancellation_tx.send(());
+        if self.local_runtime_tool_loop {
+            if let Some(action_model) = self.action_model.clone() {
+                action_model.update(ctx, |action_model, ctx| {
+                    action_model.cancel_all_pending_actions(conversation_id, Some(reason), ctx);
+                });
+            }
+            for (_, pending) in self.pending_local_runtime_tool_results.drain() {
+                let _ = pending
+                    .response_tx
+                    .send(Err(ToolExecutionError::ExecutionFailed(anyhow!(
+                        "Local runtime request was cancelled"
+                    ))));
+            }
+        }
         ctx.emit(ResponseStreamEvent::AfterStreamFinished {
             cancellation: Some(StreamCancellation {
                 reason,
                 conversation_id,
             }),
         });
+    }
+
+    fn handle_local_runtime_tool_request(
+        &mut self,
+        request: ToolExecutionRequest,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        if !self.local_runtime_tool_loop {
+            let _ = request
+                .response_tx
+                .send(Err(ToolExecutionError::ExecutionFailed(anyhow!(
+                    "Received local runtime tool request on a non-local stream"
+                ))));
+            return;
+        }
+
+        let Some(conversation_id) =
+            BlocklistAIHistoryModel::as_ref(ctx).conversation_for_response_stream(&self.id)
+        else {
+            let _ = request
+                .response_tx
+                .send(Err(ToolExecutionError::ExecutionFailed(anyhow!(
+                    "Could not find conversation for local runtime tool request"
+                ))));
+            return;
+        };
+
+        let action = match crate::ai::local_runtime_bridge::tool_call_to_ai_action_with_registry(
+            &request.call,
+            &request.task_id,
+            &request.registry,
+        ) {
+            Ok(action) => action,
+            Err(err) => {
+                let _ = request.response_tx.send(Err(err));
+                return;
+            }
+        };
+
+        let action_id = action.id.clone();
+        self.pending_local_runtime_tool_results.insert(
+            action_id,
+            PendingLocalRuntimeToolResult {
+                response_tx: request.response_tx,
+                request_id: request.request_id,
+            },
+        );
+
+        let Some(action_model) = self.action_model.clone() else {
+            if let Some(pending) = self.pending_local_runtime_tool_results.remove(&action.id) {
+                let _ = pending
+                    .response_tx
+                    .send(Err(ToolExecutionError::ExecutionFailed(anyhow!(
+                        "Missing action model for local runtime tool request"
+                    ))));
+            }
+            return;
+        };
+
+        action_model.update(ctx, |action_model, ctx| {
+            action_model.queue_actions(vec![action], conversation_id, ctx);
+        });
+    }
+
+    fn handle_local_runtime_action_event(
+        &mut self,
+        event: &BlocklistAIActionEvent,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        if !self.local_runtime_tool_loop {
+            return;
+        }
+
+        let BlocklistAIActionEvent::FinishedAction {
+            action_id,
+            conversation_id,
+            ..
+        } = event
+        else {
+            return;
+        };
+
+        let Some(pending) = self.pending_local_runtime_tool_results.remove(action_id) else {
+            return;
+        };
+
+        let Some(action_model) = self.action_model.clone() else {
+            let _ = pending
+                .response_tx
+                .send(Err(ToolExecutionError::ExecutionFailed(anyhow!(
+                    "Missing action model for local runtime tool result"
+                ))));
+            return;
+        };
+
+        let result = action_model.update(ctx, |action_model, _| {
+            action_model.take_finished_action_result(*conversation_id, action_id)
+        });
+
+        match result {
+            Some(result) => {
+                if let Some(actions) =
+                    action_result_to_tool_call_result_client_actions(&result, &pending.request_id)
+                {
+                    self.has_received_client_actions = true;
+                    ctx.emit(ResponseStreamEvent::ReceivedEvent(Consumable::new(Ok(
+                        warp_multi_agent_api::ResponseEvent {
+                            r#type: Some(response_event::Type::ClientActions(
+                                response_event::ClientActions { actions },
+                            )),
+                        },
+                    ))));
+                }
+                let _ = pending
+                    .response_tx
+                    .send(Ok(action_result_to_tool_result(&result)));
+            }
+            None => {
+                let _ = pending
+                    .response_tx
+                    .send(Err(ToolExecutionError::ExecutionFailed(anyhow!(
+                        "Finished action result was unavailable for local runtime tool"
+                    ))));
+            }
+        }
     }
 
     fn handle_response_stream_result(
@@ -864,7 +1082,9 @@ impl ResponseStream {
                     self.original_error = Some(format!("{e:?}"));
                 }
 
-                if matches!(self.begin_recovery(e, ctx), RecoveryOutcome::InFlight) {
+                if !self.local_runtime_tool_loop
+                    && matches!(self.begin_recovery(e, ctx), RecoveryOutcome::InFlight)
+                {
                     // Don't emit the error event, we're recovering in-request.
                     return;
                 }

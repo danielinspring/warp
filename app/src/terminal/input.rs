@@ -2975,6 +2975,11 @@ impl Input {
                 | AgentInputFooterEvent::StopRemoteControl => {
                     // Handled by UseAgentToolbar's subscription, not here.
                 }
+                #[cfg(not(target_family = "wasm"))]
+                AgentInputFooterEvent::StartLocalLanShare
+                | AgentInputFooterEvent::StopLocalLanShare => {
+                    // Handled by UseAgentToolbar's subscription, not here.
+                }
                 // These events are handled by UseAgentToolbar's subscription.
                 // The UseAgentToolbar shares this same AgentInputFooter instance,
                 // so its subscriber always fires alongside ours for every chip click.
@@ -3545,20 +3550,14 @@ impl Input {
         );
 
         ctx.subscribe_to_model(&ai_controller, |me, _, event, ctx| match event {
-            BlocklistAIControllerEvent::SentRequest {
-                contains_user_query: is_user_initiated,
-                is_queued_prompt,
-                ..
-            } => {
-                // Skip the buffer clear for queued prompts. The user may have typed new
-                // input while the agent was busy and we don't want to wipe it on auto-send.
-                if *is_user_initiated && !*is_queued_prompt {
-                    me.editor.update(ctx, |editor, ctx| {
-                        editor.system_clear_buffer(true, ctx);
-                    });
-                    ctx.notify();
-                }
-            }
+            // `SentRequest` used to clear the input buffer here. It intentionally no longer
+            // does: the submitted prompt stays in the input so a run that stalls, errors, or
+            // gets cancelled does not cost the user the prompt they just typed. The prompt has
+            // already been collected and sent by this point, so keeping it is display-only.
+            //
+            // Queued prompts were already exempt for a related reason — the user may have typed
+            // new input while the agent was busy, and auto-send must not wipe it.
+            BlocklistAIControllerEvent::SentRequest { .. } => {}
             BlocklistAIControllerEvent::ExportConversationToFile {
                 #[cfg_attr(target_family = "wasm", allow(unused))]
                 filename,
@@ -7742,6 +7741,85 @@ impl Input {
                 preserve_input,
             },
             true,
+            ctx,
+        )
+    }
+
+    /// Routes one submitted line from a shared session participant the way host
+    /// Enter would: `/agent …` and other slash or skill commands go to the AI
+    /// stack; while Agent View is already open, a plain line is a follow-up in
+    /// the current conversation; otherwise the line runs in the shell.
+    ///
+    /// [`Self::try_execute_command_on_behalf_of_shared_session_participant`]
+    /// alone writes the line straight to the PTY, so a guest's `/agent add …`
+    /// reaches the shell verbatim and comes back as `no such file or
+    /// directory: /agent`. Without the Agent View branch, a guest follow-up
+    /// like `what is this about?` also hits the shell (zsh glob / command not
+    /// found) instead of the waiting conversation.
+    ///
+    /// `/agent` itself still always starts a new conversation — that matches
+    /// the host slash-command definition.
+    ///
+    /// Returns `true` if the line was handled.
+    pub fn submit_line_on_behalf_of_shared_session_participant(
+        &mut self,
+        line: &str,
+        participant_id: ParticipantId,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        match self
+            .slash_command_model
+            .as_ref(ctx)
+            .detect_command(line, ctx)
+        {
+            SlashCommandEntryState::SlashCommand(detected_command) => {
+                // Some commands (e.g. /plan, /compact) report "not handled" to
+                // mean the whole line should go through as a plain prompt, so
+                // fall through rather than dropping it.
+                if self.execute_slash_command(
+                    &detected_command.command,
+                    detected_command.argument.as_ref(),
+                    SlashCommandTrigger::input(),
+                    /*is_queued_prompt*/ false,
+                    None,
+                    None,
+                    ctx,
+                ) {
+                    return true;
+                }
+            }
+            SlashCommandEntryState::SkillCommand(detected_skill) => {
+                if self.execute_skill_command(
+                    detected_skill.reference,
+                    detected_skill.argument,
+                    /*queued_query_id*/ None,
+                    /*conversation_id_override*/ None,
+                    ctx,
+                ) {
+                    return true;
+                }
+            }
+            SlashCommandEntryState::None | SlashCommandEntryState::Composing { .. } => {}
+        }
+
+        // Host already in Agent View: plain text is a follow-up, same as typing
+        // into the agent input and pressing Enter. Keeps `/agent` as "new
+        // conversation" while letting guests continue the open one.
+        if FeatureFlag::AgentMode.is_enabled()
+            && FeatureFlag::AgentView.is_enabled()
+            && self.agent_view_controller.as_ref(ctx).is_active()
+        {
+            let prompt = line.trim();
+            if !prompt.is_empty() {
+                self.submit_user_query_now(prompt.to_owned(), ctx);
+                return true;
+            }
+        }
+
+        self.try_execute_command_on_behalf_of_shared_session_participant(
+            line,
+            participant_id,
+            /*preserve_input*/ false,
             ctx,
         )
     }
@@ -17018,6 +17096,12 @@ impl View for Input {
             app,
         ) {
             ctx.set.insert(CAN_ATTACH_FILE_KEY);
+        }
+
+        #[cfg(not(target_family = "wasm"))]
+        {
+            ctx.set
+                .insert(model_lock.local_lan_share_status().as_keymap_context());
         }
 
         if model_lock

@@ -1,0 +1,15 @@
+.env
+.env.*
+credentials.json
+*.pem
+*.key
+*.p12
+*.pfx
+.npmrc
+.netrc
+.docker/config.json
+.aws/**
+.ssh/**
+.gnupg/**
+secrets/**
+private/**

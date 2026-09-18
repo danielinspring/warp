@@ -64,3 +64,4 @@ pub fn parse_current_url() -> Option<Url> {
 
     None
 }
+

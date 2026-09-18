@@ -46,6 +46,10 @@ pub struct RequestFileEditsExecutor {
     diff_storages: HashMap<AIAgentActionId, Box<dyn RegisteredDiffStorage>>,
     /// Set of action IDs where diff application failed.
     diff_application_failures: HashMap<AIAgentActionId, Vec1<DiffApplicationError>>,
+    /// Diffs that were computed before a CodeDiffView was registered (can happen for
+    /// local runtime edit_files tool calls, where the action is queued for execution
+    /// and the render path via ApplyFileDiffs ToolCall message may race).
+    pending_candidate_diffs: HashMap<AIAgentActionId, Vec<FileDiff>>,
     terminal_view_id: EntityId,
 }
 
@@ -61,6 +65,7 @@ impl RequestFileEditsExecutor {
             apply_diff_model,
             diff_storages: HashMap::new(),
             diff_application_failures: HashMap::new(),
+            pending_candidate_diffs: HashMap::new(),
             terminal_view_id,
         }
     }
@@ -129,7 +134,17 @@ impl RequestFileEditsExecutor {
         &mut self,
         action_id: &AIAgentActionId,
         storage: Box<dyn RegisteredDiffStorage>,
+        ctx: &mut ModelContext<Self>,
     ) {
+        if let Some(diffs) = self.pending_candidate_diffs.remove(action_id) {
+            let diff_session_type = match self.active_session.as_ref(ctx).session_type(ctx) {
+                Some(SessionType::WarpifiedRemote {
+                    host_id: Some(host_id),
+                }) => DiffSessionType::Remote(host_id.clone()),
+                _ => DiffSessionType::Local,
+            };
+            storage.set_candidate_diffs(diffs, diff_session_type, ctx);
+        }
         self.diff_storages.insert(action_id.clone(), storage);
     }
 
@@ -138,6 +153,7 @@ impl RequestFileEditsExecutor {
     pub(super) fn discard_pending(&mut self, action_id: &AIAgentActionId) {
         self.diff_storages.remove(action_id);
         self.diff_application_failures.remove(action_id);
+        self.pending_candidate_diffs.remove(action_id);
     }
 
     pub(super) fn execute(
@@ -278,14 +294,6 @@ impl RequestFileEditsExecutor {
     ) {
         tx.send(()).ok();
 
-        // Expected when the action reached a terminal result (e.g. was
-        // cancelled) mid-apply and its storage was discarded; a storage that
-        // was never registered still warns at execute time.
-        let Some(storage) = self.diff_storages.get(&id) else {
-            log::info!("No registered storage for RequestFileEdits action at apply completion");
-            return;
-        };
-
         let applied_diffs = match applied_diffs {
             Ok(diffs) if !diffs.is_empty() => diffs,
             Ok(_) => {
@@ -310,7 +318,6 @@ impl RequestFileEditsExecutor {
             .as_ref(ctx)
             .current_working_directory()
             .cloned();
-
         let shell_launch_data = self.active_session.as_ref(ctx).shell_launch_data(ctx);
 
         let mut diffs = Vec::with_capacity(applied_diffs.len());
@@ -324,8 +331,6 @@ impl RequestFileEditsExecutor {
             diffs.push(file_diff);
         }
 
-        // Set the session type so save/delete/create routes through the
-        // correct FileModel backend.
         let diff_session_type = match self.active_session.as_ref(ctx).session_type(ctx) {
             Some(SessionType::WarpifiedRemote {
                 host_id: Some(host_id),
@@ -333,7 +338,18 @@ impl RequestFileEditsExecutor {
             _ => DiffSessionType::Local,
         };
 
-        storage.set_candidate_diffs(diffs, diff_session_type, ctx);
+        if let Some(storage) = self.diff_storages.get(&id) {
+            storage.set_candidate_diffs(diffs, diff_session_type, ctx);
+        } else {
+            // No storage registered yet (common for local runtime edit_files where
+            // the execution queue/preprocess races with the ApplyFileDiffs render path
+            // that creates the CodeDiffView). Store for when register_requested_edits
+            // is called.
+            log::info!(
+                "Storing candidate diffs for RequestFileEdits {id} until storage is registered (local runtime)"
+            );
+            self.pending_candidate_diffs.insert(id, diffs);
+        }
     }
 
     fn generate_ai_identifiers(

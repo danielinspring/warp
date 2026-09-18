@@ -1,0 +1,61 @@
+{
+  "model": "qwen3-coder:latest",
+  "messages": [
+    {
+      "role": "system",
+      "content": "## Planning / todos\nUse update_todos to REPLACE the full pending list (not merge). Ids you omit are removed from pending — they are not completed. Use mark_todos_completed to finish items.\nYou also have read-only tools in real Warp; here only todo tools exist. Still create todos and mark complete as you progress."
+    },
+    {
+      "role": "user",
+      "content": "이 저장소에서 (1) README 의 첫 10줄 읽기, (2) TODO/FIXME 주석 grep, (3) 찾은 개수 요약 세 단계를 진행해. 시작할 때 todo 리스트를 만들고, 각 단계 끝날 때마다 완료 처리해."
+    }
+  ],
+  "temperature": 0,
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "update_todos",
+        "description": "REPLACE (do not merge) the entire pending todo list with the `todos` array you pass. Any id omitted from `todos` is REMOVED from pending — it is NOT completed and NOT kept. Do not re-include finished or dropped items. Use mark_todos_completed to move items to completed. Keep ids stable when only titles/descriptions change. Pass the full new pending list every time.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "todos": {
+              "type": "array",
+              "description": "todos",
+              "items": {
+                "type": "object"
+              }
+            }
+          },
+          "required": [
+            "todos"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "mark_todos_completed",
+        "description": "Mark one or more pending todos as completed by id. Call after finishing the corresponding work.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "completed_ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "completed_ids"
+            }
+          },
+          "required": [
+            "completed_ids"
+          ]
+        }
+      }
+    }
+  ],
+  "tool_choice": "auto"
+}

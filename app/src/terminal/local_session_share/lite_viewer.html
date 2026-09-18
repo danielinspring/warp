@@ -1,0 +1,3373 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Warp local session share</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%2300a2d8'/%3E%3Cpath d='M4 5l2.5 3L4 11' stroke='white' stroke-width='1.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M8.5 11h3.5' stroke='white' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E"
+    />
+    <style>
+      /* Palette mirrors app/src/themes/default_themes.rs (Light / Dark). */
+      :root {
+        color-scheme: light dark;
+        --bg: #ffffff;
+        --fg: #1b1b1f;
+        --muted: #6b7280;
+        --faint: #9aa1ab;
+        --line: #e7e9ec;
+        --hover: #f7f8fa;
+        --chrome-bg: #f4f5f7;
+        --accent: #00a2d8;
+        --ok: #10a778;
+        --err: #d1264c;
+        --chip: #eceef1;
+        --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas,
+          "Liberation Mono", monospace;
+
+        --a0: #212121;
+        --a1: #c30771;
+        --a2: #10a778;
+        --a3: #a89c14;
+        --a4: #008ec4;
+        --a5: #523c79;
+        --a6: #20a5ba;
+        --a7: #e0e0e0;
+        --a8: #212121;
+        --a9: #fb007a;
+        --a10: #5fd7af;
+        --a11: #f3e430;
+        --a12: #20bbfc;
+        --a13: #6855de;
+        --a14: #4fb8cc;
+        --a15: #f1f1f1;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0b0c0e;
+          --fg: #f1f1f1;
+          --muted: #8b949e;
+          --faint: #6a727c;
+          --line: #1e2126;
+          --hover: #131519;
+          --chrome-bg: #101216;
+          --accent: #19aad8;
+          --ok: #b4fa72;
+          --err: #ff8272;
+          --chip: #1b1e24;
+
+          --a0: #616161;
+          --a1: #ff8272;
+          --a2: #b4fa72;
+          --a3: #fefdc2;
+          --a4: #a5d5fe;
+          --a5: #ff8ffd;
+          --a6: #d0d1fe;
+          --a7: #f1f1f1;
+          --a8: #8e8e8e;
+          --a9: #ffc4bd;
+          --a10: #d6fcb9;
+          --a11: #fefdd5;
+          --a12: #c1e3fe;
+          --a13: #ffb1fe;
+          --a14: #e5e6fe;
+          --a15: #feffff;
+        }
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+      }
+
+      body {
+        display: flex;
+        flex-direction: column;
+        background: var(--bg);
+        color: var(--fg);
+        font: 13px/1.45 var(--mono);
+        -webkit-font-smoothing: antialiased;
+      }
+
+      #chrome {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        height: 40px;
+        padding: 0 14px;
+        border-bottom: 1px solid var(--line);
+        background: var(--chrome-bg);
+        user-select: none;
+      }
+      #chrome h1 {
+        margin: 0;
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: 0.01em;
+      }
+      #chrome .grow {
+        flex: 1 1 auto;
+      }
+      #title {
+        color: var(--muted);
+        max-width: 40vw;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        height: 22px;
+        padding: 0 9px;
+        border-radius: 11px;
+        background: var(--chip);
+        color: var(--muted);
+        font-size: 11px;
+        white-space: nowrap;
+      }
+      #status .dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--faint);
+      }
+      #status.ok .dot {
+        background: var(--ok);
+        animation: pulse 2s ease-in-out infinite;
+      }
+      #status.err .dot {
+        background: var(--err);
+      }
+      @keyframes pulse {
+        50% {
+          opacity: 0.35;
+        }
+      }
+
+      #blocks {
+        flex: 1 1 auto;
+        overflow: auto;
+        overscroll-behavior: contain;
+      }
+
+      .block {
+        position: relative;
+        padding: 9px 16px 11px 16px;
+        border-bottom: 1px solid var(--line);
+      }
+      .block:hover {
+        background: var(--hover);
+      }
+      .block::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: 2px;
+        background: transparent;
+      }
+      .block[data-state="fail"]::before {
+        background: var(--err);
+      }
+      .block[data-state="running"]::before {
+        background: var(--accent);
+      }
+
+      .bhead {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        min-height: 16px;
+        margin-bottom: 3px;
+        font-size: 11.5px;
+        color: var(--muted);
+      }
+      .bhead .cwd {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .bhead .git::before {
+        content: "⑂ ";
+      }
+      .bhead .grow {
+        flex: 1 1 auto;
+      }
+      .bhead .exit {
+        color: var(--err);
+      }
+      .bhead .live {
+        color: var(--accent);
+      }
+      .acts {
+        display: flex;
+        gap: 4px;
+        opacity: 0;
+        transition: opacity 0.1s ease-in;
+      }
+      .block:hover .acts,
+      .acts:focus-within {
+        opacity: 1;
+      }
+      .acts button {
+        font: inherit;
+        font-size: 11px;
+        color: var(--muted);
+        background: transparent;
+        border: 1px solid var(--line);
+        border-radius: 5px;
+        padding: 0 6px;
+        height: 18px;
+        cursor: pointer;
+      }
+      .acts button:hover {
+        color: var(--fg);
+        border-color: var(--faint);
+      }
+
+      .bcmd {
+        font-weight: 600;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .bout {
+        margin-top: 3px;
+      }
+      .bout:empty {
+        display: none;
+      }
+      .ln {
+        white-space: pre-wrap;
+        word-break: break-word;
+        min-height: 1.45em;
+      }
+      .notice {
+        color: var(--muted);
+        font-style: italic;
+      }
+
+      /* Agent Mode turns. These never touch the PTY, so they arrive as plain
+         text snapshots rather than as parsed terminal output. */
+      .block.agent .bcmd::before {
+        content: "agent";
+        display: inline-block;
+        margin-right: 8px;
+        padding: 0 6px;
+        border: 1px solid var(--accent);
+        border-radius: 5px;
+        color: var(--accent);
+        font-size: 11px;
+        font-weight: 600;
+        vertical-align: 1px;
+      }
+      .agentout {
+        margin-top: 6px;
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+        font-size: 13.5px;
+        line-height: 1.55;
+        color: var(--fg);
+        word-break: break-word;
+      }
+      .agentout:empty::before {
+        content: "thinking…";
+        color: var(--faint);
+        font-style: italic;
+        font-family: var(--mono);
+      }
+      .agentout > :first-child {
+        margin-top: 0;
+      }
+      .agentout > :last-child {
+        margin-bottom: 0;
+      }
+      .agentout h1,
+      .agentout h2,
+      .agentout h3,
+      .agentout h4 {
+        margin: 0.9em 0 0.35em;
+        font-weight: 700;
+        line-height: 1.3;
+        color: var(--fg);
+      }
+      .agentout h1 {
+        font-size: 1.35em;
+      }
+      .agentout h2 {
+        font-size: 1.2em;
+      }
+      .agentout h3 {
+        font-size: 1.08em;
+      }
+      .agentout h4 {
+        font-size: 1em;
+      }
+      .agentout p {
+        margin: 0.45em 0;
+      }
+      .agentout ul,
+      .agentout ol {
+        margin: 0.4em 0;
+        padding-left: 1.4em;
+      }
+      .agentout li {
+        margin: 0.15em 0;
+      }
+      .agentout li > ul,
+      .agentout li > ol {
+        margin: 0.1em 0;
+      }
+      .agentout strong {
+        font-weight: 700;
+      }
+      .agentout em {
+        font-style: italic;
+      }
+      .agentout code {
+        font-family: var(--mono);
+        font-size: 0.92em;
+        background: var(--chip);
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        padding: 0.05em 0.35em;
+      }
+      .agentout pre {
+        margin: 0.55em 0;
+        padding: 8px 10px;
+        overflow: auto;
+        background: var(--chip);
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        font-family: var(--mono);
+        font-size: 12.5px;
+        line-height: 1.45;
+        white-space: pre;
+      }
+      .agentout pre code {
+        background: transparent;
+        border: 0;
+        padding: 0;
+        font-size: inherit;
+      }
+      .agentout a {
+        color: var(--accent);
+        text-decoration: underline;
+      }
+      .agentout blockquote {
+        margin: 0.5em 0;
+        padding: 0.15em 0 0.15em 0.85em;
+        border-left: 3px solid var(--line);
+        color: var(--muted);
+      }
+      .agentout hr {
+        border: 0;
+        border-top: 1px solid var(--line);
+        margin: 0.8em 0;
+      }
+
+      /* Mirror of the host's "OK if I run this command?" card. Without it the
+         turn just stops mid-sentence for a guest, with no way to unblock it. */
+      .approval {
+        margin-top: 10px;
+        border: 1px solid var(--accent);
+        border-radius: 7px;
+        background: var(--chip);
+        padding: 9px 11px;
+      }
+      .approval.hidden {
+        display: none;
+      }
+      .atitle {
+        font-size: 12.5px;
+        font-weight: 600;
+        color: var(--fg);
+      }
+      .adetail {
+        margin-top: 7px;
+        padding: 6px 8px;
+        border: 1px solid var(--line);
+        border-radius: 5px;
+        background: var(--bg);
+        font-family: var(--mono);
+        font-size: 12.5px;
+        white-space: pre-wrap;
+        word-break: break-word;
+        outline: none;
+      }
+      .adetail[contenteditable="true"]:focus {
+        border-color: var(--accent);
+      }
+      .arow {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 9px;
+      }
+      .ahint {
+        flex: 1 1 auto;
+        color: var(--faint);
+        font-size: 11.5px;
+      }
+      .abtn {
+        flex: 0 0 auto;
+        padding: 4px 12px;
+        border: 1px solid var(--line);
+        border-radius: 5px;
+        background: transparent;
+        color: var(--fg);
+        font: inherit;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      .abtn:hover:enabled {
+        border-color: var(--accent);
+      }
+      .abtn.run {
+        border-color: var(--accent);
+        background: var(--accent);
+        color: var(--bg);
+        font-weight: 600;
+      }
+      .abtn:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      .divider {
+        padding: 6px 16px;
+        color: var(--faint);
+        font-size: 11.5px;
+        border-bottom: 1px solid var(--line);
+      }
+      .divider.history {
+        text-align: center;
+        position: sticky;
+        top: 0;
+        background: var(--bg);
+        z-index: 1;
+      }
+      .divider.history.more {
+        cursor: pointer;
+        color: var(--accent);
+      }
+      .divider.history.more:hover {
+        background: var(--hover);
+      }
+
+      /* Alternate screen: a fixed grid that takes over the whole view while a
+         full-screen app owns the host terminal. */
+      #screen {
+        display: none;
+        flex: 1 1 auto;
+        overflow: hidden;
+        padding: 6px 8px;
+        line-height: 1.2;
+      }
+      body.alt #screen {
+        display: block;
+      }
+      body.alt #blocks,
+      body.alt #footer,
+      body.alt #guestbar,
+      body.alt #jump {
+        display: none;
+      }
+      .srow {
+        white-space: pre;
+        height: 1.2em;
+      }
+      .cur {
+        background: var(--fg);
+        color: var(--bg);
+      }
+      .pill.hidden {
+        display: none;
+      }
+
+      #footer {
+        flex: 0 0 auto;
+        border-top: 1px solid var(--line);
+        background: var(--chrome-bg);
+        padding: 8px 16px;
+        max-height: 30vh;
+        overflow: auto;
+        color: var(--muted);
+      }
+      #footer.hidden {
+        display: none;
+      }
+      #caret {
+        display: inline-block;
+        width: 7px;
+        height: 1.1em;
+        vertical-align: text-bottom;
+        background: var(--accent);
+        opacity: 0.7;
+        animation: pulse 1.1s steps(1, end) infinite;
+      }
+      #typed {
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-weight: 600;
+        color: var(--muted);
+      }
+
+      /* The guest's own command line. Deliberately a sibling of #footer and
+         never re-parented by a render pass: moving a focused contenteditable
+         node blurs it, which is why the host mirror above cannot double as the
+         guest's input. */
+      #guestbar {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        padding: 9px 16px;
+        border-top: 1px solid var(--line);
+        background: var(--chrome-bg);
+        cursor: text;
+      }
+      #guestbar.off {
+        display: none;
+      }
+      #gsigil {
+        color: var(--accent);
+        font-weight: 600;
+      }
+      #ginput {
+        flex: 1 1 auto;
+        white-space: pre-wrap;
+        word-break: break-word;
+        color: var(--fg);
+        outline: none;
+        min-height: 1.2em;
+      }
+      #ginput:empty::before {
+        content: attr(data-placeholder);
+        color: var(--faint);
+      }
+      #ghint {
+        flex: 0 0 auto;
+        color: var(--faint);
+        font-size: 11.5px;
+      }
+
+      #jump {
+        position: fixed;
+        right: 18px;
+        bottom: 64px;
+        display: none;
+        align-items: center;
+        gap: 6px;
+        height: 28px;
+        padding: 0 12px;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: var(--chrome-bg);
+        color: var(--fg);
+        font: inherit;
+        font-size: 11.5px;
+        cursor: pointer;
+        box-shadow: 0 2px 10px rgb(0 0 0 / 18%);
+      }
+      #jump.show {
+        display: inline-flex;
+      }
+
+      #join {
+        position: fixed;
+        inset: 40px 0 0 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--bg);
+        z-index: 5;
+      }
+      #join.hidden {
+        display: none;
+      }
+      .jcard {
+        width: min(420px, 82vw);
+      }
+      .jrow {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+      }
+      .jmeta {
+        margin-top: 6px;
+        color: var(--faint);
+        font-size: 11.5px;
+      }
+      .jrow .grow {
+        flex: 1 1 auto;
+      }
+      #jphase {
+        font-weight: 600;
+      }
+      #jpct {
+        font-variant-numeric: tabular-nums;
+        color: var(--muted);
+      }
+      #jtime {
+        font-variant-numeric: tabular-nums;
+      }
+      #jbar {
+        margin-top: 8px;
+        height: 4px;
+        border-radius: 2px;
+        background: var(--chip);
+        overflow: hidden;
+      }
+      #jfill {
+        height: 100%;
+        width: 0;
+        border-radius: 2px;
+        background: var(--accent);
+        transition: width 0.18s ease-out;
+      }
+      #join.err #jfill {
+        background: var(--err);
+      }
+      #join.err #jphase {
+        color: var(--err);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="chrome">
+      <h1>Local session share</h1>
+      <span class="pill" id="status"><span class="dot"></span
+        ><span id="status-text">connecting…</span></span>
+      <span id="title"></span>
+      <span class="grow"></span>
+      <span class="pill hidden" id="mode">full-screen app</span>
+      <span class="pill" id="size"></span>
+      <span class="pill" id="acl">interactive</span>
+    </div>
+
+    <div id="blocks"></div>
+    <div id="screen"></div>
+
+    <div id="join">
+      <div class="jcard">
+        <div class="jrow">
+          <span id="jphase">Connecting…</span>
+          <span class="grow"></span>
+          <span id="jpct">0%</span>
+        </div>
+        <div id="jbar"><div id="jfill"></div></div>
+        <div class="jrow jmeta">
+          <span id="jdetail"></span>
+          <span class="grow"></span>
+          <span id="jtime">0.0s</span>
+        </div>
+      </div>
+    </div>
+
+    <div id="footer" class="hidden">
+      <div id="prompt"></div>
+      <span id="input"><span id="typed"></span><span id="caret"></span></span>
+    </div>
+
+    <div id="guestbar" class="off">
+      <span id="gsigil">❯</span>
+      <span
+        id="ginput"
+        contenteditable="true"
+        spellcheck="false"
+        role="textbox"
+        aria-label="Run a command on the host"
+        data-placeholder="run a command on the host…"
+      ></span>
+      <span id="ghint">Enter to run</span>
+    </div>
+
+    <button id="jump" type="button">↓ Jump to live</button>
+
+    <script>
+      // View-only guest for the local LAN share hub, used when a full Warp WASM
+      // bundle is not staged. It speaks session-sharing-protocol over same-origin
+      // WS (PTY bytes are LZ4 size-prepended, matching lz4_flex), and rebuilds
+      // Warp's block UI on the client:
+      //
+      //   * Scrollback blocks arrive as JSON `SerializedBlock`s. The full list is
+      //     kept client-side; only the newest few mount into the DOM at join, and
+      //     scrolling up pages in older ones.
+      //   * Live output is a raw PTY stream, so we parse it here: Warp's shell
+      //     hooks (DCS `ESC P $ d <hex> ST` / OSC 9278) carry Preexec, Precmd and
+      //     CommandFinished, which is exactly what the client itself uses to cut
+      //     the stream into blocks.
+      //   * Full-screen apps (vim, claude, top) switch to the alternate screen,
+      //     which addresses cells absolutely and so cannot live in the block
+      //     model. Those get a real fixed grid (`Screen`) that takes over the
+      //     view until the app exits.
+      (function () {
+        "use strict";
+
+        var MAX_BLOCKS = 400;
+        var MAX_LINES = 4000;
+        var MAX_PROMPT_LINES = 60;
+        var MAX_COLS = 20000;
+        // History arrives all at once on join, but mounting every block into the
+        // DOM up front is wasteful. Show a short tail first and reveal older
+        // pages when the guest scrolls up.
+        var INITIAL_VISIBLE_BLOCKS = 3;
+        var HISTORY_PAGE_SIZE = 5;
+        var SUCCESS_EXIT_CODES = [0, 130, 141, -1073741510];
+
+        /* ----------------------------------------------------------------- */
+        /* Small helpers                                                      */
+        /* ----------------------------------------------------------------- */
+
+        function escapeHtml(text) {
+          return text
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;");
+        }
+
+        function bytesFromJson(value) {
+          if (typeof value === "string") {
+            var bin = atob(value);
+            var out = new Uint8Array(bin.length);
+            for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+            return out;
+          }
+          var bytes = new Uint8Array(value.length);
+          for (var j = 0; j < value.length; j++) bytes[j] = value[j] & 0xff;
+          return bytes;
+        }
+
+        function decodeUtf8(bytes) {
+          return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+        }
+
+        // Share URLs are plain http on the LAN, which is not a secure context,
+        // so `crypto.randomUUID` is unavailable in Chrome. The id only has to be
+        // unique per guest, so fall back to `getRandomValues` (or `Math.random`).
+        function randomUuid() {
+          var webCrypto = window.crypto || window.msCrypto;
+          if (webCrypto && typeof webCrypto.randomUUID === "function") {
+            return webCrypto.randomUUID();
+          }
+          var bytes = new Uint8Array(16);
+          if (webCrypto && typeof webCrypto.getRandomValues === "function") {
+            webCrypto.getRandomValues(bytes);
+          } else {
+            for (var i = 0; i < 16; i++) {
+              bytes[i] = Math.floor(Math.random() * 256);
+            }
+          }
+          bytes[6] = (bytes[6] & 0x0f) | 0x40;
+          bytes[8] = (bytes[8] & 0x3f) | 0x80;
+          var hex = "";
+          for (var j = 0; j < 16; j++) {
+            hex += (bytes[j] + 0x100).toString(16).slice(1);
+          }
+          return [
+            hex.slice(0, 8),
+            hex.slice(8, 12),
+            hex.slice(12, 16),
+            hex.slice(16, 20),
+            hex.slice(20),
+          ].join("-");
+        }
+
+        function hexToString(hex) {
+          var bytes = new Uint8Array(hex.length >> 1);
+          for (var i = 0; i < bytes.length; i++) {
+            bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
+          }
+          return decodeUtf8(bytes);
+        }
+
+        function copyText(text) {
+          if (navigator.clipboard && window.isSecureContext) {
+            navigator.clipboard.writeText(text).catch(function () {});
+            return;
+          }
+          // Share URLs are plain http on the LAN, so the async clipboard API is
+          // usually unavailable; fall back to the legacy path.
+          var area = document.createElement("textarea");
+          area.value = text;
+          area.setAttribute("readonly", "");
+          area.style.position = "fixed";
+          area.style.opacity = "0";
+          document.body.appendChild(area);
+          area.select();
+          try {
+            document.execCommand("copy");
+          } catch (err) {
+            /* ignore */
+          }
+          document.body.removeChild(area);
+        }
+
+        // Minimal LZ4 block decoder (size-prepended = u32 LE uncompressed len).
+        function lz4DecompressSizePrepended(bytes) {
+          if (bytes.length < 4) throw new Error("lz4 input too short");
+          var size =
+            bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24);
+          return lz4BlockDecode(bytes.subarray(4), size >>> 0);
+        }
+
+        function lz4BlockDecode(src, uncompressedSize) {
+          var dst = new Uint8Array(uncompressedSize);
+          var s = 0;
+          var d = 0;
+          while (s < src.length) {
+            var token = src[s++];
+            var litLen = token >>> 4;
+            if (litLen === 15) {
+              var lb;
+              do {
+                lb = src[s++];
+                litLen += lb;
+              } while (lb === 255);
+            }
+            for (var i = 0; i < litLen; i++) dst[d++] = src[s++];
+            if (s >= src.length) break;
+            var offset = src[s++] | (src[s++] << 8);
+            if (offset === 0) throw new Error("lz4 invalid offset");
+            var matchLen = (token & 0xf) + 4;
+            if ((token & 0xf) === 15) {
+              var mb;
+              do {
+                mb = src[s++];
+                matchLen += mb;
+              } while (mb === 255);
+            }
+            var matchPos = d - offset;
+            for (var m = 0; m < matchLen; m++) dst[d++] = dst[matchPos++];
+          }
+          if (d !== uncompressedSize) throw new Error("lz4 size mismatch");
+          return dst;
+        }
+
+        /* ----------------------------------------------------------------- */
+        /* SGR styles                                                         */
+        /* ----------------------------------------------------------------- */
+
+        // Style 0 is "no styling at all" and renders without a wrapping span.
+        var styleList = [null];
+        var styleKeys = { "": 0 };
+        var styleCss = [""];
+
+        function defaultStyle() {
+          return {
+            fg: null,
+            bg: null,
+            bold: false,
+            dim: false,
+            italic: false,
+            underline: false,
+            strike: false,
+            inverse: false,
+          };
+        }
+
+        function styleKeyOf(style) {
+          if (
+            style.fg === null &&
+            style.bg === null &&
+            !style.bold &&
+            !style.dim &&
+            !style.italic &&
+            !style.underline &&
+            !style.strike &&
+            !style.inverse
+          ) {
+            return "";
+          }
+          return [
+            style.fg,
+            style.bg,
+            style.bold ? 1 : 0,
+            style.dim ? 1 : 0,
+            style.italic ? 1 : 0,
+            style.underline ? 1 : 0,
+            style.strike ? 1 : 0,
+            style.inverse ? 1 : 0,
+          ].join("|");
+        }
+
+        function cube(value) {
+          return value === 0 ? 0 : 55 + value * 40;
+        }
+
+        function xterm256(index) {
+          if (index < 16) return "var(--a" + index + ")";
+          if (index < 232) {
+            var n = index - 16;
+            var r = cube(Math.floor(n / 36) % 6);
+            var g = cube(Math.floor(n / 6) % 6);
+            var b = cube(n % 6);
+            return "rgb(" + r + "," + g + "," + b + ")";
+          }
+          var level = 8 + (index - 232) * 10;
+          return "rgb(" + level + "," + level + "," + level + ")";
+        }
+
+        function colorCss(color, isForeground) {
+          if (color === null) return isForeground ? "var(--fg)" : "var(--bg)";
+          if (typeof color === "number") return xterm256(color);
+          return color;
+        }
+
+        var MAX_STYLES = 8192;
+
+        function internStyle(style) {
+          var key = styleKeyOf(style);
+          if (key in styleKeys) return styleKeys[key];
+          // Truecolor gradients can mint a style per character; fall back to
+          // unstyled rather than growing the table without bound.
+          if (styleList.length >= MAX_STYLES) return 0;
+          var index = styleList.length;
+          var frozen = {
+            fg: style.fg,
+            bg: style.bg,
+            bold: style.bold,
+            dim: style.dim,
+            italic: style.italic,
+            underline: style.underline,
+            strike: style.strike,
+            inverse: style.inverse,
+          };
+          styleList.push(frozen);
+          styleKeys[key] = index;
+          styleCss.push(buildCss(frozen));
+          return index;
+        }
+
+        function buildCss(style) {
+          var fg = style.fg;
+          var bg = style.bg;
+          // Bold with one of the 8 base colors uses the bright variant, like
+          // most terminals (and Warp) do.
+          if (style.bold && typeof fg === "number" && fg < 8) fg += 8;
+          if (style.inverse) {
+            var swap = fg;
+            fg = bg;
+            bg = swap;
+            var css = "color:" + colorCss(fg, false) + ";";
+            css += "background:" + colorCss(bg, true) + ";";
+            return css + decorations(style);
+          }
+          var out = "";
+          if (fg !== null) out += "color:" + colorCss(fg, true) + ";";
+          if (bg !== null) out += "background:" + colorCss(bg, false) + ";";
+          return out + decorations(style);
+        }
+
+        function decorations(style) {
+          var out = "";
+          if (style.bold) out += "font-weight:600;";
+          if (style.dim) out += "opacity:.62;";
+          if (style.italic) out += "font-style:italic;";
+          // Deliberately skip SGR underline. Claude Code (and some other TUIs)
+          // leave SGR 4 set for the whole alternate screen and never send 24/0;
+          // native terminals paint the decoration inside the cell under the
+          // glyph ink so it disappears, but CSS `text-decoration` sits below
+          // the baseline and turns every row into a ruled line. Strikethrough
+          // does not have that failure mode, so keep it.
+          if (style.strike) out += "text-decoration:line-through;";
+          return out;
+        }
+
+        /* ----------------------------------------------------------------- */
+        /* Line buffer                                                        */
+        /* ----------------------------------------------------------------- */
+
+        function newLine() {
+          return { c: [], s: [] };
+        }
+
+        function LineBuffer(maxLines) {
+          this.lines = [newLine()];
+          this.row = 0;
+          this.col = 0;
+          this.maxLines = maxLines || MAX_LINES;
+          this.dirtyFrom = 0;
+          this.droppedSinceRender = 0;
+        }
+
+        LineBuffer.prototype.markDirty = function (row) {
+          if (row < this.dirtyFrom) this.dirtyFrom = row;
+        };
+
+        LineBuffer.prototype.isEmpty = function () {
+          for (var i = 0; i < this.lines.length; i++) {
+            if (this.lines[i].c.length > 0) return false;
+          }
+          return true;
+        };
+
+        LineBuffer.prototype.reset = function () {
+          this.lines = [newLine()];
+          this.row = 0;
+          this.col = 0;
+          this.dirtyFrom = 0;
+        };
+
+        LineBuffer.prototype.ensureRow = function () {
+          while (this.lines.length <= this.row) this.lines.push(newLine());
+        };
+
+        LineBuffer.prototype.write = function (text, styleIdx) {
+          this.ensureRow();
+          var line = this.lines[this.row];
+          while (line.c.length < this.col) {
+            line.c.push(" ");
+            line.s.push(0);
+          }
+          for (var i = 0; i < text.length; i++) {
+            if (this.col >= MAX_COLS) break;
+            line.c[this.col] = text[i];
+            line.s[this.col] = styleIdx;
+            this.col++;
+          }
+          this.markDirty(this.row);
+        };
+
+        LineBuffer.prototype.linefeed = function () {
+          this.row++;
+          this.col = 0;
+          this.ensureRow();
+          this.markDirty(this.row);
+          if (this.lines.length > this.maxLines) {
+            // Drop from the front and remember how many rows went away so the
+            // renderer can retire the matching DOM nodes instead of repainting
+            // the whole block.
+            var extra = this.lines.length - this.maxLines;
+            this.lines.splice(0, extra);
+            this.row = Math.max(0, this.row - extra);
+            this.droppedSinceRender += extra;
+            if (this.dirtyFrom !== Infinity) {
+              this.dirtyFrom = Math.max(0, this.dirtyFrom - extra);
+            }
+          }
+        };
+
+        LineBuffer.prototype.carriageReturn = function () {
+          this.col = 0;
+        };
+
+        LineBuffer.prototype.backspace = function () {
+          if (this.col > 0) this.col--;
+        };
+
+        LineBuffer.prototype.tab = function () {
+          var next = (this.col + 8) & ~7;
+          this.write(new Array(next - this.col + 1).join(" "), 0);
+        };
+
+        LineBuffer.prototype.moveTo = function (row, col) {
+          if (row !== null) {
+            this.row = Math.max(0, Math.min(row, this.lines.length - 1));
+          }
+          if (col !== null) this.col = Math.max(0, col);
+        };
+
+        LineBuffer.prototype.eraseInLine = function (mode) {
+          this.ensureRow();
+          var line = this.lines[this.row];
+          if (mode === 1) {
+            for (var i = 0; i < Math.min(this.col + 1, line.c.length); i++) {
+              line.c[i] = " ";
+              line.s[i] = 0;
+            }
+          } else if (mode === 2) {
+            line.c.length = 0;
+            line.s.length = 0;
+          } else {
+            line.c.length = Math.min(line.c.length, this.col);
+            line.s.length = line.c.length;
+          }
+          this.markDirty(this.row);
+        };
+
+        LineBuffer.prototype.eraseInDisplay = function (mode) {
+          if (mode === 2 || mode === 3) {
+            this.reset();
+            return;
+          }
+          if (mode === 1) {
+            for (var i = 0; i < this.row; i++) this.lines[i] = newLine();
+            this.eraseInLine(1);
+            this.markDirty(0);
+            return;
+          }
+          this.eraseInLine(0);
+          this.lines.length = this.row + 1;
+          this.markDirty(this.row);
+        };
+
+        LineBuffer.prototype.eraseChars = function (count) {
+          this.ensureRow();
+          var line = this.lines[this.row];
+          for (var i = this.col; i < Math.min(this.col + count, line.c.length); i++) {
+            line.c[i] = " ";
+            line.s[i] = 0;
+          }
+          this.markDirty(this.row);
+        };
+
+        LineBuffer.prototype.deleteChars = function (count) {
+          this.ensureRow();
+          var line = this.lines[this.row];
+          line.c.splice(this.col, count);
+          line.s.splice(this.col, count);
+          this.markDirty(this.row);
+        };
+
+        LineBuffer.prototype.toText = function () {
+          var out = [];
+          for (var i = 0; i < this.lines.length; i++) {
+            out.push(this.lines[i].c.join(""));
+          }
+          while (out.length && out[out.length - 1].trim() === "") out.pop();
+          return out.join("\n");
+        };
+
+        // `cursorCol` (-1 when there is no cursor on this row) is drawn as its
+        // own inverted cell, so it breaks the styled runs around it.
+        function renderLineHtml(line, cursorCol) {
+          if (cursorCol === undefined) cursorCol = -1;
+          var end = line.c.length;
+          while (end > 0 && line.c[end - 1] === " " && line.s[end - 1] === 0) {
+            end--;
+          }
+          if (cursorCol >= 0 && cursorCol + 1 > end) end = cursorCol + 1;
+          var html = "";
+          var i = 0;
+          while (i < end) {
+            if (i === cursorCol) {
+              html += '<span class="cur">' + escapeHtml(line.c[i] || " ") + "</span>";
+              i++;
+              continue;
+            }
+            var style = line.s[i];
+            var text = "";
+            var j = i;
+            while (j < end && j !== cursorCol && line.s[j] === style) {
+              text += line.c[j] === undefined ? " " : line.c[j];
+              j++;
+            }
+            html +=
+              style === 0
+                ? escapeHtml(text)
+                : '<span style="' + styleCss[style] + '">' + escapeHtml(text) + "</span>";
+            i = j;
+          }
+          return html;
+        }
+
+        // Repaints only the rows that changed since the last pass, so long-lived
+        // blocks don't rebuild their whole DOM on every PTY chunk.
+        function renderBuffer(container, buffer) {
+          while (buffer.droppedSinceRender > 0 && container.firstChild) {
+            container.removeChild(container.firstChild);
+            buffer.droppedSinceRender--;
+          }
+          buffer.droppedSinceRender = 0;
+
+          var lines = buffer.lines;
+          // Trailing empty lines are the cursor's row, not content.
+          var count = lines.length;
+          while (count > 0 && lines[count - 1].c.length === 0) count--;
+
+          var from = buffer.dirtyFrom;
+          if (from === Infinity) {
+            if (container.childNodes.length === count) return;
+            from = Math.min(container.childNodes.length, count);
+          }
+          for (var i = from; i < count; i++) {
+            var el = container.childNodes[i];
+            if (!el) {
+              el = document.createElement("div");
+              el.className = "ln";
+              container.appendChild(el);
+            }
+            el.innerHTML = renderLineHtml(lines[i]);
+          }
+          while (container.childNodes.length > count) {
+            container.removeChild(container.lastChild);
+          }
+          buffer.dirtyFrom = Infinity;
+        }
+
+        /* ----------------------------------------------------------------- */
+        /* Alternate screen grid                                              */
+        /* ----------------------------------------------------------------- */
+
+        function blankRow(cols) {
+          var line = newLine();
+          for (var i = 0; i < cols; i++) {
+            line.c.push(" ");
+            line.s.push(0);
+          }
+          return line;
+        }
+
+        // Fixed rows x cols grid with a scrolling region, used while the host
+        // runs a full-screen app. It exposes the same methods as LineBuffer so
+        // the parser sink can write to either, plus the absolute-addressing
+        // operations that only make sense on a real screen.
+        function Screen(rows, cols) {
+          this.isScreen = true;
+          this.rows = Math.max(1, rows || 24);
+          this.cols = Math.max(1, cols || 80);
+          this.reset();
+        }
+
+        Screen.prototype.reset = function () {
+          this.lines = [];
+          for (var i = 0; i < this.rows; i++) this.lines.push(blankRow(this.cols));
+          this.row = 0;
+          this.col = 0;
+          this.top = 0;
+          this.bottom = this.rows - 1;
+          this.saved = null;
+          this.wrapPending = false;
+          this.cursorVisible = true;
+          this.dirty = true;
+        };
+
+        Screen.prototype.resize = function (rows, cols) {
+          rows = Math.max(1, rows);
+          cols = Math.max(1, cols);
+          if (rows === this.rows && cols === this.cols) return;
+          this.rows = rows;
+          this.cols = cols;
+          // Reflowing a TUI's grid is meaningless: the app repaints on SIGWINCH,
+          // so start from a clean screen instead.
+          this.reset();
+        };
+
+        Screen.prototype.clampRow = function (row) {
+          return Math.max(0, Math.min(this.rows - 1, row));
+        };
+
+        Screen.prototype.clampCol = function (col) {
+          return Math.max(0, Math.min(this.cols - 1, col));
+        };
+
+        Screen.prototype.moveTo = function (row, col) {
+          if (row !== null) this.row = this.clampRow(row);
+          if (col !== null) this.col = this.clampCol(col);
+          this.wrapPending = false;
+        };
+
+        Screen.prototype.write = function (text, styleIdx) {
+          for (var i = 0; i < text.length; i++) {
+            // Wrapping is deferred: writing the last column leaves the cursor
+            // there until one more character arrives, like xterm.
+            if (this.wrapPending) {
+              this.col = 0;
+              this.linefeed();
+            }
+            var line = this.lines[this.row];
+            line.c[this.col] = text[i];
+            line.s[this.col] = styleIdx;
+            if (this.col + 1 >= this.cols) this.wrapPending = true;
+            else this.col++;
+          }
+          this.dirty = true;
+        };
+
+        Screen.prototype.linefeed = function () {
+          if (this.row === this.bottom) this.scrollUp(1);
+          else this.row = this.clampRow(this.row + 1);
+          this.wrapPending = false;
+          this.dirty = true;
+        };
+
+        Screen.prototype.reverseIndex = function () {
+          if (this.row === this.top) this.scrollDown(1);
+          else this.row = this.clampRow(this.row - 1);
+          this.wrapPending = false;
+          this.dirty = true;
+        };
+
+        Screen.prototype.carriageReturn = function () {
+          this.col = 0;
+          this.wrapPending = false;
+        };
+
+        Screen.prototype.backspace = function () {
+          if (this.col > 0) this.col--;
+          this.wrapPending = false;
+        };
+
+        Screen.prototype.tab = function () {
+          this.col = Math.min(this.cols - 1, (this.col + 8) & ~7);
+          this.wrapPending = false;
+        };
+
+        Screen.prototype.scrollUp = function (count) {
+          for (var i = 0; i < count; i++) {
+            this.lines.splice(this.top, 1);
+            this.lines.splice(this.bottom, 0, blankRow(this.cols));
+          }
+          this.dirty = true;
+        };
+
+        Screen.prototype.scrollDown = function (count) {
+          for (var i = 0; i < count; i++) {
+            this.lines.splice(this.bottom, 1);
+            this.lines.splice(this.top, 0, blankRow(this.cols));
+          }
+          this.dirty = true;
+        };
+
+        Screen.prototype.setScrollRegion = function (top, bottom) {
+          top = this.clampRow(top);
+          bottom = this.clampRow(bottom);
+          if (bottom <= top) {
+            this.top = 0;
+            this.bottom = this.rows - 1;
+          } else {
+            this.top = top;
+            this.bottom = bottom;
+          }
+          this.moveTo(0, 0);
+          this.dirty = true;
+        };
+
+        Screen.prototype.eraseCells = function (row, from, to, styleIdx) {
+          var line = this.lines[row];
+          if (!line) return;
+          for (var i = Math.max(0, from); i <= to && i < this.cols; i++) {
+            line.c[i] = " ";
+            line.s[i] = styleIdx;
+          }
+          this.dirty = true;
+        };
+
+        Screen.prototype.eraseInLine = function (mode, styleIdx) {
+          styleIdx = styleIdx || 0;
+          if (mode === 1) this.eraseCells(this.row, 0, this.col, styleIdx);
+          else if (mode === 2) this.eraseCells(this.row, 0, this.cols - 1, styleIdx);
+          else this.eraseCells(this.row, this.col, this.cols - 1, styleIdx);
+        };
+
+        Screen.prototype.eraseInDisplay = function (mode, styleIdx) {
+          styleIdx = styleIdx || 0;
+          var row;
+          if (mode === 1) {
+            for (row = 0; row < this.row; row++) {
+              this.eraseCells(row, 0, this.cols - 1, styleIdx);
+            }
+            this.eraseCells(this.row, 0, this.col, styleIdx);
+            return;
+          }
+          if (mode === 2 || mode === 3) {
+            for (row = 0; row < this.rows; row++) {
+              this.eraseCells(row, 0, this.cols - 1, styleIdx);
+            }
+            return;
+          }
+          this.eraseCells(this.row, this.col, this.cols - 1, styleIdx);
+          for (row = this.row + 1; row < this.rows; row++) {
+            this.eraseCells(row, 0, this.cols - 1, styleIdx);
+          }
+        };
+
+        Screen.prototype.eraseChars = function (count, styleIdx) {
+          this.eraseCells(this.row, this.col, this.col + count - 1, styleIdx || 0);
+        };
+
+        Screen.prototype.deleteChars = function (count, styleIdx) {
+          var line = this.lines[this.row];
+          line.c.splice(this.col, count);
+          line.s.splice(this.col, count);
+          while (line.c.length < this.cols) {
+            line.c.push(" ");
+            line.s.push(styleIdx || 0);
+          }
+          this.dirty = true;
+        };
+
+        Screen.prototype.insertChars = function (count, styleIdx) {
+          var line = this.lines[this.row];
+          for (var i = 0; i < count; i++) {
+            line.c.splice(this.col, 0, " ");
+            line.s.splice(this.col, 0, styleIdx || 0);
+          }
+          line.c.length = this.cols;
+          line.s.length = this.cols;
+          this.dirty = true;
+        };
+
+        Screen.prototype.insertLines = function (count) {
+          if (this.row < this.top || this.row > this.bottom) return;
+          for (var i = 0; i < count; i++) {
+            this.lines.splice(this.bottom, 1);
+            this.lines.splice(this.row, 0, blankRow(this.cols));
+          }
+          this.dirty = true;
+        };
+
+        Screen.prototype.deleteLines = function (count) {
+          if (this.row < this.top || this.row > this.bottom) return;
+          for (var i = 0; i < count; i++) {
+            this.lines.splice(this.row, 1);
+            this.lines.splice(this.bottom, 0, blankRow(this.cols));
+          }
+          this.dirty = true;
+        };
+
+        Screen.prototype.saveCursor = function () {
+          this.saved = { row: this.row, col: this.col };
+        };
+
+        Screen.prototype.restoreCursor = function () {
+          if (!this.saved) return;
+          this.row = this.clampRow(this.saved.row);
+          this.col = this.clampCol(this.saved.col);
+          this.wrapPending = false;
+        };
+
+        /* ----------------------------------------------------------------- */
+        /* ANSI / VT parser                                                   */
+        /* ----------------------------------------------------------------- */
+
+        var S_GROUND = 0;
+        var S_ESC = 1;
+        var S_CSI = 2;
+        var S_OSC = 3;
+        var S_DCS_ENTRY = 4;
+        var S_DCS_PASS = 5;
+        var S_APC = 6;
+        var S_CHARSET = 7;
+
+        function AnsiParser(sink) {
+          this.sink = sink;
+          this.state = S_GROUND;
+          this.params = "";
+          this.inter = "";
+          this.str = "";
+          this.dcsInter = "";
+          this.dcsFinal = "";
+          this.sawEsc = false;
+        }
+
+        AnsiParser.prototype.write = function (text) {
+          var i = 0;
+          while (i < text.length) {
+            if (this.state === S_GROUND) {
+              var j = i;
+              while (j < text.length) {
+                var code = text.charCodeAt(j);
+                if (code < 0x20 || code === 0x7f) break;
+                j++;
+              }
+              if (j > i) {
+                this.sink.print(text.slice(i, j));
+                i = j;
+                continue;
+              }
+            }
+            this.step(text.charAt(i));
+            i++;
+          }
+        };
+
+        AnsiParser.prototype.step = function (ch) {
+          var code = ch.charCodeAt(0);
+          switch (this.state) {
+            case S_GROUND:
+              if (code === 0x1b) {
+                this.state = S_ESC;
+              } else if (code < 0x20) {
+                this.sink.execute(code);
+              }
+              return;
+
+            case S_ESC:
+              this.params = "";
+              this.inter = "";
+              if (ch === "[") this.state = S_CSI;
+              else if (ch === "]") {
+                this.str = "";
+                this.sawEsc = false;
+                this.state = S_OSC;
+              } else if (ch === "P") {
+                this.dcsInter = "";
+                this.dcsFinal = "";
+                this.state = S_DCS_ENTRY;
+              } else if (ch === "_" || ch === "^" || ch === "X") {
+                this.str = "";
+                this.sawEsc = false;
+                this.state = S_APC;
+              } else if (ch === "(" || ch === ")" || ch === "*" || ch === "+") {
+                this.state = S_CHARSET;
+              } else {
+                this.state = S_GROUND;
+                this.sink.esc(ch);
+              }
+              return;
+
+            case S_CHARSET:
+              this.state = S_GROUND;
+              return;
+
+            case S_CSI:
+              if (code >= 0x30 && code <= 0x3f) {
+                this.params += ch;
+              } else if (code >= 0x20 && code <= 0x2f) {
+                this.inter += ch;
+              } else if (code >= 0x40 && code <= 0x7e) {
+                this.sink.csi(this.params, this.inter, ch);
+                this.state = S_GROUND;
+              } else if (code < 0x20) {
+                this.sink.execute(code);
+              } else {
+                this.state = S_GROUND;
+              }
+              return;
+
+            case S_DCS_ENTRY:
+              if (code >= 0x30 && code <= 0x3f) {
+                this.params += ch;
+              } else if (code >= 0x20 && code <= 0x2f) {
+                this.dcsInter += ch;
+              } else if (code >= 0x40 && code <= 0x7e) {
+                this.dcsFinal = ch;
+                this.str = "";
+                this.sawEsc = false;
+                this.state = S_DCS_PASS;
+              } else {
+                this.state = S_GROUND;
+              }
+              return;
+
+            case S_OSC:
+            case S_DCS_PASS:
+            case S_APC:
+              if (this.sawEsc) {
+                this.sawEsc = false;
+                if (ch === "\\") {
+                  this.endString();
+                  return;
+                }
+                this.endString();
+                this.step(ch);
+                return;
+              }
+              if (code === 0x1b) {
+                this.sawEsc = true;
+                return;
+              }
+              if (code === 0x07) {
+                this.endString();
+                return;
+              }
+              if (this.str.length < 4 * 1024 * 1024) this.str += ch;
+              return;
+          }
+        };
+
+        AnsiParser.prototype.endString = function () {
+          var state = this.state;
+          this.state = S_GROUND;
+          if (state === S_OSC) this.sink.osc(this.str);
+          else if (state === S_DCS_PASS) {
+            this.sink.dcs(this.dcsInter, this.dcsFinal, this.str);
+          }
+          this.str = "";
+        };
+
+        /* ----------------------------------------------------------------- */
+        /* Terminal: parser sink that writes into a LineBuffer                */
+        /* ----------------------------------------------------------------- */
+
+        // Warp shell-integration markers, mirroring app/src/terminal/model/ansi.
+        var OSC_HOOK = "9278";
+        var OSC_IN_BAND_GENERATOR = "9277";
+
+        function Terminal(options) {
+          this.options = options;
+          this.style = defaultStyle();
+          this.styleIdx = 0;
+          // Erasing fills cells with the current background only, so it needs
+          // its own interned style.
+          this.eraseStyleIdx = 0;
+          this.parser = new AnsiParser(this);
+        }
+
+        Terminal.prototype.write = function (text) {
+          this.parser.write(text);
+        };
+
+        Terminal.prototype.buffer = function () {
+          return this.options.getBuffer();
+        };
+
+        Terminal.prototype.print = function (text) {
+          this.buffer().write(text, this.styleIdx);
+        };
+
+        Terminal.prototype.execute = function (code) {
+          var buffer = this.buffer();
+          switch (code) {
+            case 0x08:
+              buffer.backspace();
+              break;
+            case 0x09:
+              buffer.tab();
+              break;
+            case 0x0a:
+            case 0x0b:
+            case 0x0c:
+              buffer.linefeed();
+              break;
+            case 0x0d:
+              buffer.carriageReturn();
+              break;
+            default:
+              break;
+          }
+        };
+
+        function numericParams(params) {
+          var parts = params.replace(/^[?<>=!]/, "").split(/[;:]/);
+          var out = [];
+          for (var i = 0; i < parts.length; i++) {
+            var value = parseInt(parts[i], 10);
+            out.push(isNaN(value) ? 0 : value);
+          }
+          return out;
+        }
+
+        Terminal.prototype.csi = function (params, inter, final) {
+          var buffer = this.buffer();
+          var args = numericParams(params);
+          var count = args[0] > 0 ? args[0] : 1;
+          var isPrivate = params.charAt(0) === "?";
+
+          switch (final) {
+            case "m":
+              this.applySgr(params);
+              return;
+            case "A":
+              buffer.moveTo(buffer.row - count, null);
+              return;
+            case "B":
+              buffer.moveTo(buffer.row + count, null);
+              return;
+            case "C":
+              buffer.moveTo(null, buffer.col + count);
+              return;
+            case "D":
+              buffer.moveTo(null, buffer.col - count);
+              return;
+            case "E":
+              buffer.moveTo(buffer.row + count, 0);
+              return;
+            case "F":
+              buffer.moveTo(buffer.row - count, 0);
+              return;
+            case "G":
+            case "`":
+              buffer.moveTo(null, count - 1);
+              return;
+            case "d":
+              if (buffer.isScreen) buffer.moveTo(count - 1, null);
+              return;
+            case "H":
+            case "f":
+              // A block list has no grid, so outside the alternate screen only
+              // the column is honored and the row is left where it is.
+              buffer.moveTo(
+                buffer.isScreen ? count - 1 : null,
+                (args[1] > 0 ? args[1] : 1) - 1
+              );
+              return;
+            case "J":
+              buffer.eraseInDisplay(args[0] || 0, this.eraseStyleIdx);
+              return;
+            case "K":
+              buffer.eraseInLine(args[0] || 0, this.eraseStyleIdx);
+              return;
+            case "X":
+              buffer.eraseChars(count, this.eraseStyleIdx);
+              return;
+            case "P":
+              buffer.deleteChars(count, this.eraseStyleIdx);
+              return;
+            case "@":
+              if (buffer.isScreen) buffer.insertChars(count, this.eraseStyleIdx);
+              return;
+            case "L":
+              if (buffer.isScreen) buffer.insertLines(count);
+              return;
+            case "M":
+              if (buffer.isScreen) buffer.deleteLines(count);
+              return;
+            case "S":
+              if (buffer.isScreen) buffer.scrollUp(count);
+              return;
+            case "T":
+              if (buffer.isScreen) buffer.scrollDown(count);
+              return;
+            case "r":
+              if (buffer.isScreen) {
+                buffer.setScrollRegion(
+                  (args[0] > 0 ? args[0] : 1) - 1,
+                  (args[1] > 0 ? args[1] : buffer.rows) - 1
+                );
+              }
+              return;
+            case "s":
+              if (buffer.isScreen) buffer.saveCursor();
+              return;
+            case "u":
+              if (buffer.isScreen) buffer.restoreCursor();
+              return;
+            case "h":
+            case "l":
+              if (isPrivate) this.privateMode(args, final === "h");
+              return;
+            default:
+              return;
+          }
+        };
+
+        Terminal.prototype.privateMode = function (args, enabled) {
+          for (var i = 0; i < args.length; i++) {
+            var mode = args[i];
+            if (mode === 1049 || mode === 1047 || mode === 47) {
+              if (this.options.onAltScreen) this.options.onAltScreen(enabled);
+            } else if (mode === 25) {
+              var buffer = this.buffer();
+              if (buffer.isScreen) {
+                buffer.cursorVisible = enabled;
+                buffer.dirty = true;
+              }
+            }
+          }
+        };
+
+        Terminal.prototype.esc = function (ch) {
+          // Most ESC finals here are no-ops (charset, keypad mode, …) and
+          // resolving the target buffer can start a block, so bail out first.
+          if ("DEM78c".indexOf(ch) === -1) return;
+          var buffer = this.buffer();
+          switch (ch) {
+            case "D":
+              buffer.linefeed();
+              return;
+            case "E":
+              buffer.carriageReturn();
+              buffer.linefeed();
+              return;
+            case "M":
+              if (buffer.isScreen) buffer.reverseIndex();
+              return;
+            case "7":
+              if (buffer.isScreen) buffer.saveCursor();
+              return;
+            case "8":
+              if (buffer.isScreen) buffer.restoreCursor();
+              return;
+            case "c":
+              buffer.reset();
+              return;
+            default:
+              return;
+          }
+        };
+
+        Terminal.prototype.applySgr = function (params) {
+          var args = numericParams(params);
+          if (params === "") args = [0];
+          for (var i = 0; i < args.length; i++) {
+            var code = args[i];
+            if (code === 0) this.style = defaultStyle();
+            else if (code === 1) this.style.bold = true;
+            else if (code === 2) this.style.dim = true;
+            else if (code === 3) this.style.italic = true;
+            else if (code === 4) this.style.underline = true;
+            else if (code === 7) this.style.inverse = true;
+            else if (code === 9) this.style.strike = true;
+            else if (code === 21 || code === 22) {
+              this.style.bold = false;
+              this.style.dim = false;
+            } else if (code === 23) this.style.italic = false;
+            else if (code === 24) this.style.underline = false;
+            else if (code === 27) this.style.inverse = false;
+            else if (code === 29) this.style.strike = false;
+            else if (code >= 30 && code <= 37) this.style.fg = code - 30;
+            else if (code === 39) this.style.fg = null;
+            else if (code >= 40 && code <= 47) this.style.bg = code - 40;
+            else if (code === 49) this.style.bg = null;
+            else if (code >= 90 && code <= 97) this.style.fg = code - 90 + 8;
+            else if (code >= 100 && code <= 107) this.style.bg = code - 100 + 8;
+            else if (code === 38 || code === 48) {
+              var isForeground = code === 38;
+              var mode = args[i + 1];
+              if (mode === 5) {
+                var index = args[i + 2] || 0;
+                if (isForeground) this.style.fg = index;
+                else this.style.bg = index;
+                i += 2;
+              } else if (mode === 2) {
+                var rgb =
+                  "rgb(" +
+                  (args[i + 2] | 0) +
+                  "," +
+                  (args[i + 3] | 0) +
+                  "," +
+                  (args[i + 4] | 0) +
+                  ")";
+                if (isForeground) this.style.fg = rgb;
+                else this.style.bg = rgb;
+                i += 4;
+              }
+            }
+          }
+          this.styleIdx = internStyle(this.style);
+          if (this.style.bg === null) {
+            this.eraseStyleIdx = 0;
+          } else {
+            var erase = defaultStyle();
+            erase.bg = this.style.bg;
+            this.eraseStyleIdx = internStyle(erase);
+          }
+        };
+
+        Terminal.prototype.osc = function (data) {
+          var parts = data.split(";");
+          var kind = parts[0];
+
+          if (kind === OSC_HOOK) {
+            var marker = parts[1];
+            if (marker === "d" && parts[2]) {
+              this.emitHook(hexToString(parts[2]));
+            } else if (marker === "f" && parts[2]) {
+              this.emitHook(parts.slice(2).join(";"));
+            }
+            return;
+          }
+
+          if (kind === OSC_IN_BAND_GENERATOR) {
+            // Warp runs completion/generator commands in-band; their output is
+            // bracketed by 9277;A / 9277;B and never belongs to a user block.
+            if (this.options.onInBand) {
+              this.options.onInBand(parts[1] === "A");
+            }
+            return;
+          }
+
+          if ((kind === "0" || kind === "2") && this.options.onTitle) {
+            this.options.onTitle(parts.slice(1).join(";"));
+          }
+        };
+
+        Terminal.prototype.dcs = function (inter, final, data) {
+          if (inter !== "$") return;
+          if (final === "d") this.emitHook(hexToString(data));
+          else if (final === "f") this.emitHook(data);
+        };
+
+        Terminal.prototype.emitHook = function (json) {
+          if (!this.options.onHook) return;
+          var hook;
+          try {
+            hook = JSON.parse(json);
+          } catch (err) {
+            return;
+          }
+          if (hook && hook.hook) this.options.onHook(hook);
+        };
+
+        /* ----------------------------------------------------------------- */
+        /* Block model + rendering                                            */
+        /* ----------------------------------------------------------------- */
+
+        var blocksEl = document.getElementById("blocks");
+        var screenEl = document.getElementById("screen");
+        var modeEl = document.getElementById("mode");
+        var footerEl = document.getElementById("footer");
+        var promptEl = document.getElementById("prompt");
+        var inputEl = document.getElementById("input");
+        var typedEl = document.getElementById("typed");
+        var guestBarEl = document.getElementById("guestbar");
+        var ginputEl = document.getElementById("ginput");
+        var ghintEl = document.getElementById("ghint");
+        var statusEl = document.getElementById("status");
+        var statusTextEl = document.getElementById("status-text");
+        var sizeEl = document.getElementById("size");
+        var titleEl = document.getElementById("title");
+        var jumpEl = document.getElementById("jump");
+        var joinEl = document.getElementById("join");
+        var phaseEl = document.getElementById("jphase");
+        var pctEl = document.getElementById("jpct");
+        var detailEl = document.getElementById("jdetail");
+        var timeEl = document.getElementById("jtime");
+        var fillEl = document.getElementById("jfill");
+
+        // Join progress is stage-weighted: the handshake covers 0–70% and the
+        // scrollback replay (the only part with a real item count) the rest.
+        var progress = {
+          startedAt: Date.now(),
+          percent: 0,
+          visible: true,
+          timer: 0,
+
+          tick: function () {
+            var seconds = (Date.now() - this.startedAt) / 1000;
+            timeEl.textContent = seconds.toFixed(1) + "s";
+          },
+
+          to: function (percent, phase, detail) {
+            if (!this.visible) return;
+            // Never walk backwards: a reconnect restarts the phases but the bar
+            // should read as one continuous join.
+            this.percent = Math.max(this.percent, percent);
+            fillEl.style.width = this.percent + "%";
+            pctEl.textContent = Math.round(this.percent) + "%";
+            if (phase) phaseEl.textContent = phase;
+            detailEl.textContent = detail || "";
+          },
+
+          fail: function (phase, detail) {
+            if (!this.visible) return;
+            joinEl.className = "err";
+            phaseEl.textContent = phase;
+            detailEl.textContent = detail || "";
+          },
+
+          retrying: function (delayMs) {
+            if (!this.visible) return;
+            joinEl.className = "err";
+            phaseEl.textContent = "Reconnecting…";
+            detailEl.textContent =
+              "retrying in " + (delayMs / 1000).toFixed(1) + "s";
+          },
+
+          resume: function () {
+            if (!this.visible) return;
+            joinEl.className = "";
+          },
+
+          done: function () {
+            if (!this.visible) return;
+            this.to(100, "Live");
+            this.visible = false;
+            clearInterval(this.timer);
+            setTimeout(function () {
+              joinEl.className = "hidden";
+            }, 180);
+          },
+        };
+        progress.timer = setInterval(function () {
+          progress.tick();
+        }, 100);
+
+        function Block(kind) {
+          this.kind = kind; // "command" | "raw"
+          this.command = null; // plain text (live) — see commandBuffer for scrollback
+          this.commandBuffer = null;
+          this.buffer = new LineBuffer(MAX_LINES);
+          this.pwd = null;
+          this.git = null;
+          this.exitCode = null;
+          this.startedAt = null;
+          this.finishedAt = null;
+          this.running = false;
+          this.inBand = false;
+          this.notice = null;
+          this.el = null;
+          this.headDirty = true;
+        }
+
+        var view = {
+          blocks: [],
+          following: true,
+          home: null,
+          dirty: false,
+        };
+
+        // Pre-share history kept as serialized JSON until the guest scrolls up
+        // for it. `older` is oldest → newest; the visible tail lives in
+        // `view.blocks`.
+        var history = {
+          older: [],
+          atStart: true,
+          loading: false,
+          markerEl: null,
+          lastLoadAt: 0,
+        };
+
+        // `Bootstrapped` carries the real home dir, but it only fires at shell
+        // startup — a guest that joins mid-session never sees it, so fall back
+        // to the conventional home prefixes.
+        var HOME_LIKE = /^(\/Users\/[^/]+|\/home\/[^/]+|\/root|[A-Za-z]:\\Users\\[^\\]+)(?=[/\\]|$)/;
+
+        function shortenPath(path) {
+          if (!path) return "";
+          if (view.home && path.indexOf(view.home) === 0) {
+            return "~" + path.slice(view.home.length);
+          }
+          var match = HOME_LIKE.exec(path);
+          if (match) return "~" + path.slice(match[0].length);
+          return path;
+        }
+
+        function formatDuration(ms) {
+          if (ms < 1000) return (ms / 1000).toFixed(3) + "s";
+          if (ms < 60000) return (ms / 1000).toFixed(2) + "s";
+          var minutes = Math.floor(ms / 60000);
+          var seconds = Math.round((ms % 60000) / 1000);
+          return minutes + "m " + seconds + "s";
+        }
+
+        function formatClock(ts) {
+          var date = new Date(ts);
+          return date.toTimeString().slice(0, 8);
+        }
+
+        function exitSucceeded(code) {
+          return SUCCESS_EXIT_CODES.indexOf(code) !== -1;
+        }
+
+        function appendBlock(block) {
+          view.blocks.push(block);
+          while (view.blocks.length > MAX_BLOCKS) {
+            var dropped = view.blocks.shift();
+            if (dropped.el && dropped.el.parentNode) {
+              dropped.el.parentNode.removeChild(dropped.el);
+            }
+            if (dropped.agentId) delete agentBlocks[dropped.agentId];
+          }
+          scheduleRender();
+          return block;
+        }
+
+        function appendDivider(text) {
+          var el = document.createElement("div");
+          el.className = "divider";
+          el.textContent = text;
+          blocksEl.appendChild(el);
+        }
+
+        function blockIsRenderable(block) {
+          if (block.inBand) return false;
+          if (block.kind === "command") return true;
+          if (block.notice) return true;
+          return !block.buffer.isEmpty();
+        }
+
+        function createBlockEl(block) {
+          var el = document.createElement("article");
+          el.className = "block";
+
+          var head = document.createElement("div");
+          head.className = "bhead";
+          el.appendChild(head);
+
+          var cmd = document.createElement("div");
+          cmd.className = "bcmd";
+          el.appendChild(cmd);
+
+          var out = document.createElement("div");
+          out.className = "bout";
+          el.appendChild(out);
+
+          el.__head = head;
+          el.__cmd = cmd;
+          el.__out = out;
+          block.el = el;
+          return mountBlockEl(block, el);
+        }
+
+        // Blocks can become renderable out of order (an empty one stays out of
+        // the DOM until it has content), so splice each one in at its model
+        // position rather than appending. Agent blocks go through this too, so
+        // `view.blocks` is the single source of truth for on-screen order.
+        function mountBlockEl(block, el) {
+          var index = view.blocks.indexOf(block);
+          for (var i = index + 1; i < view.blocks.length; i++) {
+            var next = view.blocks[i].el;
+            if (next && next.parentNode === blocksEl) {
+              blocksEl.insertBefore(el, next);
+              return el;
+            }
+          }
+          blocksEl.appendChild(el);
+          return el;
+        }
+
+        function renderHead(block) {
+          var head = block.el.__head;
+          head.textContent = "";
+
+          function chip(className, text) {
+            if (!text) return;
+            var span = document.createElement("span");
+            span.className = className;
+            span.textContent = text;
+            head.appendChild(span);
+          }
+
+          chip("cwd", shortenPath(block.pwd));
+          chip("git", block.git);
+
+          var grow = document.createElement("span");
+          grow.className = "grow";
+          head.appendChild(grow);
+
+          if (block.running) {
+            chip("live", "running…");
+          } else if (block.exitCode !== null && !exitSucceeded(block.exitCode)) {
+            chip("exit", "exit " + block.exitCode);
+          }
+
+          if (block.startedAt) {
+            var end = block.finishedAt || Date.now();
+            chip("dur", formatDuration(Math.max(0, end - block.startedAt)));
+            chip("time", formatClock(block.startedAt));
+          }
+
+          if (block.kind === "command") {
+            var acts = document.createElement("span");
+            acts.className = "acts";
+            var copyCmd = document.createElement("button");
+            copyCmd.type = "button";
+            copyCmd.textContent = "command";
+            copyCmd.title = "Copy command";
+            copyCmd.addEventListener("click", function () {
+              copyText(blockCommandText(block));
+            });
+            var copyOut = document.createElement("button");
+            copyOut.type = "button";
+            copyOut.textContent = "output";
+            copyOut.title = "Copy output";
+            copyOut.addEventListener("click", function () {
+              copyText(block.buffer.toText());
+            });
+            acts.appendChild(copyCmd);
+            acts.appendChild(copyOut);
+            head.appendChild(acts);
+          }
+
+          var state = "ok";
+          if (block.running) state = "running";
+          else if (block.exitCode !== null && !exitSucceeded(block.exitCode)) {
+            state = "fail";
+          }
+          block.el.dataset.state = state;
+        }
+
+        function blockCommandText(block) {
+          if (block.command !== null) return block.command;
+          if (block.commandBuffer) return block.commandBuffer.toText();
+          return "";
+        }
+
+        function renderBlock(block) {
+          // Agent blocks own their own DOM (see upsertAgentExchange); they only
+          // live in view.blocks so they take their turn in the block order.
+          if (block.kind === "agent") return;
+          if (!blockIsRenderable(block)) return;
+          if (!block.el) {
+            createBlockEl(block);
+            block.headDirty = true;
+          }
+          if (block.headDirty) {
+            renderHead(block);
+            block.headDirty = false;
+          }
+          if (block.commandBuffer) {
+            renderBuffer(block.el.__cmd, block.commandBuffer);
+          } else if (block.el.__cmd.textContent !== (block.command || "")) {
+            block.el.__cmd.textContent = block.command || "";
+          }
+          renderBuffer(block.el.__out, block.buffer);
+          if (block.notice && !block.el.__notice) {
+            var notice = document.createElement("div");
+            notice.className = "notice";
+            notice.textContent = block.notice;
+            block.el.appendChild(notice);
+            block.el.__notice = notice;
+          } else if (block.notice && block.el.__notice) {
+            block.el.__notice.textContent = block.notice;
+          } else if (!block.notice && block.el.__notice) {
+            block.el.removeChild(block.el.__notice);
+            block.el.__notice = null;
+          }
+        }
+
+        // Agent Mode turns are mirrored by the host as plain-text snapshots
+        // keyed by exchange id, so each streamed update replaces the previous
+        // text in place instead of appending another block.
+        var agentBlocks = {};
+
+        function escapeHtml(text) {
+          return String(text)
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;");
+        }
+
+        /// Lightweight markdown → HTML for agent answers. Covers the subset
+        /// Warp's copy/export path typically emits: AT, lists, fences,
+        /// inline code/emphasis, links. Not a full CommonMark parser.
+        function renderMarkdown(source) {
+          if (!source) return "";
+          var text = String(source).replace(/\r\n?/g, "\n");
+          var lines = text.split("\n");
+          var html = [];
+          var i = 0;
+
+          function flushParagraph(buf) {
+            if (!buf.length) return;
+            html.push("<p>" + renderInline(buf.join(" ")) + "</p>");
+            buf.length = 0;
+          }
+
+          function renderInline(raw) {
+            var s = escapeHtml(raw);
+            // Code spans first so emphasis markers inside them stay literal.
+            s = s.replace(/`([^`]+)`/g, function (_, code) {
+              return "<code>" + code + "</code>";
+            });
+            s = s.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, function (_, label, url) {
+              return (
+                '<a href="' +
+                url +
+                '" target="_blank" rel="noopener noreferrer">' +
+                label +
+                "</a>"
+              );
+            });
+            s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+            s = s.replace(/__([^_]+)__/g, "<strong>$1</strong>");
+            s = s.replace(/\*([^*]+)\*/g, "<em>$1</em>");
+            s = s.replace(/_([^_]+)_/g, "<em>$1</em>");
+            return s;
+          }
+
+          var paragraph = [];
+          while (i < lines.length) {
+            var line = lines[i];
+
+            if (/^```/.test(line)) {
+              flushParagraph(paragraph);
+              i++;
+              var code = [];
+              while (i < lines.length && !/^```/.test(lines[i])) {
+                code.push(lines[i]);
+                i++;
+              }
+              if (i < lines.length) i++; // closing fence
+              html.push(
+                "<pre><code>" + escapeHtml(code.join("\n")) + "</code></pre>"
+              );
+              continue;
+            }
+
+            if (/^\s*$/.test(line)) {
+              flushParagraph(paragraph);
+              i++;
+              continue;
+            }
+
+            if (/^---+$|^\*\*\*+$|^___+$/.test(line.trim())) {
+              flushParagraph(paragraph);
+              html.push("<hr>");
+              i++;
+              continue;
+            }
+
+            var heading = /^(#{1,4})\s+(.+)$/.exec(line);
+            if (heading) {
+              flushParagraph(paragraph);
+              var level = heading[1].length;
+              html.push(
+                "<h" +
+                  level +
+                  ">" +
+                  renderInline(heading[2]) +
+                  "</h" +
+                  level +
+                  ">"
+              );
+              i++;
+              continue;
+            }
+
+            var quote = /^>\s?(.*)$/.exec(line);
+            if (quote) {
+              flushParagraph(paragraph);
+              var quotes = [];
+              while (i < lines.length) {
+                var q = /^>\s?(.*)$/.exec(lines[i]);
+                if (!q) break;
+                quotes.push(q[1]);
+                i++;
+              }
+              html.push("<blockquote><p>" + renderInline(quotes.join(" ")) + "</p></blockquote>");
+              continue;
+            }
+
+            var ul = /^(\s*)([-*+])\s+(.+)$/.exec(line);
+            var ol = /^(\s*)(\d+)[.)]\s+(.+)$/.exec(line);
+            if (ul || ol) {
+              flushParagraph(paragraph);
+              var ordered = !!ol;
+              var tag = ordered ? "ol" : "ul";
+              html.push("<" + tag + ">");
+              while (i < lines.length) {
+                var item = ordered
+                  ? /^(\s*)(\d+)[.)]\s+(.+)$/.exec(lines[i])
+                  : /^(\s*)([-*+])\s+(.+)$/.exec(lines[i]);
+                if (!item) break;
+                html.push("<li>" + renderInline(item[3]) + "</li>");
+                i++;
+              }
+              html.push("</" + tag + ">");
+              continue;
+            }
+
+            paragraph.push(line.trim());
+            i++;
+          }
+          flushParagraph(paragraph);
+          return html.join("");
+        }
+
+        // Builds the Reject / Run card once per agent block. The host only
+        // tells us *which* action is pending, so the card is reused and simply
+        // hidden between tool calls rather than rebuilt for each one.
+        function createApprovalCard(entry) {
+          var card = document.createElement("div");
+          card.className = "approval hidden";
+          var title = document.createElement("div");
+          title.className = "atitle";
+          var detail = document.createElement("div");
+          detail.className = "adetail";
+          detail.spellcheck = false;
+          var row = document.createElement("div");
+          row.className = "arow";
+          var hint = document.createElement("span");
+          hint.className = "ahint";
+          var reject = document.createElement("button");
+          reject.className = "abtn";
+          reject.type = "button";
+          reject.textContent = "Reject";
+          var run = document.createElement("button");
+          run.className = "abtn run";
+          run.type = "button";
+          run.textContent = "Run";
+          row.appendChild(hint);
+          row.appendChild(reject);
+          row.appendChild(run);
+          card.appendChild(title);
+          card.appendChild(detail);
+          card.appendChild(row);
+
+          reject.addEventListener("click", function () {
+            answerApproval(entry, "reject");
+          });
+          run.addEventListener("click", function () {
+            answerApproval(entry, "run");
+          });
+          detail.addEventListener("keydown", function (event) {
+            if (event.key !== "Enter" || event.shiftKey) return;
+            event.preventDefault();
+            answerApproval(entry, "run");
+          });
+
+          entry.approval = {
+            el: card,
+            title: title,
+            detail: detail,
+            hint: hint,
+            reject: reject,
+            run: run,
+            actionId: null,
+            answered: false,
+          };
+          return card;
+        }
+
+        function answerApproval(entry, decision) {
+          var card = entry.approval;
+          if (!card || !card.actionId || card.answered) return;
+          var command =
+            card.detail.contentEditable === "true"
+              ? (card.detail.textContent || "").replace(/\u00a0/g, " ")
+              : null;
+          var sent = sendAgentDecision(card.actionId, decision, command);
+          if (!sent) {
+            card.hint.textContent = "not connected";
+            return;
+          }
+          // Stay disabled until the host republishes the turn, so a slow host
+          // cannot be told to run the same command twice.
+          card.answered = true;
+          card.reject.disabled = true;
+          card.run.disabled = true;
+          card.detail.contentEditable = "false";
+          card.hint.textContent = decision === "run" ? "running…" : "rejecting…";
+        }
+
+        function renderApproval(entry, pending) {
+          var card = entry.approval;
+          if (!pending) {
+            card.el.className = "approval hidden";
+            card.actionId = null;
+            card.answered = false;
+            return;
+          }
+          if (card.actionId !== pending.action_id) {
+            card.actionId = pending.action_id;
+            card.answered = false;
+            card.reject.disabled = false;
+            card.run.disabled = false;
+            card.detail.textContent = pending.detail || "";
+            // Editing the text only makes sense when the host will actually run
+            // it; for an MCP call or an edit list it is a description.
+            var editable = pending.kind === "command";
+            card.detail.contentEditable = editable ? "true" : "false";
+            card.hint.textContent = editable ? "edit before running" : "";
+          }
+          card.title.textContent = pending.title || "Waiting for your approval";
+          card.el.className = "approval";
+        }
+
+        function upsertAgentExchange(payload) {
+          var id = payload && payload.id;
+          if (!id) return;
+          var entry = agentBlocks[id];
+          if (!entry) {
+            var el = document.createElement("article");
+            el.className = "block agent";
+            var head = document.createElement("div");
+            head.className = "bhead";
+            var cmd = document.createElement("div");
+            cmd.className = "bcmd";
+            var out = document.createElement("div");
+            out.className = "agentout";
+            el.appendChild(head);
+            el.appendChild(cmd);
+            el.appendChild(out);
+            entry = agentBlocks[id] = {
+              kind: "agent",
+              agentId: id,
+              inBand: false,
+              el: el,
+              head: head,
+              cmd: cmd,
+              out: out,
+            };
+            el.appendChild(createApprovalCard(entry));
+            appendBlock(entry);
+            mountBlockEl(entry, el);
+          }
+          entry.cmd.textContent = payload.query || "";
+          var markdown = payload.output || "";
+          if (entry.lastMarkdown !== markdown) {
+            entry.lastMarkdown = markdown;
+            entry.out.innerHTML = renderMarkdown(markdown);
+          }
+          var pending = payload.pending_action || null;
+          renderApproval(entry, pending);
+          entry.head.textContent = pending
+            ? "waiting for approval"
+            : payload.running
+              ? "responding…"
+              : "";
+          entry.head.className = payload.running ? "bhead live" : "bhead";
+          entry.el.dataset.state = payload.running ? "running" : "ok";
+          if (view.following) scrollToBottom();
+        }
+
+        function scheduleRender() {
+          if (view.dirty) return;
+          view.dirty = true;
+          requestAnimationFrame(function () {
+            view.dirty = false;
+            render();
+          });
+        }
+
+        function render() {
+          if (session.altScreen) {
+            renderScreen();
+            return;
+          }
+          for (var i = 0; i < view.blocks.length; i++) renderBlock(view.blocks[i]);
+          renderPrompt();
+          renderGuestBar();
+          if (view.following) scrollToBottom();
+        }
+
+        function renderScreen() {
+          var screen = session.screen;
+          if (!screen.dirty) return;
+          screen.dirty = false;
+          var lines = screen.lines;
+          while (screenEl.childNodes.length > lines.length) {
+            screenEl.removeChild(screenEl.lastChild);
+          }
+          for (var i = 0; i < lines.length; i++) {
+            var el = screenEl.childNodes[i];
+            if (!el) {
+              el = document.createElement("div");
+              el.className = "srow";
+              screenEl.appendChild(el);
+            }
+            var cursorCol =
+              screen.cursorVisible && i === screen.row ? screen.col : -1;
+            el.innerHTML = renderLineHtml(lines[i], cursorCol);
+          }
+        }
+
+        // The guest window is not the host's window, so scale the grid font to
+        // whatever makes the host's cols x rows fit here.
+        var charRatio = 0;
+
+        function measureCharRatio() {
+          if (charRatio) return charRatio;
+          var probe = document.createElement("span");
+          probe.textContent = "0000000000";
+          probe.style.cssText =
+            "position:absolute;visibility:hidden;white-space:pre;font:100px/1 var(--mono)";
+          document.body.appendChild(probe);
+          charRatio = probe.getBoundingClientRect().width / 1000;
+          document.body.removeChild(probe);
+          return charRatio || 0.6;
+        }
+
+        function fitScreen() {
+          var screen = session.screen;
+          var width = screenEl.clientWidth - 16;
+          var height = screenEl.clientHeight - 12;
+          if (width <= 0 || height <= 0) return;
+          var byWidth = width / (screen.cols * measureCharRatio());
+          var byHeight = height / (screen.rows * 1.2);
+          var size = Math.floor(Math.min(byWidth, byHeight) * 10) / 10;
+          screenEl.style.fontSize = Math.max(5, Math.min(16, size)) + "px";
+        }
+
+        window.addEventListener("resize", function () {
+          if (session.altScreen) fitScreen();
+        });
+
+        function renderPrompt() {
+          var buffer = session.promptBuffer;
+          var atPrompt = session.state === "prompt";
+          var hasPrompt = atPrompt && !buffer.isEmpty();
+          var hasTyped = session.typedInput.length > 0;
+          if (!atPrompt && !hasTyped) {
+            footerEl.className = "hidden";
+            return;
+          }
+          footerEl.className = "";
+          if (hasPrompt) {
+            renderBuffer(promptEl, buffer);
+          } else {
+            promptEl.textContent = "";
+          }
+          if (typedEl.textContent !== session.typedInput) {
+            typedEl.textContent = session.typedInput;
+          }
+          // The prompt renders as one block element per row, so the mirrored
+          // host text has to live inside the last row to continue on the
+          // prompt's line instead of wrapping onto its own. Re-parent on every
+          // pass: renderBuffer rewrites the rows it repaints.
+          var lastRow = hasPrompt ? promptEl.lastElementChild : null;
+          (lastRow || footerEl).appendChild(inputEl);
+        }
+
+        /// The guest command line is enabled whenever we are joined and the host
+        /// is not in a full-screen app (where raw keystrokes go to the PTY
+        /// instead). Enter runs the line; while a command is running it is sent
+        /// to the running program's stdin instead.
+        function renderGuestBar() {
+          var enabled = guest.joined && !session.altScreen;
+          guestBarEl.className = enabled ? "" : "off";
+          if (!enabled) return;
+          var running = session.state === "running";
+          ghintEl.textContent = running
+            ? "Enter to send · ⌃C to stop"
+            : "Enter to run · /agent new · follow-up while agent is open";
+          ginputEl.setAttribute(
+            "data-placeholder",
+            running
+              ? "send input to the running command…"
+              : "command, /agent <prompt>, or follow-up while agent is open…"
+          );
+        }
+
+        function scrollToBottom() {
+          blocksEl.scrollTop = blocksEl.scrollHeight;
+        }
+
+        blocksEl.addEventListener("scroll", function () {
+          var atBottom =
+            blocksEl.scrollTop + blocksEl.clientHeight >= blocksEl.scrollHeight - 12;
+          view.following = atBottom;
+          jumpEl.className = atBottom ? "" : "show";
+          // Near the top: pull in the next page of older history, if any.
+          if (blocksEl.scrollTop < 96) {
+            loadOlderHistory(HISTORY_PAGE_SIZE);
+          }
+        });
+
+        // A short history does not overflow the pane, so there is no scrollbar
+        // and no scroll event to page on. Wheel events fire either way, so treat
+        // "wheel up while already at the top" as a request for the next page.
+        blocksEl.addEventListener(
+          "wheel",
+          function (event) {
+            if (event.deltaY >= 0 || blocksEl.scrollTop > 0) return;
+            var now = Date.now();
+            // One page per flick rather than the whole history in one gesture.
+            if (now - history.lastLoadAt < 120) return;
+            history.lastLoadAt = now;
+            loadOlderHistory(HISTORY_PAGE_SIZE);
+          },
+          { passive: true }
+        );
+
+        jumpEl.addEventListener("click", function () {
+          view.following = true;
+          jumpEl.className = "";
+          scrollToBottom();
+        });
+
+        // Keeps the elapsed time on the in-flight block ticking.
+        setInterval(function () {
+          var block = session.current;
+          if (block && block.running && block.el) renderHead(block);
+        }, 250);
+
+        /* ----------------------------------------------------------------- */
+        /* Session state machine driven by Warp's shell hooks                 */
+        /* ----------------------------------------------------------------- */
+
+        var session = {
+          state: "idle", // "idle" | "prompt" | "running"
+          current: null,
+          promptContext: {},
+          promptBuffer: new LineBuffer(MAX_PROMPT_LINES),
+          scratch: new LineBuffer(MAX_PROMPT_LINES),
+          inBandDepth: 0,
+          altScreen: false,
+          screen: new Screen(24, 80),
+          hooksSeen: false,
+          // Read-only mirror of the host's Warp input editor.
+          typedInput: "",
+        };
+
+        // The guest's own input, kept separate from the host mirror above so
+        // neither can clobber the other.
+        var guest = {
+          joined: false,
+        };
+
+        var transport = {
+          ws: null,
+          viewerId: null,
+          bufferId: null,
+          ptySeq: 0,
+        };
+
+        function currentBlock() {
+          if (!session.current) {
+            var block = new Block("raw");
+            session.current = appendBlock(block);
+          }
+          return session.current;
+        }
+
+        function targetBuffer() {
+          if (session.altScreen) return session.screen;
+          if (session.inBandDepth > 0) return session.scratch;
+          if (session.state === "prompt") return session.promptBuffer;
+          return currentBlock().buffer;
+        }
+
+        function startCommandBlock(command) {
+          var block = new Block("command");
+          block.command = command;
+          block.pwd = session.promptContext.pwd || null;
+          block.git = session.promptContext.git || null;
+          block.startedAt = Date.now();
+          block.running = true;
+          session.current = appendBlock(block);
+          session.state = "running";
+          session.typedInput = "";
+          typedEl.textContent = "";
+          scheduleRender();
+        }
+
+        function finishCommandBlock(exitCode) {
+          var block = session.current;
+          if (block && block.running) {
+            block.running = false;
+            block.exitCode = typeof exitCode === "number" ? exitCode : null;
+            block.finishedAt = Date.now();
+            block.headDirty = true;
+          }
+          session.state = "idle";
+          scheduleRender();
+        }
+
+        function onHook(hook) {
+          session.hooksSeen = true;
+          var value = hook.value || {};
+          switch (hook.hook) {
+            case "Preexec":
+              startCommandBlock(value.command || "");
+              break;
+            case "CommandFinished":
+              finishCommandBlock(value.exit_code);
+              break;
+            case "Precmd":
+              if (value.pwd) session.promptContext.pwd = value.pwd;
+              session.promptContext.git =
+                value.git_branch || value.git_head || session.promptContext.git;
+              session.state = "prompt";
+              session.promptBuffer.reset();
+              scheduleRender();
+              break;
+            case "Bootstrapped":
+              if (value.home_dir) view.home = value.home_dir;
+              break;
+            case "Clear":
+              clearBlocks();
+              break;
+            default:
+              break;
+          }
+        }
+
+        function clearBlocks() {
+          for (var i = 0; i < view.blocks.length; i++) {
+            var el = view.blocks[i].el;
+            if (el && el.parentNode) el.parentNode.removeChild(el);
+          }
+          view.blocks = [];
+          session.current = null;
+          history.older = [];
+          history.atStart = true;
+          history.markerEl = null;
+          agentBlocks = {};
+          blocksEl.textContent = "";
+          scheduleRender();
+        }
+
+        function onAltScreen(enabled) {
+          if (session.altScreen === enabled) return;
+          session.altScreen = enabled;
+          document.body.className = enabled ? "alt" : "";
+          modeEl.className = enabled ? "pill" : "pill hidden";
+          if (enabled) {
+            session.screen.reset();
+            fitScreen();
+            ginputEl.blur();
+          } else {
+            screenEl.textContent = "";
+            var block = session.current;
+            if (block) {
+              // The grid is gone once the app exits, and it was never part of
+              // this block's output, so say so rather than leaving it blank.
+              block.notice =
+                "Full-screen application output is not captured in this block.";
+              block.headDirty = true;
+            }
+          }
+          scheduleRender();
+        }
+
+        var terminal = new Terminal({
+          getBuffer: targetBuffer,
+          onHook: onHook,
+          onAltScreen: onAltScreen,
+          onInBand: function (started) {
+            if (started) {
+              session.inBandDepth++;
+              if (session.current && session.state === "running") {
+                session.current.inBand = true;
+              }
+            } else if (session.inBandDepth > 0) {
+              session.inBandDepth--;
+            }
+          },
+          onTitle: function (title) {
+            titleEl.textContent = title || "";
+          },
+        });
+
+        /* ----------------------------------------------------------------- */
+        /* Scrollback (SerializedBlock JSON captured when the share started)  */
+        /* ----------------------------------------------------------------- */
+
+        function bufferFromAnsi(text, maxLines) {
+          var buffer = new LineBuffer(maxLines || MAX_LINES);
+          var offscreen = new Terminal({
+            getBuffer: function () {
+              return buffer;
+            },
+          });
+          offscreen.write(text);
+          return buffer;
+        }
+
+        function updateHistoryMarker() {
+          if (history.markerEl && history.markerEl.parentNode) {
+            history.markerEl.parentNode.removeChild(history.markerEl);
+          }
+          history.markerEl = null;
+          if (history.atStart && view.blocks.length === 0 && history.older.length === 0) {
+            return;
+          }
+          var el = document.createElement("div");
+          if (history.older.length > 0) {
+            el.className = "divider history more";
+            el.setAttribute("role", "button");
+            el.setAttribute("tabindex", "0");
+            el.textContent =
+              "↑ load " +
+              Math.min(HISTORY_PAGE_SIZE, history.older.length) +
+              " older blocks (" +
+              history.older.length +
+              " left)";
+            // Clicking is the fallback for anything that cannot generate a
+            // scroll or wheel event here (touch, keyboard-only, short history).
+            el.addEventListener("click", function () {
+              loadOlderHistory(HISTORY_PAGE_SIZE);
+            });
+          } else {
+            el.className = "divider history";
+            el.textContent = "— beginning of shared history —";
+            history.atStart = true;
+          }
+          history.markerEl = el;
+          blocksEl.insertBefore(el, blocksEl.firstChild);
+        }
+
+        // Mount already-parsed blocks at the front of the list, preserving the
+        // guest's scroll anchor so the viewport does not jump.
+        function prependBlocks(blocks) {
+          if (!blocks.length) return;
+          var prevHeight = blocksEl.scrollHeight;
+          var prevTop = blocksEl.scrollTop;
+          for (var i = blocks.length - 1; i >= 0; i--) {
+            view.blocks.unshift(blocks[i]);
+          }
+          for (var j = 0; j < blocks.length; j++) {
+            renderBlock(blocks[j]);
+          }
+          var delta = blocksEl.scrollHeight - prevHeight;
+          blocksEl.scrollTop = prevTop + delta;
+        }
+
+        function loadOlderHistory(count) {
+          if (history.loading) return;
+          if (!history.older.length) {
+            if (!history.atStart) {
+              history.atStart = true;
+              updateHistoryMarker();
+            }
+            return;
+          }
+          history.loading = true;
+          var take = Math.min(count || HISTORY_PAGE_SIZE, history.older.length);
+          var batch = history.older.splice(history.older.length - take, take);
+          var mounted = [];
+          for (var i = 0; i < batch.length; i++) {
+            var block = blockFromSerialized(batch[i]);
+            if (block) mounted.push(block);
+          }
+          prependBlocks(mounted);
+          if (!history.older.length) history.atStart = true;
+          updateHistoryMarker();
+          history.loading = false;
+        }
+
+        // Decode every scrollback entry up front (cheap JSON), mount only the
+        // newest tail, and keep the rest for scroll-up pagination.
+        function ingestScrollback(scrollback, onProgress, onDone) {
+          var rawBlocks = (scrollback && scrollback.blocks) || [];
+          var entries = [];
+          for (var i = 0; i < rawBlocks.length; i++) {
+            var raw = rawBlocks[i].raw;
+            if (!raw) continue;
+            try {
+              entries.push(JSON.parse(decodeUtf8(bytesFromJson(raw))));
+            } catch (err) {
+              /* skip corrupt entries */
+            }
+          }
+
+          var visibleCount = Math.min(INITIAL_VISIBLE_BLOCKS, entries.length);
+          history.older = entries.slice(0, Math.max(0, entries.length - visibleCount));
+          history.atStart = history.older.length === 0;
+          var toShow = entries.slice(entries.length - visibleCount);
+
+          if (!toShow.length) {
+            updateHistoryMarker();
+            onDone();
+            return;
+          }
+
+          var index = 0;
+          function step() {
+            var sliceStarted = performance.now();
+            while (index < toShow.length && performance.now() - sliceStarted < 12) {
+              var block = blockFromSerialized(toShow[index]);
+              index++;
+              if (block) appendBlock(block);
+            }
+            onProgress(index, toShow.length);
+            if (index < toShow.length) requestAnimationFrame(step);
+            else {
+              updateHistoryMarker();
+              onDone();
+            }
+          }
+          requestAnimationFrame(step);
+        }
+
+        function blockFromSerialized(serialized) {
+          var commandText = serialized.stylized_command
+            ? decodeUtf8(bytesFromJson(serialized.stylized_command))
+            : "";
+          var outputText = serialized.stylized_output
+            ? decodeUtf8(bytesFromJson(serialized.stylized_output))
+            : "";
+          if (!commandText.trim() && !outputText.trim()) return null;
+
+          var block = new Block(commandText.trim() ? "command" : "raw");
+          block.commandBuffer = bufferFromAnsi(commandText, 200);
+          block.buffer = bufferFromAnsi(outputText, MAX_LINES);
+          block.pwd = serialized.pwd || null;
+          block.git = serialized.git_branch_name || serialized.git_head || null;
+          block.exitCode =
+            typeof serialized.exit_code === "number" ? serialized.exit_code : null;
+          if (serialized.start_ts) {
+            var started = Date.parse(serialized.start_ts);
+            if (!isNaN(started)) block.startedAt = started;
+          }
+          if (serialized.completed_ts) {
+            var finished = Date.parse(serialized.completed_ts);
+            if (!isNaN(finished)) block.finishedAt = finished;
+          }
+          return block;
+        }
+
+        /* ----------------------------------------------------------------- */
+        /* Transport                                                          */
+        /* ----------------------------------------------------------------- */
+
+        function setStatus(text, kind) {
+          statusTextEl.textContent = text;
+          statusEl.className = "pill" + (kind ? " " + kind : "");
+        }
+
+        function setSize(cols, rows) {
+          sizeEl.textContent = cols && rows ? cols + "×" + rows : "";
+          if (!cols || !rows) return;
+          session.screen.resize(rows, cols);
+          if (session.altScreen) {
+            fitScreen();
+            scheduleRender();
+          }
+        }
+
+        function secretFromPath() {
+          var parts = location.pathname.split("/").filter(Boolean);
+          if (parts.length >= 2 && parts[0] === "local-session") return parts[1];
+          return null;
+        }
+
+        var decoder = new TextDecoder("utf-8", { fatal: false });
+        var joinedOnce = false;
+        var closedByServer = false;
+        var retryDelay = 1000;
+
+        function sendJson(payload) {
+          if (!transport.ws || transport.ws.readyState !== WebSocket.OPEN) return false;
+          transport.ws.send(JSON.stringify(payload));
+          return true;
+        }
+
+        function sendExecuteCommand(command) {
+          return sendJson({
+            // The hub routes on the socket's participant, not the buffer, so an
+            // id we have not been told yet must not block the guest's command.
+            ExecuteCommand: {
+              buffer_id: transport.bufferId || "local-share",
+              command: command,
+            },
+          });
+        }
+
+        // Agent approval has no cloud session-sharing equivalent, so it rides
+        // the same socket in a local-share-only envelope.
+        function sendAgentDecision(actionId, decision, command) {
+          var payload = { action_id: actionId, decision: decision };
+          if (typeof command === "string") payload.command = command;
+          return sendJson({ LocalShareAgentDecision: payload });
+        }
+
+        function sendWriteToPty(bytes) {
+          if (!transport.viewerId) return false;
+          var seq = transport.ptySeq++;
+          return sendJson({
+            WriteToPty: {
+              request_id: {
+                participant_id: transport.viewerId,
+                op_no: seq,
+              },
+              // serde for Vec<u8> accepts a number array.
+              bytes: Array.from(bytes),
+            },
+          });
+        }
+
+        function guestDraft() {
+          // contenteditable can insert NBSP and hard newlines; normalize both to
+          // the plain shell text the host expects.
+          return (ginputEl.textContent || "")
+            .replace(/\u00a0/g, " ")
+            .replace(/\n/g, "");
+        }
+
+        function submitGuestCommand() {
+          var command = guestDraft().trim();
+          ginputEl.textContent = "";
+          if (!command) return;
+          if (session.state === "running") {
+            // A command already owns the PTY, so the line is stdin for it
+            // rather than a new command to run.
+            sendWriteToPty(
+              Array.from(new TextEncoder().encode(command)).concat([0x0d])
+            );
+          } else {
+            sendExecuteCommand(command);
+          }
+          scheduleRender();
+        }
+
+        function focusGuestInput() {
+          if (guestBarEl.className === "off") return;
+          ginputEl.focus();
+        }
+
+        guestBarEl.addEventListener("mousedown", function (event) {
+          if (event.target === ginputEl) return;
+          // Clicking the sigil, the hint or the padding should still put the
+          // caret in the input rather than doing nothing.
+          event.preventDefault();
+          focusGuestInput();
+        });
+
+        ginputEl.addEventListener("keydown", function (event) {
+          if (event.key === "Enter" && !event.shiftKey) {
+            event.preventDefault();
+            submitGuestCommand();
+            return;
+          }
+          if (event.ctrlKey && !event.metaKey && !event.altKey) {
+            var code = event.key.toLowerCase().charCodeAt(0);
+            if (code >= 97 && code <= 122) {
+              event.preventDefault();
+              sendWriteToPty([code - 96]);
+            }
+          }
+        });
+
+        // Typing anywhere on the page while nothing else is focused should land
+        // in the guest's command line, the way it would in a terminal.
+        document.addEventListener("keydown", function (event) {
+          if (session.altScreen) return;
+          if (event.metaKey || event.ctrlKey || event.altKey) return;
+          if (event.target === ginputEl) return;
+          // An approval card's command is editable too; stealing focus mid-edit
+          // would silently drop the guest's changes.
+          if (event.target && event.target.contentEditable === "true") return;
+          if (event.key.length !== 1) return;
+          focusGuestInput();
+        });
+
+        // Alt-screen / long-running apps need raw keystrokes on the host PTY.
+        document.addEventListener("keydown", function (event) {
+          if (!session.altScreen) return;
+          if (event.metaKey || event.ctrlKey || event.altKey) {
+            // Pass through a few common control chords.
+            if (event.ctrlKey && !event.metaKey && !event.altKey) {
+              var code = event.key.toLowerCase().charCodeAt(0);
+              if (code >= 97 && code <= 122) {
+                event.preventDefault();
+                sendWriteToPty([code - 96]);
+              }
+            }
+            return;
+          }
+          var bytes = null;
+          if (event.key === "Enter") bytes = [0x0d];
+          else if (event.key === "Backspace") bytes = [0x7f];
+          else if (event.key === "Tab") bytes = [0x09];
+          else if (event.key === "Escape") bytes = [0x1b];
+          else if (event.key === "ArrowUp") bytes = [0x1b, 0x5b, 0x41];
+          else if (event.key === "ArrowDown") bytes = [0x1b, 0x5b, 0x42];
+          else if (event.key === "ArrowRight") bytes = [0x1b, 0x5b, 0x43];
+          else if (event.key === "ArrowLeft") bytes = [0x1b, 0x5b, 0x44];
+          else if (event.key.length === 1) {
+            bytes = Array.from(new TextEncoder().encode(event.key));
+          }
+          if (!bytes) return;
+          event.preventDefault();
+          sendWriteToPty(bytes);
+        });
+
+        // The first scrollback ingest mounts history across several animation
+        // frames. Anything that arrives meanwhile (replayed PTY frames, mirrored
+        // agent turns) belongs *after* that history, but would be spliced into
+        // the middle of it, so hold those messages until the ingest finishes.
+        var ingestingHistory = false;
+        var deferredMessages = [];
+
+        function flushDeferredMessages() {
+          ingestingHistory = false;
+          var queued = deferredMessages;
+          deferredMessages = [];
+          for (var i = 0; i < queued.length; i++) handleMessage(queued[i]);
+        }
+
+        function handleMessage(msg) {
+          if (ingestingHistory && !msg.JoinedSuccessfully) {
+            deferredMessages.push(msg);
+            return;
+          }
+
+          if (msg.LocalShareAgentExchange) {
+            upsertAgentExchange(msg.LocalShareAgentExchange);
+            return;
+          }
+
+          if (msg.LocalShareTypedInput) {
+            session.typedInput =
+              typeof msg.LocalShareTypedInput.text === "string"
+                ? msg.LocalShareTypedInput.text
+                : "";
+            // Host typing implies the session is at the input editor even if we
+            // have not yet seen a Precmd hook (e.g. joined mid-prompt).
+            if (session.state !== "running") session.state = "prompt";
+            scheduleRender();
+            return;
+          }
+
+          if (msg.JoinedSuccessfully) {
+            var joined = msg.JoinedSuccessfully;
+            var size = joined.window_size || {};
+            setSize(size.num_cols, size.num_rows);
+            setStatus("live", "ok");
+            retryDelay = 1000;
+            transport.viewerId = joined.viewer_id || transport.viewerId;
+            transport.bufferId = joined.init_block_id || transport.bufferId;
+            guest.joined = true;
+            if (!joinedOnce) {
+              joinedOnce = true;
+              var totalHistory =
+                (joined.scrollback && joined.scrollback.blocks
+                  ? joined.scrollback.blocks.length
+                  : 0) || 0;
+              progress.to(
+                70,
+                "Loading history…",
+                totalHistory
+                  ? "showing latest " +
+                      Math.min(INITIAL_VISIBLE_BLOCKS, totalHistory) +
+                      " of " +
+                      totalHistory
+                  : "no prior blocks"
+              );
+              ingestingHistory = true;
+              ingestScrollback(
+                joined.scrollback,
+                function (done, total) {
+                  progress.to(
+                    70 + (total ? (done / total) * 30 : 30),
+                    "Loading history…",
+                    done + " / " + total + " visible"
+                  );
+                },
+                function () {
+                  flushDeferredMessages();
+                  progress.done();
+                  focusGuestInput();
+                }
+              );
+            } else {
+              appendDivider("— reconnected —");
+            }
+            scheduleRender();
+            return;
+          }
+
+          if (msg.SessionEnded) {
+            closedByServer = true;
+            guest.joined = false;
+            setStatus("session ended", "err");
+            progress.fail("Session ended", "the host stopped sharing");
+            appendDivider("— the host ended this session —");
+            scheduleRender();
+            return;
+          }
+
+          if (msg.FailedToJoin) {
+            closedByServer = true;
+            guest.joined = false;
+            setStatus("join failed", "err");
+            progress.fail("Could not join", "the share link may have been rotated");
+            appendDivider("— could not join this session —");
+            return;
+          }
+
+          var ordered = msg.OrderedTerminalEvent;
+          if (!ordered || !ordered.event_type) return;
+          var event = ordered.event_type;
+
+          if (event.PtyBytesRead && event.PtyBytesRead.bytes) {
+            try {
+              var raw = lz4DecompressSizePrepended(
+                bytesFromJson(event.PtyBytesRead.bytes)
+              );
+              terminal.write(decoder.decode(raw, { stream: true }));
+              scheduleRender();
+            } catch (err) {
+              console.warn("failed to decode PtyBytesRead", err);
+            }
+            return;
+          }
+
+          if (event.CommandExecutionStarted && !session.hooksSeen) {
+            // Fallback block boundaries for hosts whose shell isn't running
+            // Warp's shell integration (raw ssh sessions, subshells, …).
+            startCommandBlock("");
+            return;
+          }
+
+          if (event.CommandExecutionFinished && !session.hooksSeen) {
+            finishCommandBlock(null);
+            if (event.CommandExecutionFinished.next_block_id) {
+              transport.bufferId = event.CommandExecutionFinished.next_block_id;
+            }
+            return;
+          }
+
+          if (event.Resize && event.Resize.window_size) {
+            setSize(
+              event.Resize.window_size.num_cols,
+              event.Resize.window_size.num_rows
+            );
+          }
+        }
+
+        function connect(wsUrl) {
+          var ws = new WebSocket(wsUrl);
+          transport.ws = ws;
+
+          ws.addEventListener("open", function () {
+            setStatus("joining…");
+            progress.resume();
+            progress.to(45, "Joining session…");
+            ws.send(
+              JSON.stringify({
+                Initialize: {
+                  viewer_id: null,
+                  user_id: {
+                    anonymous_id: randomUuid(),
+                    firebase_id_token: null,
+                  },
+                  last_received_event_no: null,
+                  latest_block_id: null,
+                  telemetry_context: null,
+                  feature_support: {},
+                },
+              })
+            );
+            progress.to(60, "Waiting for host…");
+          });
+
+          ws.addEventListener("message", function (event) {
+            var msg;
+            try {
+              msg = JSON.parse(event.data);
+            } catch (err) {
+              return;
+            }
+            handleMessage(msg);
+          });
+
+          ws.addEventListener("close", function () {
+            guest.joined = false;
+            scheduleRender();
+            if (closedByServer) return;
+            setStatus("reconnecting…", "err");
+            progress.retrying(retryDelay);
+            setTimeout(function () {
+              connect(wsUrl);
+            }, retryDelay);
+            retryDelay = Math.min(retryDelay * 2, 10000);
+          });
+
+          ws.addEventListener("error", function () {
+            setStatus("connection error", "err");
+            progress.fail("Connection error", "retrying shortly");
+          });
+        }
+
+        async function boot() {
+          var secret = secretFromPath();
+          if (!secret) {
+            setStatus("invalid share URL", "err");
+            progress.fail("Invalid share URL", "expected /local-session/<secret>");
+            return;
+          }
+
+          progress.to(10, "Fetching session info…");
+
+          var wsUrl;
+          try {
+            var response = await fetch(
+              "/local-session/" + encodeURIComponent(secret) + "/boot.json"
+            );
+            if (!response.ok) throw new Error("boot.json HTTP " + response.status);
+            wsUrl = (await response.json()).ws_url;
+            progress.to(30, "Opening connection…");
+          } catch (err) {
+            // Same-origin fallback when boot.json is unreachable.
+            var scheme = location.protocol === "https:" ? "wss" : "ws";
+            wsUrl = scheme + "://" + location.host + "/local-session/" + secret + "/ws";
+            progress.to(30, "Opening connection…", "using derived WS URL");
+            console.warn("boot.json failed, using derived ws URL", err);
+          }
+
+          connect(wsUrl);
+        }
+
+        boot();
+      })();
+    </script>
+  </body>
+</html>

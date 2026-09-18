@@ -19,6 +19,7 @@ use warpui::{Entity, EntityId, ModelContext, ModelHandle, SingletonEntity};
 
 use super::lrc_activity::{LrcActivityMonitor, SAMPLE_INTERVAL};
 use super::{ActionExecution, AnyActionExecution, ExecuteActionInput, PreprocessActionInput};
+use crate::ai::agent::conversation::AIConversationId;
 use crate::ai::agent::{
     AIAgentActionId, AIAgentActionResultType, AIAgentActionType, AIAgentPtyWriteMode, LrcActivity,
     ReadShellCommandOutputResult, RequestCommandOutputResult, ShellCommandDelay, ShellCommandError,
@@ -313,6 +314,11 @@ impl ShellCommandExecutor {
                     } else {
                         command.clone()
                     };
+                let delay = if *wait_until_completion {
+                    Some(ShellCommandDelay::OnCompletion)
+                } else {
+                    None
+                };
                 // Let the recording controller decide whether this command's
                 // on-screen work should be kept in an active computer-use
                 // recording, opening an action group before it starts if so.
@@ -323,6 +329,7 @@ impl ShellCommandExecutor {
                     });
                 ctx.emit(ShellCommandExecutorEvent::ExecuteCommand {
                     action_id: action_id.clone(),
+                    conversation_id: input.conversation_id,
                     command: decorated_command,
                 });
 
@@ -331,7 +338,7 @@ impl ShellCommandExecutor {
                 drop(model);
 
                 ActionExecution::new_async(
-                    self.action_result_future(block_selector.clone(), None, ctx),
+                    self.action_result_future(block_selector.clone(), delay, ctx),
                     move |result, ctx| {
                         // Remove the senders from the maps.
                         if let Some(handle) = handle.upgrade(ctx) {
@@ -1007,6 +1014,7 @@ fn action_result_for_transfer_shell_command_control_to_user(
 pub enum ShellCommandExecutorEvent {
     ExecuteCommand {
         action_id: AIAgentActionId,
+        conversation_id: AIConversationId,
         command: String,
     },
     WriteToPty {

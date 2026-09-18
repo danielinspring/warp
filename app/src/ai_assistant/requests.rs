@@ -2,10 +2,10 @@
 // app/src/ai/request_usage_model duplicates much of this logic.
 use std::sync::Arc;
 
+use ::ai::api_keys::ApiKeyManager;
 use anyhow::Result;
 use chrono::{OutOfRangeError, Utc};
 use futures::stream::AbortHandle;
-use ai::api_keys::ApiKeyManager;
 use warp_core::user_preferences::GetUserPreferences as _;
 use warpui::{AppContext, Entity, ModelContext, SingletonEntity};
 
@@ -206,19 +206,14 @@ impl Requests {
                     let client = OllamaClient::new(ollama_url, ollama_api_key);
                     let mut messages = Vec::with_capacity(transcript.len() * 2 + 1);
                     for part in &transcript {
-                        messages.push(crate::ai::ollama::ChatMessage {
-                            role: "user".to_string(),
-                            content: part.user.raw.clone(),
-                        });
-                        messages.push(crate::ai::ollama::ChatMessage {
-                            role: "assistant".to_string(),
-                            content: part.assistant.formatted_message.raw.clone(),
-                        });
+                        messages.push(crate::ai::ollama::ChatMessage::user(
+                            part.user.raw.clone(),
+                        ));
+                        messages.push(crate::ai::ollama::ChatMessage::assistant(
+                            part.assistant.formatted_message.raw.clone(),
+                        ));
                     }
-                    messages.push(crate::ai::ollama::ChatMessage {
-                        role: "user".to_string(),
-                        content: request_for_api,
-                    });
+                    messages.push(crate::ai::ollama::ChatMessage::user(request_for_api));
                     match client.chat(&ollama_model, messages).await {
                         Ok(answer) => Ok(GenerateDialogueResult::Success {
                             answer,

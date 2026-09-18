@@ -1,0 +1,31 @@
+{
+  "id": "chatcmpl-47255cdb-71ef-4e33-ac0f-c7d3329b2a26",
+  "created": 1785394951,
+  "model": "qwen3-coder:latest",
+  "object": "chat.completion",
+  "choices": [
+    {
+      "finish_reason": "tool_calls",
+      "index": 0,
+      "message": {
+        "content": "",
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "function": {
+              "arguments": "{\"todos\": [{\"description\": \"check settings\", \"id\": \"t1\", \"title\": \"Read config\"}, {\"id\": \"t2\", \"title\": \"Write patch\"}, {\"id\": \"t3\", \"title\": \"Run tests\"}]}",
+              "name": "update_todos"
+            },
+            "id": "call_vr0vcjkj",
+            "type": "function"
+          }
+        ]
+      }
+    }
+  ],
+  "usage": {
+    "completion_tokens": 60,
+    "prompt_tokens": 577,
+    "total_tokens": 637
+  }
+}

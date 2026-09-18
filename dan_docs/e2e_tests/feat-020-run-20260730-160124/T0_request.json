@@ -1,0 +1,61 @@
+{
+  "model": "qwen3-coder:latest",
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a Warp local agent. Available tools (names only): update_todos, mark_todos_completed. Do not call any tools."
+    },
+    {
+      "role": "user",
+      "content": "지금 사용 가능한 도구 이름만 나열해. 특히 update_todos 와 mark_todos_completed 가 있는지 명시해. 도구는 하나도 실행하지 마."
+    }
+  ],
+  "temperature": 0,
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "update_todos",
+        "description": "REPLACE (do not merge) the entire pending todo list with the `todos` array you pass. Any id omitted from `todos` is REMOVED from pending — it is NOT completed and NOT kept. Do not re-include finished or dropped items. Use mark_todos_completed to move items to completed. Keep ids stable when only titles/descriptions change. Pass the full new pending list every time.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "todos": {
+              "type": "array",
+              "description": "todos",
+              "items": {
+                "type": "object"
+              }
+            }
+          },
+          "required": [
+            "todos"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "mark_todos_completed",
+        "description": "Mark one or more pending todos as completed by id. Call after finishing the corresponding work.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "completed_ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "completed_ids"
+            }
+          },
+          "required": [
+            "completed_ids"
+          ]
+        }
+      }
+    }
+  ],
+  "tool_choice": "none"
+}

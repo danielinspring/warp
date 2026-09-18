@@ -1,0 +1,21 @@
+{
+  "id": "chatcmpl-ab9c89e7-6660-4f9b-b07f-78e77565060d",
+  "created": 1785394953,
+  "model": "qwen3-coder:latest",
+  "object": "chat.completion",
+  "choices": [
+    {
+      "finish_reason": "stop",
+      "index": 0,
+      "message": {
+        "content": "- [x] t2 — Write patch (v2)\n- [ ] t3 — Run tests",
+        "role": "assistant"
+      }
+    }
+  ],
+  "usage": {
+    "completion_tokens": 22,
+    "prompt_tokens": 1111,
+    "total_tokens": 1133
+  }
+}

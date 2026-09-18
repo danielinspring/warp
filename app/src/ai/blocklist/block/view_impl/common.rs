@@ -171,7 +171,6 @@ pub struct WarpingProps<'a, V> {
     /// short-circuited on click and a fresh snapshot is returned immediately.
     pub force_refresh_button: Option<ForceRefreshButtonProps<'a>>,
     pub action_model: &'a BlocklistAIActionModel,
-    pub terminal_model: &'a TerminalModel,
     pub default_warping_text: String,
     /// Display name of the model the current exchange reported, when the row is
     /// allowed to name it. Messages for phases that are a model working are
@@ -384,11 +383,7 @@ pub fn render_warping_indicator<V: View>(
                 LOAD_OUTPUT_MESSAGE_FOR_WRITING_TO_COMMAND.to_owned()
             }
             action => {
-                let active_block = props.terminal_model.block_list().active_block();
-                if !props.model.status(app).is_streaming()
-                    && active_block.is_active_and_long_running()
-                    && active_block.agent_interaction_metadata().is_some()
-                {
+                if !props.model.status(app).is_streaming() {
                     if action.is_none() {
                         should_render_waiting_icon = true;
                         WAITING_FOR_USER_INPUT_MESSAGE.to_owned()

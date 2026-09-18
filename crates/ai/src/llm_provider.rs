@@ -10,6 +10,7 @@ pub enum LLMProvider {
     Anthropic,
     Google,
     Xai,
+    Ollama,
     Unknown,
 }
 
@@ -24,6 +25,7 @@ impl LLMProvider {
             Self::Anthropic => Some(Icon::ClaudeLogo),
             Self::Google => Some(Icon::GeminiLogo),
             Self::Xai => Some(Icon::GrokLogo),
+            Self::Ollama => Some(Icon::Terminal),
             Self::Unknown => None,
         }
     }
@@ -36,7 +38,7 @@ impl LLMProvider {
             Self::OpenAI => Some("sk-..."),
             Self::Anthropic => Some("sk-ant-..."),
             Self::Google => Some("AIzaSy..."),
-            Self::Xai | Self::Unknown => None,
+            Self::Xai | Self::Ollama | Self::Unknown => None,
         }
     }
 
@@ -46,6 +48,7 @@ impl LLMProvider {
             Self::Anthropic => "Anthropic",
             Self::Google => "Google",
             Self::Xai => "xAI",
+            Self::Ollama => "Ollama / OpenAI-compatible",
             Self::Unknown => "this provider",
         }
     }
@@ -56,7 +59,7 @@ impl LLMProvider {
             Self::Anthropic => Some("anthropic"),
             Self::Google => Some("google"),
             Self::Xai => Some("grok"),
-            Self::Unknown => None,
+            Self::Ollama | Self::Unknown => None,
         }
     }
 
@@ -75,7 +78,7 @@ impl LLMProvider {
             Self::OpenAI => keys.openai.as_deref(),
             Self::Anthropic => keys.anthropic.as_deref(),
             Self::Google => keys.google.as_deref(),
-            Self::Xai | Self::Unknown => None,
+            Self::Xai | Self::Ollama | Self::Unknown => None,
         }
     }
 
@@ -84,7 +87,7 @@ impl LLMProvider {
             Self::OpenAI => keys.openai = key,
             Self::Anthropic => keys.anthropic = key,
             Self::Google => keys.google = key,
-            Self::Xai | Self::Unknown => return false,
+            Self::Xai | Self::Ollama | Self::Unknown => return false,
         }
         true
     }

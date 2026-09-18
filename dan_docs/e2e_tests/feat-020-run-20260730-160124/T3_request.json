@@ -1,0 +1,107 @@
+{
+  "model": "qwen3-coder:latest",
+  "messages": [
+    {
+      "role": "system",
+      "content": "## Planning / todos\nUse update_todos to REPLACE the full pending list (not merge). Ids you omit are removed from pending — they are not completed. Use mark_todos_completed to finish items.\n## Current todos\n- [ ] t2 — Write patch (v2)\n- [ ] t3 — Run tests\n"
+    },
+    {
+      "role": "user",
+      "content": "update_todos 를 한 번만 호출해. todos 는 정확히 아래 3개로:\n  {\"id\":\"t1\",\"title\":\"Read config\",\"description\":\"check settings\"}\n  {\"id\":\"t2\",\"title\":\"Write patch\"}\n  {\"id\":\"t3\",\"title\":\"Run tests\"}\n다른 도구는 실행하지 말고, 호출 후 반환된 JSON 을 그대로 보여줘."
+    },
+    {
+      "content": "",
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"todos\": [{\"description\": \"check settings\", \"id\": \"t1\", \"title\": \"Read config\"}, {\"id\": \"t2\", \"title\": \"Write patch\"}, {\"id\": \"t3\", \"title\": \"Run tests\"}]}",
+            "name": "update_todos"
+          },
+          "id": "call_vr0vcjkj",
+          "type": "function"
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_vr0vcjkj",
+      "content": "{\"pending\": [{\"id\": \"t1\", \"title\": \"Read config\", \"description\": \"check settings\"}, {\"id\": \"t2\", \"title\": \"Write patch\", \"description\": \"\"}, {\"id\": \"t3\", \"title\": \"Run tests\", \"description\": \"\"}], \"completed\": []}"
+    },
+    {
+      "role": "user",
+      "content": "update_todos 를 다시 호출해서 todos 를 아래 2개로 바꿔:\n  {\"id\":\"t2\",\"title\":\"Write patch (v2)\"}\n  {\"id\":\"t3\",\"title\":\"Run tests\"}\n설명하지 말고 반환 JSON 만 보여줘."
+    },
+    {
+      "content": "",
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"todos\": [{\"id\": \"t2\", \"title\": \"Write patch (v2)\"}, {\"id\": \"t3\", \"title\": \"Run tests\"}]}",
+            "name": "update_todos"
+          },
+          "id": "call_8awmq04a",
+          "type": "function"
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_8awmq04a",
+      "content": "{\"pending\": [{\"id\": \"t2\", \"title\": \"Write patch (v2)\", \"description\": \"\"}, {\"id\": \"t3\", \"title\": \"Run tests\", \"description\": \"\"}], \"completed\": []}"
+    },
+    {
+      "role": "user",
+      "content": "mark_todos_completed 를 completed_ids [\"t2\"] 로 호출하고 반환 JSON 만 보여줘."
+    }
+  ],
+  "temperature": 0,
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "update_todos",
+        "description": "REPLACE (do not merge) the entire pending todo list with the `todos` array you pass. Any id omitted from `todos` is REMOVED from pending — it is NOT completed and NOT kept. Do not re-include finished or dropped items. Use mark_todos_completed to move items to completed. Keep ids stable when only titles/descriptions change. Pass the full new pending list every time.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "todos": {
+              "type": "array",
+              "description": "todos",
+              "items": {
+                "type": "object"
+              }
+            }
+          },
+          "required": [
+            "todos"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "mark_todos_completed",
+        "description": "Mark one or more pending todos as completed by id. Call after finishing the corresponding work.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "completed_ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "completed_ids"
+            }
+          },
+          "required": [
+            "completed_ids"
+          ]
+        }
+      }
+    }
+  ],
+  "tool_choice": "auto"
+}

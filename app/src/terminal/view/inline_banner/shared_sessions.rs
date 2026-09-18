@@ -123,3 +123,28 @@ pub fn render_inline_shared_session_ended_banner(
     };
     render_inline_shared_session_banner(false, label.to_string(), ended_at, appearance)
 }
+
+pub fn render_inline_local_lan_share_started_banner(
+    is_active: bool,
+    started_at: DateTime<Local>,
+    appearance: &Appearance,
+) -> Box<dyn Element> {
+    render_inline_shared_session_banner(
+        is_active,
+        "Local network share active".to_string(),
+        started_at,
+        appearance,
+    )
+}
+
+pub fn render_inline_local_lan_share_ended_banner(
+    ended_at: DateTime<Local>,
+    appearance: &Appearance,
+) -> Box<dyn Element> {
+    render_inline_shared_session_banner(
+        false,
+        "Local network share ended".to_string(),
+        ended_at,
+        appearance,
+    )
+}

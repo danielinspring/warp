@@ -1,0 +1,1124 @@
+{
+  "roadmap": {
+    "name": "Local Ollama Agent Runtime",
+    "source": "dan_docs/reports/local_agent_runtime_competitive_gap_report.md",
+    "active_feature": "",
+    "status_values": [
+      "not-started",
+      "in-progress",
+      "blocked",
+      "done"
+    ]
+  },
+  "features": [
+    {
+      "id": "feat-001",
+      "name": "Establish repository harness",
+      "description": "Create and validate restartable instructions, state, verification, scope, and lifecycle artifacts for local-agent development.",
+      "phase": "Harness",
+      "dependencies": [],
+      "status": "done",
+      "acceptance_criteria": [
+        "AGENTS.md routes agents through the harness startup and end-of-session workflows.",
+        "feature_list.json, progress.md, init.sh, and session-handoff.md exist and agree on the active feature.",
+        "validate-harness reports a passing score and focused verification evidence is recorded.",
+        "The user reviews and approves the harness before feature code changes begin."
+      ],
+      "verification": [
+        "node /Users/lt-018/codish/ai/learn-harness-engineering/skills/harness-creator/scripts/validate-harness.mjs --target /Users/lt-018/codish/open_soures/warp --json",
+        "./init.sh"
+      ],
+      "evidence": "2026-07-23: user approved the harness. validate-harness passed 100/100 (all five subsystems 5/5). ./init.sh: format check passed; local_agent_runtime tests passed (4 unit, 17 integration, 1 ignored doc test); Warp focused tests blocked before execution because the Xcode Metal Toolchain is not installed. init.sh now detects this prerequisite and prints the installation command."
+    },
+    {
+      "id": "feat-002",
+      "name": "Lossless supported-tool transcript restoration",
+      "description": "Round-trip every locally supported tool call and result across persisted conversation history without dropping IDs, errors, cancellations, or route information.",
+      "phase": "Phase A",
+      "dependencies": [
+        "feat-001"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "Built-in, edit_files, MCP tool/resource, and read_skill calls restore with matching call IDs and arguments.",
+        "Tool results preserve semantic content and error/cancel state.",
+        "Malformed historical pairs are omitted or repaired as a pair, never left orphaned.",
+        "Round-trip regression tests cover every registered local tool family."
+      ],
+      "verification": [
+        "cargo test -p local_agent_runtime",
+        "cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-23: Added a versioned canonical transcript envelope and centralized proto codec for built-ins, edit_files, MCP tools/resources, and skills. Exact generated MCP names, IDs, JSON arguments, result content, and error state round-trip. Orphaned historical pairs are filtered. Extended typed result persistence. Focused Warp tests passed: 29/29."
+    },
+    {
+      "id": "feat-003",
+      "name": "Context budget and compaction",
+      "description": "Enforce a provider-facing context budget while preserving persisted history and tool-call/result pairing.",
+      "phase": "Phase A",
+      "dependencies": [
+        "feat-002"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "Request context limits are propagated into RuntimeConfig.",
+        "System prompt, tool schemas, expected output, and conversation history share one explicit budget.",
+        "Old tool results and complete old turns compact without splitting call/result pairs.",
+        "Recent turns remain intact and impossible budgets fail with a structured error."
+      ],
+      "verification": [
+        "cargo test -p local_agent_runtime",
+        "cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-23: Propagated RequestParams.context_window_limit; reserved output and tool-schema budget; added pair-preserving complete-turn compaction with structured summaries, recent-turn preservation, and model-only tool-result compaction. Impossible budgets return ContextBudgetExceeded. local_agent_runtime tests passed: 24/24 plus 1 ignored doc test; focused Warp tests passed: 29/29."
+    },
+    {
+      "id": "feat-004",
+      "name": "Provider retry, continuation, and stall recovery",
+      "description": "Make Ollama calls recover from bounded transient failures, context overflow, max-token termination, and repeated no-progress loops.",
+      "phase": "Phase A",
+      "dependencies": [
+        "feat-002",
+        "feat-003"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "Retryable provider failures use bounded cancellation-aware backoff.",
+        "Context overflow triggers compaction before one bounded retry.",
+        "Max-token responses continue without duplicating streamed output.",
+        "Repeated identical no-progress cycles stop with a structured reason.",
+        "The hard 10-turn integration cap is replaced by a documented safe policy."
+      ],
+      "verification": [
+        "cargo test -p local_agent_runtime",
+        "cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-23: Classified Ollama transient, rate-limit, timeout, model-not-found, and context-overflow failures. Added bounded cancellation-aware exponential retries, one context-tightening overflow retry, bounded max-token continuation, paired repeated-tool-call stall termination, and a 100-turn absolute safety ceiling. local_agent_runtime tests passed: 28/28 plus 1 ignored doc test. Local runtime clippy passed with -D warnings."
+    },
+    {
+      "id": "feat-005",
+      "name": "Resumable ask-user flow",
+      "description": "Expose Warp's existing ask-user action to the local runtime and return structured answer, skip, cancel, and error results to the model.",
+      "phase": "Phase A",
+      "dependencies": [
+        "feat-002"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "The tool is advertised only when ask-user is enabled and executable.",
+        "The runtime waits for the existing Warp UI action result.",
+        "Answer, skip, cancellation, and error outcomes preserve one call/result pair.",
+        "Bridge and executor tests cover all outcomes."
+      ],
+      "verification": [
+        "cargo test -p warp local_runtime_bridge --lib --features local_ollama_runtime_tool_use",
+        "cargo test -p warp ask_user_question --lib",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-23: Added request-gated ask_user_question schema and mapped it to Warp's existing interactive AskUserQuestion action. Answered, skipped, auto-skipped, error, and cancellation outcomes return structured model results and persist through the transcript codec. Focused Warp tests passed."
+    },
+    {
+      "id": "feat-006",
+      "name": "Runtime permission modes and policy propagation",
+      "description": "Add Default, AcceptEdits, and Plan modes without bypassing Warp's protected-path, organization, isolation, or risky-command policy.",
+      "phase": "Phase A",
+      "dependencies": [
+        "feat-005"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "Permission mode semantics are exhaustive and documented.",
+        "Plan mode removes or denies mutating built-in and MCP schemas.",
+        "AcceptEdits never bypasses protected paths or risky shell policy.",
+        "Approval cancellation and resumed execution preserve one call/result pair."
+      ],
+      "verification": [
+        "cargo test -p local_agent_runtime",
+        "cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-23: Added Default, AcceptEdits, and Plan request modes. Plan mode removes mutating built-in and MCP schemas while retaining read-only tools and ask-user. Default and AcceptEdits continue through Warp's existing action UI, preserving protected-path, isolation, and risky-command policy."
+    },
+    {
+      "id": "feat-007",
+      "name": "Executable capability and prompt consistency",
+      "description": "Derive local prompt capabilities from the same tool registry used for execution so enabled settings are never presented as unavailable tools.",
+      "phase": "Phase A",
+      "dependencies": [
+        "feat-005",
+        "feat-006"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "Prompt and runtime use one registry snapshot per request.",
+        "Planning, web, computer, research, and orchestration are not advertised without matching schemas.",
+        "Active MCP and skill tools are described accurately.",
+        "Focused prompt tests prevent registry/prompt drift."
+      ],
+      "verification": [
+        "cargo test -p warp local_runtime_spec --lib --features local_ollama_runtime_tool_use",
+        "cargo test -p warp local_runtime_bridge --lib --features local_ollama_runtime_tool_use",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-23: The runtime and prompt now consume the same request-scoped LocalRuntimeToolRegistry snapshot. Prompt output lists only executable schemas, includes permission mode, and explicitly marks planning/web/computer/research/orchestration unavailable without matching schemas. Focused prompt/bridge tests passed."
+    },
+    {
+      "id": "feat-008",
+      "name": "Phase A reliability gate",
+      "description": "Run automated and manual parity checks against a pinned Ollama model and context window before beginning autonomy work.",
+      "phase": "Phase A",
+      "dependencies": [
+        "feat-002",
+        "feat-003",
+        "feat-004",
+        "feat-005",
+        "feat-006",
+        "feat-007"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "All focused tests, formatting, and relevant clippy checks pass.",
+        "A run with at least 15 tool calls completes without orphaned results or context overflow.",
+        "Manual read, edit, shell, search, ask-user, denial, cancellation, and resume prompts pass on the pinned model.",
+        "Failures and follow-up features are recorded with evidence."
+      ],
+      "verification": [
+        "./init.sh",
+        "cargo clippy -p local_agent_runtime --all-targets --tests -- -D warnings",
+        "cargo clippy -p warp --lib --features local_ollama_runtime_tool_use -- -D warnings",
+        "cargo run -p warp --bin warp-oss --features local_ollama_runtime_tool_use"
+      ],
+      "evidence": "2026-07-23: Phase A gate passed: harness 100/100, format and git diff checks, local_agent_runtime 29 automated tests, focused Warp local_runtime 32 tests, and local_agent_runtime clippy with -D warnings. Live parity passed over SSH to bcl-2 using Ollama 0.20.2, qwen3-coder:latest, and its 262144-token context: 15 sequential real model tool calls completed in 9.64s with exact pairing. Full Warp clippy remains independently blocked by two pre-existing warpui_core unnecessary_unwrap findings; cold macOS builds still require the Xcode Metal Toolchain."
+    },
+    {
+      "id": "feat-009",
+      "name": "LiteLLM / OpenAI-compatible local provider discovery",
+      "description": "Allow the existing Ollama local-runtime settings and provider path to talk to LiteLLM and other OpenAI-compatible proxies by normalizing /v1 base URLs and falling back from /api/tags to /v1/models.",
+      "phase": "Phase C",
+      "dependencies": [
+        "feat-008"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "Base URLs with a trailing /v1 are normalized before /v1/chat/completions and /v1/models are appended.",
+        "Settings Test Connection lists models from Ollama /api/tags or LiteLLM /v1/models.",
+        "Settings copy documents LiteLLM / OpenAI-compatible proxy support.",
+        "Focused provider unit tests cover URL normalization and OpenAI models JSON parsing."
+      ],
+      "verification": [
+        "cargo test -p local_agent_runtime",
+        "cargo clippy -p local_agent_runtime --all-targets --tests -- -D warnings",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-24: Extended OllamaClient and OllamaProvider list_models to fall back from /api/tags to /v1/models; normalize_base_url strips trailing /v1. Settings UI renamed to Ollama / LiteLLM and documents host:4000(/v1). Live probe against http://100.95.111.65:4000 returned /api/tags 404 and /v1/models 200 with 20 models. local_agent_runtime tests passed (9 unit + 22 integration, 1 ignored live). Clippy -D warnings and format --check passed for the crate."
+    },
+    {
+      "id": "feat-010",
+      "name": "Ollama/LiteLLM model picker dropdown",
+      "description": "Replace the free-text Ollama model field with a searchable dropdown populated from the connected model list.",
+      "phase": "Phase C",
+      "dependencies": [
+        "feat-009"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "Settings Model control is a FilterableDropdown filled from Connected models.",
+        "Selecting a model persists via ApiKeyManager.set_ollama_model.",
+        "Saved selection remains visible before Test Connection refreshes the full list."
+      ],
+      "verification": [
+        "./script/format --check",
+        "./script/run"
+      ],
+      "evidence": "2026-07-24: Replaced Ollama model text field with FilterableDropdown populated from Connected model list; SetOllamaModel persists selection. Settings copy notes tool-calling requirement. App rebuilt and launched via ./script/run."
+    },
+    {
+      "id": "feat-011",
+      "name": "Recover Qwen-style text tool calls from LiteLLM/Ollama",
+      "description": "When a local model emits <function=...> XML in assistant text instead of OpenAI tool_calls, parse those calls and continue the agent tool loop.",
+      "phase": "Phase C",
+      "dependencies": [
+        "feat-009"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "Qwen-style <function=name><parameter=...> XML in assistant text is parsed into ToolCall values.",
+        "Recovered calls set stop_reason to ToolUse so the runtime executes tools.",
+        "Unit tests cover file_glob_v2, shell command, and multi-call cases."
+      ],
+      "verification": [
+        "cargo test -p local_agent_runtime",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-24: Confirmed qwen3-coder via LiteLLM returns finish_reason=stop with tool_calls=null and Qwen XML in content. Added extract_qwen_style_tool_calls recovery in OllamaProvider chat/chat_stream. Unit tests 4/4; local_agent_runtime suite passed; clippy -D warnings passed."
+    },
+    {
+      "id": "feat-012",
+      "name": "Local agent read-only shell auto-run and search guidance",
+      "description": "Infer is_read_only for find/ls-style shell commands, withhold Qwen tool XML from streamed text, and document that file_glob_v2 is project-scoped while home directory searches should use read-only shell.",
+      "phase": "Phase C",
+      "dependencies": [
+        "feat-011"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "find/ls-style shell commands without an explicit is_read_only flag are treated as read-only for scheduling and Warp auto-execute.",
+        "Streamed assistant text withholds Qwen <function=...> markup from TextDelta events.",
+        "Tool schemas and local system prompt guide folder searches under ~ via read-only shell."
+      ],
+      "verification": [
+        "cargo test -p local_agent_runtime",
+        "cargo test -p warp infer_shell_command --lib --features local_ollama_runtime_tool_use",
+        "cargo clippy -p local_agent_runtime --all-targets --tests -- -D warnings"
+      ],
+      "evidence": "2026-07-24: Added infer_shell_command_is_read_only (+ /dev/null redirect allowance), safety_class_for_call ReadOnly path, stream markup withholding, and prompt/schema search guidance. local_agent_runtime and focused Warp infer tests passed."
+    },
+    {
+      "id": "feat-013",
+      "name": "Bounded local run_agents delegation",
+      "description": "When orchestration is enabled, advertise a local-runtime run_agents tool that bridges to Warp's existing RunAgents action with depth and concurrency bounds (root-only, max 4 local children).",
+      "phase": "Phase B",
+      "dependencies": [
+        "feat-007",
+        "feat-008"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "run_agents is advertised only when RequestParams.orchestration_enabled is true and the request is not itself a child agent (parent_agent_id is None).",
+        "Tool calls map to AIAgentActionType::RunAgents with Local execution mode and at most 4 agent_run_configs.",
+        "Invalid input (empty agents, too many agents, missing fields) returns structured ToolExecutionError::InvalidInput.",
+        "Plan mode does not advertise run_agents; results convert to model-facing content and typed transcript proto where available.",
+        "Focused bridge unit tests cover enablement, conversion, bounds, and result content."
+      ],
+      "verification": [
+        "cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-27: Bridged run_agents into LocalRuntimeToolRegistry when orchestration_enabled and parent_agent_id is None. Forces Local execution mode, caps agents at LOCAL_RUN_AGENTS_MAX_CHILDREN=4, maps results to JSON content + typed RunAgentsResult proto (cancel remains generic). Plan mode strips run_agents. cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use: 39 passed. ./script/format --check: passed."
+    },
+    {
+      "id": "feat-014",
+      "name": "Background shell and process lifecycle",
+      "description": "Allow local-runtime shell commands to run without blocking on completion, and bridge read/write long-running shell tools so the model can poll output and send input by block_id.",
+      "phase": "Phase B",
+      "dependencies": [
+        "feat-012",
+        "feat-013"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "run_shell_command accepts optional wait_until_complete (default true); false returns a long-running snapshot with block_id.",
+        "read_shell_command_output and write_to_long_running_shell_command are advertised and map to existing Warp actions.",
+        "Result content for LRC poll/write is structured JSON for the model; typed proto results persist when available.",
+        "Plan mode keeps read_shell_command_output and strips write_to_long_running_shell_command.",
+        "Focused bridge unit tests cover schema, conversion, and result content."
+      ],
+      "verification": [
+        "cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-27: Added wait_until_complete on run_shell_command (default true); built-in read_shell_command_output + write_to_long_running_shell_command bridge to Warp LRC actions; JSON result content + typed proto. Plan mode retains read LRC only. cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use: 40 passed. ./script/format --check: passed."
+    },
+    {
+      "id": "feat-015",
+      "name": "Model-gated computer and document actions",
+      "description": "Advertise Warp document tools to the local runtime, and computer-use tools only when RequestParams.computer_use_enabled is true; map calls to existing client actions with structured model-facing results.",
+      "phase": "Phase B",
+      "dependencies": [
+        "feat-007",
+        "feat-014"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "read_documents, edit_documents, and create_documents are advertised and map to AIAgentActionType document variants.",
+        "request_computer_use and use_computer are advertised only when computer_use_enabled is true.",
+        "Plan mode retains read_documents and strips mutating document and computer-use tools.",
+        "Tool results serialize to structured JSON for the model; focused unit tests cover gating and conversion."
+      ],
+      "verification": [
+        "cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-28: Bridged read/edit/create_documents always for local agents; request_computer_use + use_computer when computer_use_enabled. Structured JSON results (screenshot metadata only). Plan mode keeps read_documents, strips mutating docs and CU. cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use: 41 passed. ./script/format --check: passed."
+    },
+    {
+      "id": "feat-016",
+      "name": "Skill discovery and bundled catalog for local runtime",
+      "description": "Advertise list_skills and read_skill from the cwd/home/bundled SkillManager catalog (not only skills attached to request context), inject a short catalog into the system prompt, and return structured list results without requiring a Warp action card.",
+      "phase": "Phase B",
+      "dependencies": [
+        "feat-007",
+        "feat-015"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "Local runtime resolves available skills via SkillManager for the session working directory when starting a run.",
+        "list_skills and read_skill are advertised when the catalog is non-empty.",
+        "list_skills returns name, description, reference, and scope without executing a UI action.",
+        "System prompt includes a concise available-skills section when the catalog is non-empty.",
+        "Focused unit tests cover catalog registration, list_skills content, and plan-mode retention of list/read skill tools."
+      ],
+      "verification": [
+        "cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-28: ResponseStream resolves SkillManager catalog for cwd; from_request_with_available_skills registers list_skills + read_skill; list_skills answered in WarpToolExecutor without UI; prompt Available Skills section; plan mode keeps list/read. cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use: 42 passed. format --check: passed."
+    },
+    {
+      "id": "feat-017",
+      "name": "Trusted lifecycle hooks",
+      "description": "Add in-process pre-tool, permission, post-tool, and stop hooks to the local agent runtime with logging hooks and optional tool-name deny policy for local Ollama runs.",
+      "phase": "Phase B",
+      "dependencies": [
+        "feat-004",
+        "feat-016"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "LifecycleHooks trait covers pre_tool, on_permission, post_tool, and on_stop.",
+        "Runtime invokes hooks on the tool path and before Finished events.",
+        "Pre-tool deny synthesizes an error tool result without executing the tool.",
+        "Local Ollama path installs LoggingHooks plus optional WARP_LOCAL_AGENT_DENIED_TOOLS deny list.",
+        "Unit tests cover deny hooks and composite short-circuit."
+      ],
+      "verification": [
+        "cargo test -p local_agent_runtime",
+        "cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-28: Added LifecycleHooks (pre_tool/on_permission/post_tool/on_stop), LoggingHooks, CompositeHooks, ToolNameDenyHooks; wired into runtime tool path and Finished. Local Ollama uses LoggingHooks + WARP_LOCAL_AGENT_DENIED_TOOLS. cargo test -p local_agent_runtime: 23+18 passed (1 ignored live). cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use: 42 passed. format --check: passed."
+    },
+    {
+      "id": "feat-018",
+      "name": "Local-runtime telemetry",
+      "description": "Emit structured local-runtime telemetry for run start/finish, provider turn latency, provider errors, tool permission decisions, and tool results (including hook denials), with Warp product event registration and structured logging on the Ollama path.",
+      "phase": "Phase B",
+      "dependencies": [
+        "feat-017"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "RuntimeTelemetrySink receives RunStarted, ProviderTurn (latency), ProviderError, ToolPermission, ToolResult, RunFinished.",
+        "TelemetryLifecycleHooks records tool permission/result latency; runtime records provider turn latency.",
+        "Local Ollama integration wires ChannelTelemetrySink + TelemetryLifecycleHooks and logs events under target local_runtime_telemetry.",
+        "Warp LocalRuntimeTelemetryEvent product events are registered for analytics schema.",
+        "Unit tests cover TelemetryLifecycleHooks emission."
+      ],
+      "verification": [
+        "cargo test -p local_agent_runtime",
+        "cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-28: Added RuntimeTelemetryEvent/Sink, TelemetryLifecycleHooks, ChannelTelemetrySink; provider latency in run_loop; app LocalRuntimeTelemetryEvent registration + integration drain/log. cargo test -p local_agent_runtime: 19 lib + 23 integration passed. cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use: 42 passed. format --check: passed."
+    },
+    {
+      "id": "feat-019",
+      "name": "Local web search and fetch",
+      "description": "Give the local Ollama runtime executable web_search and web_fetch tools with a local HTTP provider, SSRF/privacy policy, size caps, and request-gated schemas (not a cloud action bridge).",
+      "phase": "Phase C",
+      "dependencies": [
+        "feat-007",
+        "feat-018"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "web_search and web_fetch are advertised only when RequestParams.web_search_enabled is true.",
+        "Both tools execute in-process (no Warp AIAgentActionType bridge) and return structured JSON tool results.",
+        "SSRF policy denies non-http(s), private/link-local/loopback IPs, and oversized responses; redirects re-check policy.",
+        "Plan mode retains web_search and web_fetch (read-only investigation).",
+        "Transcript codec/registry tests cover enablement, plan mode, invalid input, and policy denials.",
+        "Focused tests and format check pass with evidence recorded."
+      ],
+      "verification": [
+        "cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use",
+        "cargo test -p warp local_web --lib --features local_ollama_runtime_tool_use",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-29: Added app/src/ai/local_web (policy SSRF, HTML extract, reqwest fetch, DuckDuckGo HTML search). Registry advertises web_search/web_fetch when web_search_enabled; in-process execute via WarpToolExecutor. Plan mode keeps both tools. cargo test -p warp local_web --lib --features local_ollama_runtime_tool_use: 10 passed. cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use: 43 passed. cargo test -p local_agent_runtime: 19 lib + 23 integration passed. format --check: passed."
+    },
+    {
+      "id": "feat-020",
+      "name": "Durable local plan and todo state",
+      "description": "Expose update_todos and mark_todos_completed to the local Ollama runtime with in-process state, UpdateTodos task messages for existing UI/derive, and prompt injection of the current list.",
+      "phase": "Phase C",
+      "dependencies": [
+        "feat-007",
+        "feat-019"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "update_todos and mark_todos_completed are advertised on local registries and retained in plan mode.",
+        "Tools execute in-process and return a JSON snapshot of pending/completed items.",
+        "Successful updates emit Message::UpdateTodos (CreateTodoList / UpdatePendingTodos / MarkTodosCompleted) into the task stream via EventMapper.",
+        "Todo state hydrates from prior task UpdateTodos messages for multi-turn resume.",
+        "System prompt includes current todos when non-empty.",
+        "Focused tests and format check pass with evidence."
+      ],
+      "verification": [
+        "cargo test -p warp local_todos --lib --features local_ollama_runtime_tool_use",
+        "cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-30: Added app/src/ai/local_todos.rs (state, update_todos/mark_todos_completed schemas+execute). Registry always advertises both tools (ReadOnly, plan mode kept). Hydrate from task UpdateTodos. EventMapper emits UpdateTodos + ToolCallResult on ToolResult when pending persistence is set. Prompt injects current todos. cargo test local_todos: 2 passed. cargo test local_runtime: 44 passed. format --check: passed."
+    },
+    {
+      "id": "feat-021",
+      "name": "OpenAI-compatible provider polish",
+      "description": "Polish the existing Ollama OpenAI-compatible client path for LiteLLM, LM Studio, Groq-style /v1 hosts, and other bearer-auth proxies: auth errors, empty-key hygiene, Test Connection editor flush, quieter discovery, and de-Ollama branding. Does not add new provider crates or merge cloud CustomEndpoint routing.",
+      "phase": "Phase C",
+      "dependencies": [
+        "feat-009",
+        "feat-010",
+        "feat-011"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "Settings section and model picker labels treat the path as Ollama / OpenAI-compatible (not hard-coded Ollama-only for remote /v1 hosts).",
+        "Test Connection sees live Base URL and API Key values (editors persist on edit, not only Blur/Enter).",
+        "Empty API keys are never sent as Authorization headers from OllamaClient or OllamaProvider.",
+        "HTTP 401/403 map to a clear non-retryable auth error in the provider and Test Connection UI.",
+        "Model discovery prefers /v1/models when an API key is set (or input URL ends with /v1), otherwise keeps /api/tags-first for local Ollama.",
+        "Legacy OllamaClient accepts tool-call arguments as JSON string or object.",
+        "Settings copy documents LM Studio and Groq-style OpenAI-compatible base URL examples.",
+        "Focused unit tests cover normalize, empty-key filtering, 401 mapping, discovery preference, and object tool args."
+      ],
+      "verification": [
+        "cargo test -p local_agent_runtime",
+        "cargo test -p warp ollama --lib --features local_ollama_runtime_tool_use",
+        "cargo clippy -p local_agent_runtime --all-targets --tests -- -D warnings",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-31: ProviderError::Unauthorized (non-retryable) for 401/403; empty API keys filtered; discovery prefers /v1/models for keyed hosts, /v1 URLs, and non-:11434 hosts; Settings branded Ollama / OpenAI-compatible with LM Studio/Groq examples; editors persist on Edited; model picker uses Ollama vs OpenAI-compatible label; legacy client accepts string/object tool args. Also fixed local_agent_runtime clippy Instant\u2192instant::Instant. cargo test -p local_agent_runtime: 24 unit + 23 integration passed (1 ignored live). cargo test -p warp ollama: 5 passed. clippy -D warnings passed. format --check passed."
+    },
+    {
+      "id": "feat-022",
+      "name": "Model-specific prompt and tool-schema packs",
+      "description": "Detect Qwen / DeepSeek / Llama families from the configured local model id and apply short system-prompt addenda plus light tool-description tweaks so weaker local models follow OpenAI-compatible tool calling more reliably. Generic models keep the existing shared prompt unchanged.",
+      "phase": "Phase C",
+      "dependencies": [
+        "feat-011",
+        "feat-021"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "detect_model_family maps qwen*, deepseek*, llama*/codellama* model ids; unknown ids are Generic.",
+        "system_prompt_for_request_with_model appends a family addendum for Qwen/DeepSeek/Llama and none for Generic.",
+        "WarpToolExecutor applies pack description prefixes for edit_files, run_shell_command, and update_todos without changing parameter schemas.",
+        "Focused unit tests cover detection, prompt markers, and schema tweaks."
+      ],
+      "verification": [
+        "cargo test -p warp local_runtime_model_packs --lib --features local_ollama_runtime_tool_use",
+        "cargo test -p warp local_runtime_spec --lib --features local_ollama_runtime_tool_use",
+        "cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-31: Added app/src/ai/local_runtime_model_packs.rs (detect_model_family, prompt addenda, schema description prefixes). Wired via system_prompt_for_request_with_model + WarpToolExecutor::new_with_model_family. Generic models unchanged. cargo test -p warp local_runtime: 49 passed. format --check passed."
+    },
+    {
+      "id": "feat-023",
+      "name": "Multimodal provider support",
+      "description": "Send user-attached images as OpenAI-compatible multimodal content parts to vision-capable local models, with model-id vision gating and non-vision fallback that keeps metadata-only prompt notes.",
+      "phase": "Phase C",
+      "dependencies": [
+        "feat-011",
+        "feat-021"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "UserMessage supports text and image content parts; ConversationHistory can push multimodal user turns.",
+        "OllamaProvider serializes image parts as OpenAI image_url data URLs when vision is enabled.",
+        "ProviderCapabilities.vision is inferred from model id (llava, bakllava, *-vision*, qwen*-vl*, minicpm-v*) or explicit config.",
+        "Non-vision models strip image bytes from the wire and system prompt notes that images are not visible.",
+        "Local integration extracts ImageContext attachments into multimodal user input with process_image_for_agent caps.",
+        "Focused unit tests cover detection, serialization, and integration extraction."
+      ],
+      "verification": [
+        "cargo test -p local_agent_runtime",
+        "cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-31: ContentPart Text/Image + UserMessage parts; OllamaProvider OpenAI image_url data-URL serialize when vision_enabled_for_model; model_supports_vision heuristic + config override; non-vision strips pixels; integration extracts ImageContext via process_image_for_agent; prompt notes visibility. cargo test -p local_agent_runtime: 30 unit + 23 integration passed. cargo test -p warp local_runtime: 56 passed. format --check passed."
+    },
+    {
+      "id": "feat-024",
+      "name": "Git workflow helpers",
+      "description": "Advertise first-class read-only local tools git_status, draft_commit_message_context, and draft_pr_summary_context that gather repo state via existing git utils instead of freeform shell.",
+      "phase": "Phase C",
+      "dependencies": [
+        "feat-007",
+        "feat-019"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "Three git tools are advertised on local registries, ReadOnly, and retained in plan mode.",
+        "Tools execute in-process and return structured JSON; never queued as AIAgentAction.",
+        "Non-repo cwd returns structured ok:false error JSON.",
+        "Diff payloads reuse existing size-capped git helpers.",
+        "Focused unit and registry tests pass with evidence."
+      ],
+      "verification": [
+        "cargo test -p warp local_git --lib --features local_ollama_runtime_tool_use",
+        "cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-31: Added app/src/ai/local_git.rs (git_status, draft_commit_message_context, draft_pr_summary_context) using util/git helpers. Registry always advertises LocalGit ReadOnly tools; in-process execute; plan mode kept; prompt ## Git blurb. cargo test local_git: 12 passed. cargo test local_runtime: 57 passed. format --check passed."
+    },
+    {
+      "id": "feat-025",
+      "name": "Local LAN session share hub",
+      "description": "Host-local HTTP+WS hub for sharing one live terminal pane over LAN/Tailscale with a URL secret. PR1: start/stop/rotate, bind candidates, secret-gated placeholder HTML and WS stub. Full WASM viewer and protocol fan-out are follow-ups (specs/local-lan-session-share).",
+      "phase": "Phase D",
+      "dependencies": [],
+      "status": "done",
+      "acceptance_criteria": [
+        "FeatureFlag::LocalLanSessionShare exists and is enabled for dogfood.",
+        "LocalSessionShareHub can start/stop/rotate a share on a chosen bind address.",
+        "Share URL embeds a high-entropy secret; wrong/revoked secrets return no session content.",
+        "GET /health works without a secret; GET /local-session/{secret} serves placeholder HTML when valid.",
+        "WebSocket /local-session/{secret}/ws accepts only a matching secret and sends a hello stub.",
+        "non_loopback_candidates lists LAN/Tailscale addresses and excludes loopback.",
+        "Focused unit tests pass."
+      ],
+      "verification": [
+        "cargo test -p warp local_session_share --lib",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-31: FeatureFlag::LocalLanSessionShare in DOGFOOD_FLAGS. app/src/terminal/local_session_share/ (secret, bind, hub, server). Hub start/stop/rotate; URL http://host:port/local-session/{secret}; health + placeholder HTML; WS hello stub. cargo test -p warp local_session_share --lib: 17 passed. format --check passed."
+    },
+    {
+      "id": "feat-026",
+      "name": "Local LAN share protocol shim",
+      "description": "Fan host PTY/scrollback into the local session share hub as session-sharing-protocol events; force Role::Reader; guest WS receives JoinedSuccessfully + OrderedTerminalEvent stream without cloud relay.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-025"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "Local hub speaks session-sharing-protocol join/initialize dialect for viewers.",
+        "Scrollback snapshot and live PtyBytesRead (and Resize) stream to connected guests.",
+        "Guests are always Role::Reader; WriteToPty/Execute upstream is ignored or rejected.",
+        "Focused tests cover join auth, Reader role, and basic event fan-out."
+      ],
+      "verification": [
+        "cargo test -p warp local_session_share --lib",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-31: Local WS speaks viewer Initialize\u2192JoinedSuccessfully (empty scrollback, Role::Reader); publish_pty_bytes LZ4+OrderedTerminalEvent broadcast; WriteToPty/Execute/Agent/Control \u2192 InsufficientPermissions. cargo test local_session_share: 22 passed. format --check passed."
+    },
+    {
+      "id": "feat-027",
+      "name": "Local LAN share WASM serve + WebIntent boot",
+      "description": "Serve Warp WASM from the local session share hub when configured; parse http://LAN/local-session/{secret} as WebIntent; connect viewer WS to same-origin /local-session/{secret}/ws without cloud sessions server or IAP.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-025",
+        "feat-026"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "Hub optionally serves index.html + /assets/client/{wasm,static} from WARP_LOCAL_SHARE_WASM_DIR or start_with_options.",
+        "GET /local-session/{secret}/boot.json returns ws_url for a valid secret.",
+        "WebIntent parses LAN local-session URLs without requiring server_root host match.",
+        "ChannelState local_session_share_ws_url override routes viewer WS with empty IAP headers.",
+        "Cloud shared-session WebIntent path remains intact.",
+        "Focused unit tests and format check pass."
+      ],
+      "verification": [
+        "cargo test -p warp local_session_share --lib",
+        "cargo test -p warp web_intent --lib",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-31: Hub serves WASM from WARP_LOCAL_SHARE_WASM_DIR/start_with_options; /boot.json returns ws_url; WebIntent::LocalSessionView for LAN hosts; ChannelState local_session_share_ws_url skips IAP. local_session_share: 24 passed; web_intent: 4 passed; format --check passed."
+    },
+    {
+      "id": "feat-028",
+      "name": "Local LAN share host UX + TerminalModel fan-in",
+      "description": "Command Palette start/copy/stop for local session share; TerminalModel publish_pty_bytes fan-in; mutual exclusion with cloud share; host banners.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-025",
+        "feat-026",
+        "feat-027"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "Host can start, copy URL, and stop a local LAN share from Command Palette when LocalLanSessionShare is enabled.",
+        "Active terminal PTY bytes fan into publish_pty_bytes for joined guests.",
+        "Local share and cloud share cannot both be active for the same session (mutual exclusion).",
+        "Focused unit tests and format check pass."
+      ],
+      "verification": [
+        "cargo test -p warp local_session_share --lib",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-31: Palette Start/Stop/Copy local network share; TerminalView owns LocalSessionShareHub; TerminalModel LocalShareEventPublisher fans PTY+Resize; cloud share blocked while local active and vice versa. local_session_share: 25 passed; format applied."
+    },
+    {
+      "id": "feat-029",
+      "name": "Local LAN share pane banner + overflow + rotate",
+      "description": "Show an inline sharing-active banner on the host pane; expose Copy/Stop/Rotate in the pane header overflow menu; Command Palette rotate for secret rotation (PRODUCT.md P4, P9\u2013P12).",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-028"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "Starting a local LAN share inserts an active inline banner on the host pane.",
+        "Stopping local share transitions the banner to an ended state.",
+        "Pane header overflow exposes Copy link, Stop, and Rotate link while local share is active.",
+        "Command Palette includes Rotate local network share link when active.",
+        "Focused unit tests and format check pass."
+      ],
+      "verification": [
+        "cargo test -p warp local_session_share --lib",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-31: Inline LocalLanShareStart/End banners; pane overflow Start/Copy/Rotate/Stop; palette rotate; rotate copies new URL. local_session_share: 25 passed; format --check passed."
+    },
+    {
+      "id": "feat-030",
+      "name": "Local LAN share join scrollback snapshot",
+      "description": "Snapshot host terminal scrollback at local share start and serve it in JoinedSuccessfully so guests/reconnects get catch-up history (PRODUCT.md P20), with a documented size cap.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-026",
+        "feat-028"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "LocalSessionShareHub stores a Scrollback snapshot settable by the host.",
+        "JoinedSuccessfully includes that scrollback (not always empty).",
+        "Host start snapshots SharedSessionScrollbackType::All (capped/documented).",
+        "Focused unit tests cover non-empty join scrollback and format check passes."
+      ],
+      "verification": [
+        "cargo test -p warp local_session_share --lib",
+        "./script/format --check"
+      ],
+      "evidence": "2026-07-31: Hub set_scrollback + JoinedSuccessfully serves snapshot; host start uses SharedSessionScrollbackType::All; LOCAL_SHARE_MAX_SCROLLBACK_BYTES=10MiB with oldest-block capping. local_session_share: 28 passed; format --check passed."
+    },
+    {
+      "id": "feat-031",
+      "name": "Local LAN share agent/event best-effort fan-out",
+      "description": "Forward AgentResponseEvent, command lifecycle, and related ordered terminal events into the local share hub when active (PRODUCT.md P24 best-effort), without requiring cloud share status.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-026",
+        "feat-028"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "TerminalModel fans AgentResponseEvent to LocalShareEventPublisher when local share is active.",
+        "CommandExecutionStarted/Finished also fan to the local hub when active.",
+        "Cloud-only ordered-event path remains intact when only cloud share is active.",
+        "Focused unit tests and format check pass."
+      ],
+      "verification": [
+        "cargo test -p warp local_session_share --lib",
+        "./script/format --check"
+      ],
+      "evidence": "2026-08-01: fanout_ordered_terminal_event sends AgentResponse/replay/setup/command lifecycle/Resize to local hub when LocalShareEventPublisher is set (independent of cloud ActiveSharer). local_session_share: 29 passed; format --check passed."
+    },
+    {
+      "id": "feat-032",
+      "name": "Local LAN share bind address picker",
+      "description": "Let the host choose a non-loopback LAN/Tailscale bind address (or all-interfaces with warning) when starting a local share (PRODUCT.md P6\u2013P8, P28).",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-028"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "Pane overflow lists per-interface Start actions from non_loopback_candidates.",
+        "All-interfaces (0.0.0.0) is offered with an explicit warning toast.",
+        "Start with no candidates fails clearly; single candidate auto-starts.",
+        "Command Palette Start uses preferred bind (or sole candidate) and reports the chosen interface.",
+        "Focused unit tests and format check pass."
+      ],
+      "verification": [
+        "cargo test -p warp local_session_share --lib",
+        "./script/format --check"
+      ],
+      "evidence": "2026-08-01: Pane overflow lists bind candidates + 0.0.0.0 with warning toast; StartLocalLanShareWithBind; palette resolve_palette_bind_ip with interface toast. local_session_share: 31 passed; format --check passed."
+    },
+    {
+      "id": "feat-033",
+      "name": "Local Share pane header button",
+      "description": "Add a Local Share control next to the cloud Share button in the terminal pane header so hosts can start/copy local LAN share without using only the overflow menu or Command Palette.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-028",
+        "feat-032"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "When LocalLanSessionShare is enabled on desktop, the terminal pane header shows a Local Share button after the cloud Share controls.",
+        "Inactive click starts local share (preferred bind / StartLocalLanShare); active click copies the current link.",
+        "Button is hidden while a cloud shared session is active and local share is not.",
+        "Pane header renders when the flag is enabled so the button is discoverable on single-pane terminals.",
+        "Focused unit tests and format check pass."
+      ],
+      "verification": [
+        "cargo test -p warp local_session_share --lib",
+        "./script/format --check"
+      ],
+      "evidence": "2026-08-01: Moved Local Share to agent input footer next to /remote-control (Globe chip Start/Stop). Ensures item is injected into saved toolbar layouts. Removed misplaced pane-header button. local_session_share: focused tests + format check."
+    },
+    {
+      "id": "feat-034",
+      "name": "Local share lite viewer + WASM auto-discover",
+      "description": "Serve a built-in view-only HTML guest that joins the local share WS and renders live PTY when no Warp WASM bundle is staged; auto-discover Resources/local_share_wasm or WARP_LOCAL_SHARE_WASM_DIR for the full WASM SPA.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-025",
+        "feat-026",
+        "feat-027"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "GET /local-session/{secret} serves the built-in lite viewer HTML when no WASM index.html is configured.",
+        "Lite viewer connects to same-origin WS, sends Initialize, and can decode LZ4 PtyBytesRead.",
+        "When WARP_LOCAL_SHARE_WASM_DIR or app Resources/local_share_wasm has index.html, the full WASM SPA is served instead.",
+        "ShareHandle.has_wasm_viewer reflects which path is active; host toast warns for lite mode.",
+        "Focused unit tests and format check pass."
+      ],
+      "verification": [
+        "cargo test -p warp local_session_share --lib",
+        "./script/format --check"
+      ],
+      "evidence": "2026-08-01: Replaced placeholder with include_str!(lite_viewer.html) WS guest (Initialize + LZ4 PtyBytesRead). resolve_wasm_bundle_dir also checks Resources/local_share_wasm. ShareHandle.has_wasm_viewer + lite toast. cargo test -p warp local_session_share --lib: 31 passed. format --check passed. WarpOss debug bundle relaunched."
+    },
+    {
+      "id": "feat-035",
+      "name": "Block-based local share guest viewer",
+      "description": "Render the local LAN share guest page as Warp-style blocks instead of a raw PTY dump: scrollback SerializedBlocks and live output cut into command blocks with cwd, git branch, exit code, duration and full ANSI styling.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-030",
+        "feat-034"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "Guest page renders one card per command (cwd/git header, bold command, styled output) rather than a single scrolling <pre>.",
+        "Scrollback JSON SerializedBlocks render with their stylized command/output, pwd, exit code and start/completed timing.",
+        "Live PTY is split into blocks from Warp shell hooks (Preexec / CommandFinished / Precmd) carried in the stream; hook payloads, in-band generator output and alt-screen frames never leak as text.",
+        "ANSI SGR (16/256/truecolor, bold, dim, italic, underline, inverse) plus CR/BS/tab/erase are rendered; failed blocks are marked with the exit code.",
+        "Light and dark palettes match app/src/themes/default_themes.rs; the host prompt and typed input show in a live footer strip.",
+        "Focused unit tests and format check pass."
+      ],
+      "verification": [
+        "cargo test -p warp local_session_share --lib",
+        "./script/format --check"
+      ],
+      "evidence": "2026-08-02: Rewrote lite_viewer.html as a block viewer (VT parser + line buffer + hook-driven block state machine + SerializedBlock scrollback decoding). Verified against a canned Warp PTY fixture (hooks, colored ls, failing grep, CR progress bar, vim alt-screen, in-band generator burst) in Node and in Chrome, light and dark. local_session_share: 31 passed; format --check passed."
+    },
+    {
+      "id": "feat-036",
+      "name": "Local share guest join progress + insecure-context fixes",
+      "description": "Make the local LAN share guest page work on plain-http LAN origins (no secure context) and show a staged join progress indicator with percentage and elapsed time while the handshake and scrollback replay run.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-034",
+        "feat-035"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "Guest page no longer calls crypto.randomUUID, which is undefined on insecure (plain http) origins; a getRandomValues/Math.random UUID v4 fallback is used for the Initialize anonymous_id.",
+        "Guest page declares an inline data-URI favicon so browsers stop requesting /favicon.ico and logging a 404.",
+        "A join overlay reports staged progress (fetching session info, opening connection, joining, waiting for host, replaying scrollback) with a percentage, elapsed seconds and a bar.",
+        "Scrollback replay is chunked across animation frames and reports blocks done / total, then the overlay hides when the guest is live.",
+        "Join failures, session end and reconnect backoff are surfaced in the overlay instead of leaving it stuck.",
+        "Focused unit tests and format check pass."
+      ],
+      "verification": [
+        "cargo test -p warp local_session_share --lib",
+        "./script/format --check"
+      ],
+      "evidence": "2026-08-02: Replaced crypto.randomUUID with randomUuid() fallback (getRandomValues, then Math.random) and added an inline SVG data-URI favicon, clearing both Chrome console errors reported on a LAN http share URL. Added a stage-weighted join overlay (10/30/45/60/70% handshake, 70-100% scrollback) with tabular percent, 100ms elapsed timer and error/retry states; renderScrollback now replays in ~12ms animation-frame slices reporting done/total blocks. cargo test -p warp local_session_share --lib: 31 passed. ./script/format --check: passed. WarpOss debug bundle rebuilt and relaunched."
+    },
+    {
+      "id": "feat-037",
+      "name": "Local share replay log for late-joining guests",
+      "description": "Keep a bounded log of downstream frames published since the local share started and replay it to a guest on join, so history between 'Start local share' and opening the link is no longer lost.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-025",
+        "feat-026",
+        "feat-035"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "ShareState keeps a replay log of published downstream frames, capped at LOCAL_SHARE_MAX_REPLAY_BYTES by dropping oldest frames while always retaining the newest.",
+        "ShareState::join snapshots the backlog and subscribes to the broadcast under the same lock publish uses, so a joining guest gets every frame since share start exactly once (no gap, no duplicate).",
+        "The WS handler sends JoinedSuccessfully, then the backlog, then live events; nothing is streamed before Initialize.",
+        "Scrollback snapshot (pre-share history) and replay log (post-share history) do not overlap.",
+        "Share start logs the scrollback snapshot block count and byte size (never contents) so an empty snapshot is diagnosable.",
+        "Focused unit tests and format check pass."
+      ],
+      "verification": [
+        "cargo test -p warp local_session_share --lib",
+        "./script/format --check",
+        "cargo clippy -p warp --lib --all-features --tests"
+      ],
+      "evidence": "2026-08-02: Root cause of missing history on the guest: tokio broadcast only delivers to existing receivers and the WS handler subscribed at upgrade, while the scrollback snapshot is frozen at share start \u2014 so anything the host ran between starting the share and a guest opening the link was dropped. Added ReplayLog (VecDeque + byte cap, 8 MiB) to ShareState, atomic ShareState::join (backlog snapshot + subscribe under the publish lock), and a two-phase WS handler that replays the backlog after JoinedSuccessfully. New tests: events_published_before_join_are_replayed_to_a_late_guest, replay_log_drops_oldest_frames_past_the_cap. cargo test -p warp local_session_share --lib: 33 passed. ./script/format --check: passed. clippy: no new warnings. WarpOss debug bundle rebuilt and relaunched."
+    },
+    {
+      "id": "feat-038",
+      "name": "Local share live typed-input mirror",
+      "description": "Mirror the host's Warp input-editor text to local-share guests in real time (plain-text snapshot), so typing is visible in the lite viewer footer before Enter.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-035",
+        "feat-037"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "Host publishes LocalShareTypedInput snapshots (full current buffer text) on each input-editor edit while local share is active, without bloating the PTY replay log.",
+        "ShareState keeps the latest typed-input string; join sends it after JoinedSuccessfully so late guests see in-progress typing before backlog flush.",
+        "Lite viewer footer shows host typed text in real time next to the live prompt caret.",
+        "Executing/clearing the host input clears the guest typed-input display.",
+        "Focused unit tests and format check pass."
+      ],
+      "verification": [
+        "cargo test -p warp local_session_share --lib",
+        "./script/format --check"
+      ],
+      "evidence": "2026-08-02: Warp input editor does not echo through PTY, so guests never saw pre-Enter typing. Added LocalShareTypedInput plain-text snapshots on ShareState (coalesced, not in durable ReplayLog), atomic join snapshot, WS emit after JoinedSuccessfully, TerminalView InputEvent::EditorUpdated + share-start publish, lite viewer footer #typed. New test typed_input_is_mirrored_live_and_on_late_join. cargo test -p warp local_session_share --lib: 34 passed. format --check passed. WarpOss rebuilt."
+    },
+    {
+      "id": "feat-039",
+      "name": "Local share alternate-screen mirroring",
+      "description": "Mirror full-screen (alternate screen) host applications such as claude, vim and top to local-share guests by emulating a real fixed grid in the lite viewer instead of discarding the output.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-035"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "Entering the alternate screen (DECSET 1049/1047/47) switches the guest to a fixed rows x cols grid view instead of showing a 'not mirrored' notice.",
+        "Grid supports absolute addressing (CUP/VPA), scrolling regions (DECSTBM), insert/delete line and char, erase with the active background, deferred right-margin wrap, reverse index and cursor save/restore/visibility.",
+        "Grid geometry follows the host window size from JoinedSuccessfully and Resize events, and the font scales so the host's grid fits the guest viewport.",
+        "Leaving the alternate screen restores the block view and notes on the owning block that full-screen output is not captured there.",
+        "Focused unit tests and format check pass."
+      ],
+      "verification": [
+        "node app/src/terminal/local_session_share/lite_viewer_tests.js",
+        "cargo test -p warp local_session_share --lib",
+        "./script/format --check"
+      ],
+      "evidence": "2026-08-02: Guests running `claude` on the host saw only 'Full-screen application running on the host \u2014 output is not mirrored'. Alt-screen output addresses cells absolutely and cannot be expressed in the block model, so added a Screen grid emulator to lite_viewer.html (scroll region, IL/DL/ICH/DCH/ECH, ED/EL with bg-aware erase style, deferred wrap, ESC D/E/M/7/8, DECTCEM cursor) plus a #screen overlay that takes over the view while alt screen is active and auto-fits the font to the host geometry. Verified by app/src/terminal/local_session_share/lite_viewer_tests.js, a stub-DOM node harness driving synthetic VT sequences: 20 checks passed (CUP placement, ED2, scroll region isolation, deferred wrap, IL/DL, ESC M, bg erase, cursor cell, resize, and the ?1049h/?1049l round trip). cargo test -p warp local_session_share --lib: 34 passed. format --check passed. WarpOss rebuilt."
+    },
+    {
+      "id": "feat-040",
+      "name": "Local share viewer: suppress stuck SGR underlines",
+      "description": "Stop the lite viewer from painting CSS text-decoration underlines for SGR 4, so Claude Code's stuck global underline does not rule every row the way native terminals hide cell decorations under glyph ink.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-039"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "SGR underline does not emit CSS text-decoration:underline in the lite viewer style table.",
+        "SGR strikethrough still emits line-through.",
+        "Focused viewer harness and format check pass."
+      ],
+      "verification": [
+        "node app/src/terminal/local_session_share/lite_viewer_tests.js",
+        "./script/format --check"
+      ],
+      "evidence": "2026-08-02: Claude Code leaves SGR 4 set for the whole alt-screen UI (github.com/anthropics/claude-code/issues/46719). Warp paints underlines inside the cell under glyph ink so they disappear; CSS text-decoration sat below the baseline and underlined every row. decorations() no longer emits underline (strike kept). lite_viewer_tests.js: 22 checks passed including the new underline/strike assertions."
+    },
+    {
+      "id": "feat-041",
+      "name": "Local share history pagination",
+      "description": "Keep the full pre-share scrollback on the guest, but mount only the newest ~3 blocks at join and reveal ~5 older blocks each time the guest scrolls up, until the start of shared history.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-035",
+        "feat-037"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "On join, only the newest INITIAL_VISIBLE_BLOCKS (3) scrollback blocks are mounted into the DOM.",
+        "Scrolling near the top loads HISTORY_PAGE_SIZE (5) older blocks, preserving scroll position.",
+        "Repeated scroll-up eventually reaches the beginning and further loads are no-ops.",
+        "A top marker shows remaining older count, then 'beginning of shared history'.",
+        "Focused viewer harness and format check pass.",
+        "Local share snapshot includes restored blocks so a guest sees the history the host has on screen after an app restart.",
+        "Paging works when the mounted history is shorter than the pane: wheel-up at the top and clicking the history marker both load the next page."
+      ],
+      "verification": [
+        "node app/src/terminal/local_session_share/lite_viewer_tests.js",
+        "cargo test -p warp scrollback --lib",
+        "./script/format --check"
+      ],
+      "evidence": "2026-08-02: ingestScrollback keeps full serialized scrollback in history.older and mounts only the newest 3; loadOlderHistory prepends 5 on scroll-up with scroll-anchor preservation; marker updates until beginning. lite_viewer_tests.js: 32 checks passed including pagination (initial 3 of 12, +5, drain to start, chronological order). Follow-up: the guest showed nothing because the snapshot had only 1 block \u2014 SharedSessionScrollbackType::All excludes restored blocks, and after an app restart the host's visible history is entirely restored blocks. Added shared_session::local_share_scrollback, which keeps every non-hidden block (restored included) because a local share mirrors this window rather than replaying a cloud session. New test local_share_scrollback_includes_restored_blocks; cargo test -p warp scrollback --lib: 29 passed. Follow-up 2: scroll events only fire when the pane overflows, so with only 3 short blocks mounted the guest could never page. Added a wheel handler (deltaY<0 at scrollTop 0, throttled to one page per 120ms) and made the marker a clickable 'load N older blocks (M left)' control for touch/keyboard. lite_viewer_tests.js: 34 checks passed, including wheel-up and marker-click paging against a 30-block history."
+    },
+    {
+      "id": "feat-042",
+      "name": "Local share guest command execution",
+      "description": "Allow local-share browser guests to run commands on the host (not view-only): type at the prompt and Enter to ExecuteCommand, and send WriteToPty keys while alt-screen or long-running commands are active.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-035",
+        "feat-038",
+        "feat-039"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "Guests join as Role::Executor and the lite viewer footer is contenteditable at the host prompt.",
+        "Enter on the guest sends UpstreamMessage::ExecuteCommand; the hub enqueues LocalShareGuestRequest and acks CommandExecutionRequestInFlight.",
+        "Host TerminalView applies ExecuteCommand via try_execute_command_on_behalf_of_shared_session_participant when idle.",
+        "Guest keystrokes in alt-screen (and WriteToPty for long-running) are forwarded to the host PTY; idle-prompt WriteToPty is ignored.",
+        "Agent prompts and control actions remain rejected.",
+        "Host toasts disclose that link holders can run commands.",
+        "Focused hub/protocol tests, lite_viewer harness, and format check pass."
+      ],
+      "verification": [
+        "cargo test -p warp local_session_share --lib",
+        "node app/src/terminal/local_session_share/lite_viewer_tests.js",
+        "./script/format --check"
+      ],
+      "evidence": "2026-08-02: Guests join as Role::Executor. handle_upstream forwards ExecuteCommand/WriteToPty as LocalShareGuestRequest (agent/control still rejected). Hub guest_tx/rx reverse channel; TerminalView listen_for_local_share_guest_requests applies ExecuteCommand via try_execute_command_on_behalf_of_shared_session_participant and WriteToPty when alt-screen or long-running. Lite viewer: contenteditable #typed, Enter\to ExecuteCommand, alt-screen keydown\to WriteToPty; pill shows interactive; toasts disclose execute. cargo test -p warp local_session_share --lib: 37 passed. lite_viewer_tests.js: 39 checks passed. ./script/format --check passed. Follow-up in feat-043: making the host-mirror span itself contenteditable did not actually work in a browser."
+    },
+    {
+      "id": "feat-043",
+      "name": "Guest command line and Agent Mode mirroring",
+      "description": "Give the local-share guest its own stable command line (the host-mirror span could not be typed into) and mirror Agent Mode turns, which never reach guests over the PTY.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-042"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "The guest types in a dedicated #guestbar element that no render pass re-parents or overwrites, so focus and caret survive host updates.",
+        "Editability no longer depends on the guest having observed a Precmd hook.",
+        "Enter runs the line when the host is idle and writes to the running command's stdin when one is active.",
+        "ExecuteCommand is still sent when the guest was never told a buffer id.",
+        "Agent Mode turns are published by the host as plain text (query + flattened output + running) keyed by exchange id, replacing in place as they stream.",
+        "Agent turns are replayed to guests that join after the turn started.",
+        "Focused hub tests, lite_viewer harness, and format check pass."
+      ],
+      "verification": [
+        "cargo test -p warp local_session_share --lib",
+        "node app/src/terminal/local_session_share/lite_viewer_tests.js",
+        "./script/format --check"
+      ],
+      "evidence": "2026-08-03: Typing was impossible because #typed is re-parented into the prompt's last row on every render (moving a focused contenteditable blurs it), the host mirror overwrote the draft, and editability was gated on session.state == 'prompt'. Replaced with a sibling #guestbar/#ginput that render never touches; #typed is a read-only mirror again. Enter routes to ExecuteCommand or WriteToPty(line + CR) by host state; ExecuteCommand falls back to a placeholder buffer id. Agent Mode: added LocalShareAgentExchange (hub ReplayLog.agent_exchanges, replayed after the backlog on join) published from TerminalView::handle_ai_history_model_event on BlocklistAIHistoryEvent::UpdatedStreamingExchange using display_user_query + format_output_for_copy; lite viewer renders/updates an agent block per exchange id. cargo test -p warp local_session_share --lib: 38 passed (new agent_exchange_is_mirrored_live_and_on_late_join). lite_viewer_tests.js: 46 checks passed. ./script/format --check passed. WarpOss rebuilt and relaunched."
+    },
+    {
+      "id": "feat-044",
+      "name": "Render Agent Mode markdown in the lite viewer",
+      "description": "Show Agent Mode answers as rendered markdown in the guest viewer instead of raw ## / * source text.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-043"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "Agent block output is rendered as HTML for headings, lists, bold/italic, inline code, fenced code, links, and blockquotes.",
+        "Raw HTML in agent text is escaped.",
+        "Streamed updates still replace the same agent block in place.",
+        "Focused lite_viewer harness passes."
+      ],
+      "verification": [
+        "node app/src/terminal/local_session_share/lite_viewer_tests.js"
+      ],
+      "evidence": "2026-08-03: Added renderMarkdown() in lite_viewer.html; upsertAgentExchange sets agentout.innerHTML. Sans-serif CSS for headings/lists/code. lite_viewer_tests.js: all checks passed including heading/list/code/escape/fence and in-place stream update. WarpOss rebuilt and relaunched."
+    },
+    {
+      "id": "feat-045",
+      "name": "Guest-initiated /agent and correct agent block order",
+      "description": "Let a local-share guest start Agent Mode with /agent from the browser, and keep mirrored agent turns in the host's block order on join and after a link rotation.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-044"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "A guest submitting '/agent <prompt>' starts an Agent Mode turn on the host instead of reaching the shell as a literal command.",
+        "Skill commands submitted by a guest route the same way; everything else still runs in the shell.",
+        "A slash command from a guest is not dropped just because a long-running command owns the PTY.",
+        "Join replays PTY frames and agent turns interleaved in publish order, so a rejoining or rotated-link guest sees the host's block order.",
+        "A mirrored agent turn arriving during the initial scrollback ingest lands after that history, not inside it.",
+        "Focused Rust and lite_viewer harnesses pass."
+      ],
+      "verification": [
+        "cargo test -p warp --lib local_session_share",
+        "node app/src/terminal/local_session_share/lite_viewer_tests.js",
+        "./script/format --check"
+      ],
+      "evidence": "2026-08-03: Guest '/agent add dan_docs to gitignore' reached the PTY verbatim (zsh: no such file or directory: /agent) because ExecuteCommand went straight to try_execute_command_on_behalf_of_shared_session_participant. Added Input::submit_line_on_behalf_of_shared_session_participant, which runs slash_command_model.detect_command first and dispatches execute_slash_command / execute_skill_command before falling back to the shell path; TerminalView::apply_local_share_guest_request calls it and skips the long-running guard for slash lines. Ordering: ReplayLog now stamps frames and agent snapshots with a shared monotonic seq and ReplayLog::replay() merges them, so JoinSnapshot.backlog is a single ordered stream (server.rs no longer sends agent turns last); the lite viewer mounts agent blocks through view.blocks via mountBlockEl and defers downstream messages while the first scrollback ingest is animation-frame slicing. cargo test -p warp --lib local_session_share: 39 passed (new late_join_replays_agent_exchanges_in_publish_order). lite_viewer_tests.js: 61 checks passed (new agent-block-ordering checks). ./script/format passed; cargo clippy -p warp --lib --all-features --tests reports no new warnings in the changed files. WarpOss rebuilt."
+    },
+    {
+      "id": "feat-046",
+      "name": "Guest Agent View follow-ups without /agent",
+      "description": "While the host Agent View is open, local-share guest plain-text lines continue the current conversation instead of hitting the shell. /agent still always starts a new conversation.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-045"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "/agent <prompt> from a guest still starts a new Agent Mode conversation.",
+        "When Agent View is active on the host, a guest line without a leading slash is submitted as a follow-up via submit_user_query_now.",
+        "When Agent View is not active, non-slash guest lines still run in the shell.",
+        "Long-running PTY commands do not drop Agent View follow-ups.",
+        "Focused typecheck and lite_viewer harness pass."
+      ],
+      "verification": [
+        "cargo check -p warp --lib",
+        "node app/src/terminal/local_session_share/lite_viewer_tests.js",
+        "./script/format"
+      ],
+      "evidence": "2026-08-04: After feat-045, guest '/agent \u2026' worked but follow-ups like 'what is this about?' still hit the shell (zsh: no matches found: about?). Extended Input::submit_line_on_behalf_of_shared_session_participant so that when AgentMode+AgentView are on and agent_view_controller.is_active(), a non-empty plain line calls submit_user_query_now (selected conversation, else new). TerminalView::apply_local_share_guest_request also skips the long-running guard when Agent View is active. Lite viewer placeholder/hint updated. /agent slash path unchanged (always new). cargo check -p warp --lib ok; lite_viewer_tests.js all checks passed; ./script/format clean."
+    },
+    {
+      "id": "feat-047",
+      "name": "Mirror agent tool approval to local-share guests",
+      "description": "The host's \"OK if I run this command and read the output?\" card is mirrored into the lite viewer, and the guest's Run / Reject answer is applied on the host so a paused Agent Mode turn can be unblocked from the browser.",
+      "phase": "Phase D",
+      "dependencies": [
+        "feat-046"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "A turn blocked on user confirmation publishes a pending_action (action id, kind, title, detail) to guests.",
+        "The lite viewer renders a Reject / Run card and marks the turn as waiting for approval.",
+        "A requested command is editable in the guest card before running; MCP calls and edit lists are not.",
+        "Run / Reject reach the host and resolve the same action the host card would have.",
+        "A stale or duplicate guest decision is a no-op instead of running an action twice.",
+        "Mirrored transcripts include tool-call results so guests can see what the agent ran.",
+        "Focused Rust tests, the lite_viewer harness, and formatting pass."
+      ],
+      "verification": [
+        "cargo nextest run -p warp local_session_share",
+        "node app/src/terminal/local_session_share/lite_viewer_tests.js",
+        "./script/format",
+        "cargo clippy -p warp --lib --all-features"
+      ],
+      "evidence": "2026-08-05: Guests saw an agent turn stop mid-sentence with no approval UI because blocked-action state lives in BlocklistAIActionModel, not in the exchange transcript. Added BlocklistAIActionModel::{action_awaiting_confirmation, conversation_awaiting_confirmation, resolve_action_awaiting_confirmation}; LocalShareAgentExchange gained pending_action and now formats output with the action model so tool results appear (capped at 32 KiB). TerminalView republishes the owning turn on ActionBlockedOnUserConfirmation / ExecutingAction / FinishedAction. Guests answer over a local-share-only LocalShareAgentDecision envelope parsed ahead of UpstreamMessage. cargo nextest run -p warp local_session_share: 43 passed, 0 failed. lite_viewer_tests.js: all checks passed (12 new approval checks). ./script/format clean; cargo clippy -p warp --lib --all-features introduced no new warnings in touched files."
+    }
+  ],
+  "future_phases": [
+    {
+      "phase": "Phase B",
+      "scope": [],
+      "note": "Phase B complete (feat-013\u2013018)."
+    },
+    {
+      "phase": "Phase C",
+      "scope": [],
+      "note": "Phase C complete (feat-009\u2013012, feat-019\u2013024)."
+    },
+    {
+      "phase": "Phase D",
+      "scope": [],
+      "note": "Phase D complete through feat-046 (guest Agent View follow-ups). feat-047 mirrors the agent tool-approval card and lets guests answer it."
+    }
+  ]
+}

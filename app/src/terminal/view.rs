@@ -32,6 +32,8 @@ use crate::ai::block_context::BlockContext;
 use crate::global_resource_handles::GlobalResourceHandlesProvider;
 pub(crate) mod docker_sandbox;
 mod link_detection;
+#[cfg(not(target_family = "wasm"))]
+mod local_session_share;
 mod open_in_warp;
 mod pane_impl;
 mod passive_suggestions;
@@ -92,7 +94,8 @@ use inline_banner::{
     AwsBedrockLoginBannerState, AwsCliNotInstalledBannerAction, AwsCliNotInstalledBannerState,
     ByoLlmAuthBannerSessionState, OpenInWarpBannerState, VimModeBannerAction,
     render_alias_expansion_banner, render_aws_bedrock_login_banner,
-    render_aws_cli_not_installed_banner, render_inline_notifications_discovery_banner,
+    render_aws_cli_not_installed_banner, render_inline_local_lan_share_ended_banner,
+    render_inline_local_lan_share_started_banner, render_inline_notifications_discovery_banner,
     render_inline_notifications_error_banner, render_inline_shared_session_ended_banner,
     render_inline_shared_session_started_banner, render_open_in_warp_banner,
     render_shell_process_terminated_banner, render_vim_mode_banner,
@@ -1043,6 +1046,8 @@ pub enum InlineBannerType {
     AliasExpansion,
     SharedSessionStart,
     SharedSessionEnd,
+    LocalLanShareStart,
+    LocalLanShareEnd,
     ShellProcessTerminated,
     OpenInWarp,
     VimMode,
@@ -1069,6 +1074,8 @@ impl InlineBannerType {
             | Self::AliasExpansion
             | Self::SharedSessionStart
             | Self::SharedSessionEnd
+            | Self::LocalLanShareStart
+            | Self::LocalLanShareEnd
             | Self::ShellProcessTerminated
             | Self::OpenInWarp
             | Self::VimMode => false,
@@ -1106,6 +1113,10 @@ struct InlineBannersState {
     alias_expansion_banner: AliasExpansionBanner,
 
     shared_session_banner_state: SharedSessionBanners,
+
+    /// Inline banners for local LAN / Tailscale session share (desktop host).
+    #[cfg(not(target_family = "wasm"))]
+    local_lan_share_banner_state: SharedSessionBanners,
 
     /// Information for a banner which notifies the user that the
     /// shell process has terminated, or None if there is no
@@ -2795,6 +2806,10 @@ pub struct TerminalView {
     // and [`SharedSessionKind::Viewer`] to store some common struct for common fields.
     shared_session: Option<SharedSessionAdapter>,
 
+    /// Host-local LAN/Tailscale session share hub for this pane (desktop only).
+    #[cfg(not(target_family = "wasm"))]
+    local_session_share_hub: crate::terminal::local_session_share::LocalSessionShareHub,
+
     /// Stashed source from `attempt_to_share_session` so `on_session_share_started`
     /// can decide whether to auto-copy the link vs open the sharing dialog.
     pending_share_source: Option<SharedSessionActionSource>,
@@ -4475,6 +4490,8 @@ impl TerminalView {
             ai_render_context,
             get_relevant_files_controller,
             shared_session: None,
+            #[cfg(not(target_family = "wasm"))]
+            local_session_share_hub: local_session_share::new_hub(),
             pending_share_source: None,
             auto_stop_sharing_on_cli_end: false,
             conversation_ended_tombstone_view_id: None,
@@ -6423,6 +6440,18 @@ impl TerminalView {
         ) {
             self.maybe_insert_tombstone_for_non_running_shared_ambient_task(ctx);
         }
+        #[cfg(not(target_family = "wasm"))]
+        if let BlocklistAIHistoryEvent::UpdatedStreamingExchange {
+            exchange_id,
+            conversation_id,
+            is_hidden,
+            ..
+        } = event
+        {
+            if !is_hidden {
+                self.publish_local_share_agent_exchange(*conversation_id, *exchange_id, ctx);
+            }
+        }
         match event {
             BlocklistAIHistoryEvent::AppendedExchange {
                 exchange_id,
@@ -7699,6 +7728,19 @@ impl TerminalView {
         event: &BlocklistAIActionEvent,
         ctx: &mut ViewContext<Self>,
     ) {
+        // Approval state is action-model state, so the streaming-exchange
+        // mirror never fires for it; local-share guests would see the turn stop
+        // mid-sentence with no card and no way to unblock it.
+        #[cfg(not(target_family = "wasm"))]
+        if matches!(
+            event,
+            BlocklistAIActionEvent::ActionBlockedOnUserConfirmation(..)
+                | BlocklistAIActionEvent::ExecutingAction(..)
+                | BlocklistAIActionEvent::FinishedAction { .. }
+        ) {
+            self.publish_local_share_agent_action_state(event.action_id(), ctx);
+        }
+
         match event {
             BlocklistAIActionEvent::ActionBlockedOnUserConfirmation(_) => {
                 let is_agent_in_control = self
@@ -7892,7 +7934,11 @@ impl TerminalView {
         ctx: &mut ViewContext<Self>,
     ) {
         match event {
-            ShellCommandExecutorEvent::ExecuteCommand { command, action_id } => {
+            ShellCommandExecutorEvent::ExecuteCommand {
+                command,
+                action_id,
+                conversation_id,
+            } => {
                 let Some(session_id) = self.active_block_session_id() else {
                     return;
                 };
@@ -7905,9 +7951,10 @@ impl TerminalView {
                     safe_error!(
                         safe: ("No conversation ID found for command with ID: {:?}", action_id),
                         full: (
-                            "No conversation ID found for requested command: ID: {:?}, command: \
-                            {command}",
-                            action_id
+                            "No conversation found for requested command: ID: {:?}, conversation \
+                            ID: {:?}, command: {command}",
+                            action_id,
+                            conversation_id
                         )
                     );
                     return;
@@ -22691,6 +22738,8 @@ impl TerminalView {
                     block_id: block_id.clone(),
                     operations: operations.clone(),
                 });
+                #[cfg(not(target_family = "wasm"))]
+                self.publish_local_share_typed_input(ctx);
             }
             InputEvent::InputFocusedFromMiddleClick => {
                 self.focus_input_box(ctx);
@@ -24914,6 +24963,43 @@ impl TerminalView {
                             *ended_at,
                             appearance,
                         ),
+                    );
+                }
+                SharedSessionBanners::None => {}
+            }
+        }
+
+        #[cfg(not(target_family = "wasm"))]
+        if FeatureFlag::LocalLanSessionShare.is_enabled() {
+            match &self.inline_banners_state.local_lan_share_banner_state {
+                SharedSessionBanners::ActiveShare {
+                    started_banner_id,
+                    started_at,
+                    ..
+                } => {
+                    inline_banners.insert(
+                        *started_banner_id,
+                        render_inline_local_lan_share_started_banner(true, *started_at, appearance),
+                    );
+                }
+                SharedSessionBanners::LastShared {
+                    started_at,
+                    ended_at,
+                    started_banner_id,
+                    ended_banner_id,
+                    ..
+                } => {
+                    inline_banners.insert(
+                        *started_banner_id,
+                        render_inline_local_lan_share_started_banner(
+                            false,
+                            *started_at,
+                            appearance,
+                        ),
+                    );
+                    inline_banners.insert(
+                        *ended_banner_id,
+                        render_inline_local_lan_share_ended_banner(*ended_at, appearance),
                     );
                 }
                 SharedSessionBanners::None => {}
@@ -27399,6 +27485,11 @@ impl TypedActionView for TerminalView {
             | VimModeBanner(_)
             | InsertMostRecentCommandCorrection
             | StopSharingCurrentSession { .. }
+            | StartLocalLanShare
+            | StartLocalLanShareWithBind { .. }
+            | StopLocalLanShare
+            | CopyLocalLanShareLink
+            | RotateLocalLanShareLink
             | RequestSharedSessionRole(_)
             | OnboardingFlow(_)
             | ImportSettings
@@ -27948,6 +28039,26 @@ impl TypedActionView for TerminalView {
                 self.toggle_block_filter_on_selected_or_last_block(*source, ctx);
             }
             CopySharedSessionLink { source } => self.copy_shared_session_link(*source, ctx),
+            StartLocalLanShare => {
+                #[cfg(not(target_family = "wasm"))]
+                self.start_local_lan_share(ctx);
+            }
+            StartLocalLanShareWithBind { bind_ip } => {
+                #[cfg(not(target_family = "wasm"))]
+                self.start_local_lan_share_with_bind(*bind_ip, None, ctx);
+            }
+            StopLocalLanShare => {
+                #[cfg(not(target_family = "wasm"))]
+                self.stop_local_lan_share(ctx);
+            }
+            CopyLocalLanShareLink => {
+                #[cfg(not(target_family = "wasm"))]
+                self.copy_local_lan_share_link(ctx);
+            }
+            RotateLocalLanShareLink => {
+                #[cfg(not(target_family = "wasm"))]
+                self.rotate_local_lan_share_link(ctx);
+            }
             ToggleSnackbarInActivePane => self.toggle_snackbar_in_active_pane(ctx),
             MakeAllParticipantsReaders { reason } => {
                 self.make_all_shared_session_participants_readers(*reason, ctx)
@@ -29442,6 +29553,13 @@ impl View for TerminalView {
         context
             .set
             .insert(model_lock.shared_session_status().as_keymap_context());
+
+        #[cfg(not(target_family = "wasm"))]
+        {
+            context
+                .set
+                .insert(model_lock.local_lan_share_status().as_keymap_context());
+        }
 
         #[cfg(feature = "local_fs")]
         {

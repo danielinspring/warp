@@ -22,6 +22,18 @@ pub static AGENT: LazyLock<StaticCommand> = LazyLock::new(|| StaticCommand {
     argument: Some(Argument::optional().with_execute_on_selection()),
 });
 
+pub const AGENT_VIZ: StaticCommand = StaticCommand {
+    name: "/agent-viz",
+    description: "Open the agent office visualization",
+    kind: SlashCommandKind::AgentViz,
+    supported_surfaces: SlashCommandSurfaces::GuiOnly {
+        icon_path: "bundled/svg/oz.svg",
+    },
+    availability: Availability::AI_ENABLED,
+    auto_enter_ai_mode: false,
+    argument: None,
+};
+
 pub static CLOUD_AGENT: LazyLock<StaticCommand> = LazyLock::new(|| StaticCommand {
     name: "/cloud-agent",
     description: "Start a new cloud agent conversation",
@@ -991,6 +1003,7 @@ fn all_commands_for_all_surfaces() -> Vec<StaticCommand> {
         OPEN_MCP_SERVERS,
         OPEN_RULES,
         AGENT.clone(),
+        AGENT_VIZ,
         CLEAR,
         NEW.clone(),
         PLAN.clone(),

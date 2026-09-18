@@ -2728,6 +2728,7 @@ impl BlocklistAIController {
                 ai_identifiers,
                 recovery,
                 team_scope,
+                self.action_model.clone(),
                 ctx,
             )
         });
@@ -3314,6 +3315,7 @@ impl BlocklistAIController {
                     return;
                 };
                 let new_exchange_ids = conversation.new_exchange_ids_for_response(&stream_id);
+                let local_runtime_owns_tool_loop = response_stream.as_ref(ctx).owns_tool_loop();
                 let mut was_passive_request = false;
                 let mut is_any_exchange_unfinished = false;
                 let mut actions_to_queue = vec![];
@@ -3331,7 +3333,9 @@ impl BlocklistAIController {
                         ..
                     } = &exchange.output_status
                     {
-                        actions_to_queue.extend(output.get().actions().cloned());
+                        if !local_runtime_owns_tool_loop {
+                            actions_to_queue.extend(output.get().actions().cloned());
+                        }
                     }
                 }
 

@@ -917,6 +917,9 @@ impl Input {
             SlashCommandKind::OpenProjectRules => {
                 ctx.dispatch_typed_action(&TerminalAction::OpenProjectRulesPane);
             }
+            SlashCommandKind::AgentViz => {
+                ctx.dispatch_typed_action(&WorkspaceAction::OpenAgentVizPane);
+            }
             SlashCommandKind::OpenRules => {
                 ctx.dispatch_typed_action(&TerminalAction::OpenRulesPane);
             }

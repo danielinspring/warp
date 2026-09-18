@@ -1,0 +1,31 @@
+{
+  "id": "chatcmpl-18bbcc4a-f9b1-4ba7-aa76-93b30f213a76",
+  "created": 1785394956,
+  "model": "qwen3-coder:latest",
+  "object": "chat.completion",
+  "choices": [
+    {
+      "finish_reason": "tool_calls",
+      "index": 0,
+      "message": {
+        "content": "",
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "function": {
+              "arguments": "{\"todos\": [{\"id\": \"step1\", \"title\": \"README\\uc758 \\uccab 10\\uc904 \\uc77d\\uae30\"}, {\"id\": \"step2\", \"title\": \"TODO/FIXME \\uc8fc\\uc11d grep\"}, {\"id\": \"step3\", \"title\": \"\\ucc3e\\uc740 \\uac1c\\uc218 \\uc694\\uc57d\"}]}",
+              "name": "update_todos"
+            },
+            "id": "call_p3xen7ym",
+            "type": "function"
+          }
+        ]
+      }
+    }
+  ],
+  "usage": {
+    "completion_tokens": 84,
+    "prompt_tokens": 585,
+    "total_tokens": 669
+  }
+}

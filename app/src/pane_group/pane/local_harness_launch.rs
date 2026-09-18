@@ -144,7 +144,7 @@ pub(super) fn local_child_task_config(
         .as_deref()
         .and_then(normalize_orchestrator_agent_name);
     match harness {
-        Harness::Oz | Harness::Unknown => None,
+        Harness::Oz | Harness::Ollama | Harness::Unknown => None,
         Harness::Claude | Harness::OpenCode | Harness::Gemini | Harness::Codex => {
             Some(AgentConfigSnapshot {
                 name: agent_name,
@@ -240,6 +240,7 @@ pub(super) async fn prepare_local_harness_child_launch(
             build_local_opencode_child_command(&prompt)
         }
         Harness::Gemini => unreachable!("normalize_local_child_harness filters out Gemini"),
+        Harness::Ollama => unreachable!("normalize_local_child_harness filters out Ollama"),
     };
 
     let task_id = ai_client

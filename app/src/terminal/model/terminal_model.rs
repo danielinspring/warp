@@ -503,6 +503,12 @@ pub struct TerminalModel {
     /// the state can technically diverge.
     ordered_terminal_events_for_shared_session_tx: Option<Sender<OrderedTerminalEventType>>,
 
+    /// Publisher into an active local LAN session share hub. Distinct from
+    /// cloud `ordered_terminal_events_for_shared_session_tx` (PRODUCT.md P31).
+    #[cfg(not(target_family = "wasm"))]
+    local_share_event_publisher:
+        Option<crate::terminal::local_session_share::LocalShareEventPublisher>,
+
     /// A sender for write to pty events for a shared session viewer.
     ///
     /// This field is only [`Some`] if this session is shared.
@@ -1115,6 +1121,8 @@ impl TerminalModel {
             is_dummy_cloud_mode_session,
             conversation_transcript_viewer_status: None,
             ordered_terminal_events_for_shared_session_tx: None,
+            #[cfg(not(target_family = "wasm"))]
+            local_share_event_publisher: None,
             write_to_pty_events_for_shared_session_tx: None,
             is_receiving_agent_conversation_replay: false,
             notify_on_end_of_ssh_login: None,
@@ -1273,6 +1281,61 @@ impl TerminalModel {
         self.ordered_terminal_events_for_shared_session_tx = None;
     }
 
+    #[cfg(not(target_family = "wasm"))]
+    pub fn set_local_share_event_publisher(
+        &mut self,
+        publisher: crate::terminal::local_session_share::LocalShareEventPublisher,
+    ) {
+        self.local_share_event_publisher = Some(publisher);
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub fn clear_local_share_event_publisher(&mut self) {
+        self.local_share_event_publisher = None;
+    }
+
+    pub fn has_active_local_lan_share(&self) -> bool {
+        #[cfg(not(target_family = "wasm"))]
+        {
+            self.local_share_event_publisher.is_some()
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            false
+        }
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    pub fn local_lan_share_status(
+        &self,
+    ) -> crate::terminal::local_session_share::LocalLanShareStatus {
+        if self.local_share_event_publisher.is_some() {
+            crate::terminal::local_session_share::LocalLanShareStatus::Active
+        } else {
+            crate::terminal::local_session_share::LocalLanShareStatus::Inactive
+        }
+    }
+
+    /// Fans an ordered terminal event to the cloud shared-session channel and/or
+    /// the local LAN share hub publisher (PRODUCT.md P24 best-effort).
+    fn fanout_ordered_terminal_event(&self, event: OrderedTerminalEventType) {
+        #[cfg(not(target_family = "wasm"))]
+        if let Some(publisher) = &self.local_share_event_publisher {
+            if let Err(e) = publisher.publish_event(event.clone()) {
+                log::warn!("Failed to publish local LAN share ordered event: {e}");
+            }
+        }
+        if let Some(tx) = &self.ordered_terminal_events_for_shared_session_tx {
+            if let Err(e) = tx.try_send(event) {
+                log::warn!("Failed to send OrderedTerminalEventType: {e}");
+            }
+        }
+    }
+
+    fn should_fanout_shared_session_events(&self) -> bool {
+        self.shared_session_status().is_sharer() || self.has_active_local_lan_share()
+    }
+
     fn ai_metadata_to_protocol(metadata: &AgentInteractionMetadata) -> AICommandMetadata {
         AICommandMetadata {
             tool_call_id: metadata
@@ -1325,40 +1388,30 @@ impl TerminalModel {
             ));
         }
 
-        if self.shared_session_status().is_sharer() {
-            if let Some(tx) = &self.ordered_terminal_events_for_shared_session_tx {
-                let encoded = encode_agent_response_event(response);
-                if let Err(e) = tx.try_send(OrderedTerminalEventType::AgentResponseEvent {
-                    response_initiator,
-                    response_event: encoded,
-                    forked_from_conversation_token,
-                }) {
-                    log::warn!("Failed to send OrderedTerminalEventType::AgentResponseEvent: {e}");
-                }
-            }
+        if self.should_fanout_shared_session_events() {
+            let encoded = encode_agent_response_event(response);
+            self.fanout_ordered_terminal_event(OrderedTerminalEventType::AgentResponseEvent {
+                response_initiator,
+                response_event: encoded,
+                forked_from_conversation_token,
+            });
         } else {
             log::debug!("Not sharing this session; ignoring agent response event");
         }
     }
 
     pub fn send_agent_conversation_replay_started_for_shared_session(&mut self) {
-        if self.shared_session_status().is_sharer()
-            && let Some(tx) = &self.ordered_terminal_events_for_shared_session_tx
-            && let Err(e) = tx.try_send(OrderedTerminalEventType::AgentConversationReplayStarted)
-        {
-            log::warn!(
-                "Failed to send OrderedTerminalEventType::AgentConversationReplayStarted: {e}"
+        if self.should_fanout_shared_session_events() {
+            self.fanout_ordered_terminal_event(
+                OrderedTerminalEventType::AgentConversationReplayStarted,
             );
         }
     }
 
     pub fn send_agent_conversation_replay_ended_for_shared_session(&mut self) {
-        if self.shared_session_status().is_sharer()
-            && let Some(tx) = &self.ordered_terminal_events_for_shared_session_tx
-            && let Err(e) = tx.try_send(OrderedTerminalEventType::AgentConversationReplayEnded)
-        {
-            log::warn!(
-                "Failed to send OrderedTerminalEventType::AgentConversationReplayEnded: {e}"
+        if self.should_fanout_shared_session_events() {
+            self.fanout_ordered_terminal_event(
+                OrderedTerminalEventType::AgentConversationReplayEnded,
             );
         }
     }
@@ -1369,11 +1422,8 @@ impl TerminalModel {
     /// Viewers use this to clear `BlockList::is_executing_oz_environment_startup_commands`
     /// and tear down the "Running setup commands…" chip.
     pub fn send_cloud_mode_setup_phase_ended_for_shared_session(&mut self) {
-        if self.shared_session_status().is_sharer()
-            && let Some(tx) = &self.ordered_terminal_events_for_shared_session_tx
-            && let Err(e) = tx.try_send(OrderedTerminalEventType::CloudModeSetupPhaseEnded)
-        {
-            log::warn!("Failed to send OrderedTerminalEventType::CloudModeSetupPhaseEnded: {e}");
+        if self.should_fanout_shared_session_events() {
+            self.fanout_ordered_terminal_event(OrderedTerminalEventType::CloudModeSetupPhaseEnded);
         }
     }
 
@@ -1731,15 +1781,14 @@ impl TerminalModel {
 
         // TODO (suraj): add participant ID to active block metadata.
 
-        // If this is a sharer, send an event to indicate the start of the command execution
-        // along with the identity of the participant that ran the command.
-        if let Some(tx) = &self.ordered_terminal_events_for_shared_session_tx
-            && let Err(e) = tx.try_send(OrderedTerminalEventType::CommandExecutionStarted {
+        // If this is a sharer (cloud or local LAN), send an event to indicate
+        // the start of the command execution along with the identity of the
+        // participant that ran the command.
+        if self.should_fanout_shared_session_events() {
+            self.fanout_ordered_terminal_event(OrderedTerminalEventType::CommandExecutionStarted {
                 participant_id,
                 ai_metadata: agent_metadata.as_ref().map(Self::ai_metadata_to_protocol),
-            })
-        {
-            log::warn!("Failed to send OrderedTerminalEventType::CommandExecutionStarted: {e}");
+            });
         }
         outcome
     }
@@ -2116,16 +2165,12 @@ impl TerminalModel {
         if size_update.rows_or_columns_changed() {
             let num_rows = size_update.new_size.rows();
             let num_cols = size_update.new_size.columns();
-            if let Some(tx) = &self.ordered_terminal_events_for_shared_session_tx
-                && let Err(e) = tx.try_send(OrderedTerminalEventType::Resize {
-                    window_size: session_sharing_protocol::common::WindowSize {
-                        num_rows,
-                        num_cols,
-                    },
-                })
-            {
-                log::warn!("Failed to send OrderedTerminalEventType::Resize: {e}");
+            let window_size = session_sharing_protocol::common::WindowSize { num_rows, num_cols };
+            #[cfg(not(target_family = "wasm"))]
+            if let Some(publisher) = &self.local_share_event_publisher {
+                publisher.set_window_size(window_size);
             }
+            self.fanout_ordered_terminal_event(OrderedTerminalEventType::Resize { window_size });
         }
     }
 
@@ -2382,13 +2427,9 @@ impl TerminalModel {
         let active_block_completion = self.block_list.complete_active_block_and_advance(data);
 
         if active_block_completion == ActiveBlockCompletion::NewlyFinished {
-            if let Some(tx) = &self.ordered_terminal_events_for_shared_session_tx
-                && let Err(e) = tx.try_send(OrderedTerminalEventType::CommandExecutionFinished {
-                    next_block_id: block_id.into(),
-                })
-            {
-                log::warn!("Failed to send OrderedTerminalEventType::CommandFinished: {e}");
-            }
+            self.fanout_ordered_terminal_event(OrderedTerminalEventType::CommandExecutionFinished {
+                next_block_id: block_id.into(),
+            });
 
             self.emit_handler_event(HandlerEvent::CommandFinished {
                 command_type: if is_for_in_band_command {
@@ -3338,6 +3379,15 @@ impl ansi::Handler for TerminalModel {
             })
         {
             log::warn!("Failed to send OrderedTerminalEventType::PtyBytesRead: {e}");
+        }
+
+        #[cfg(not(target_family = "wasm"))]
+        if !input.is_synchronized_output_frame() {
+            if let Some(publisher) = &self.local_share_event_publisher {
+                if let Err(e) = publisher.publish_pty_bytes(bytes) {
+                    log::warn!("Failed to publish local LAN share PtyBytesRead: {e}");
+                }
+            }
         }
 
         delegate!(self.on_finish_byte_processing(input))

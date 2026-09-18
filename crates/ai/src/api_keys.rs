@@ -45,6 +45,15 @@ pub enum ApiKeyManagerEvent {
     KeysUpdated,
 }
 
+/// Runtime-only state for the configured Ollama server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OllamaConnectionState {
+    Untested,
+    Testing,
+    Connected { models: Vec<String> },
+    Failed { message: String },
+}
+
 /// User-provided API keys for AI providers.
 ///
 /// These are used for "Bring Your Own API Key" functionality, allowing
@@ -522,6 +531,7 @@ struct CustomEndpointState {
 /// A structure that manages API keys for AI providers.
 pub struct ApiKeyManager {
     keys: ApiKeys,
+    ollama_connection_state: OllamaConnectionState,
     custom_endpoints: CustomEndpointState,
     /// OAuth tokens for a connected xAI/Grok subscription, if any. Persisted
     /// separately from `keys` under [`GROK_SECURE_STORAGE_KEY`];
@@ -584,7 +594,7 @@ fn provider_telemetry_provider(
         LLMProvider::Anthropic => Some(ProviderCredentialTelemetryProvider::Anthropic),
         LLMProvider::Google => Some(ProviderCredentialTelemetryProvider::Google),
         LLMProvider::Xai => Some(ProviderCredentialTelemetryProvider::Xai),
-        LLMProvider::Unknown => None,
+        LLMProvider::Ollama | LLMProvider::Unknown => None,
     }
 }
 
@@ -615,6 +625,7 @@ impl ApiKeyManager {
         let grok_tokens = Self::load_grok_tokens_from_secure_storage(ctx);
         Self {
             keys,
+            ollama_connection_state: OllamaConnectionState::Untested,
             custom_endpoints: CustomEndpointState {
                 definitions: None,
                 settings_valid: true,
@@ -957,6 +968,7 @@ impl ApiKeyManager {
 
     pub fn set_ollama_base_url(&mut self, url: Option<String>, ctx: &mut ModelContext<Self>) {
         self.keys.ollama_base_url = url;
+        self.ollama_connection_state = OllamaConnectionState::Untested;
         ctx.emit(ApiKeyManagerEvent::KeysUpdated);
         self.write_keys_to_secure_storage(ctx);
     }
@@ -969,8 +981,22 @@ impl ApiKeyManager {
 
     pub fn set_ollama_api_key(&mut self, key: Option<String>, ctx: &mut ModelContext<Self>) {
         self.keys.ollama_api_key = key;
+        self.ollama_connection_state = OllamaConnectionState::Untested;
         ctx.emit(ApiKeyManagerEvent::KeysUpdated);
         self.write_keys_to_secure_storage(ctx);
+    }
+
+    pub fn set_ollama_connection_state(
+        &mut self,
+        state: OllamaConnectionState,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        self.ollama_connection_state = state;
+        ctx.emit(ApiKeyManagerEvent::KeysUpdated);
+    }
+
+    pub fn ollama_connection_state(&self) -> &OllamaConnectionState {
+        &self.ollama_connection_state
     }
 
     pub fn set_aws_credentials_state(

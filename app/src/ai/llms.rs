@@ -1,7 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
-use ai::api_keys::{ApiKeyManager, ApiKeyManagerEvent, CustomEndpoint, CustomEndpointModel};
+use ai::api_keys::{
+    ApiKeyManager, ApiKeyManagerEvent, ApiKeys, CustomEndpoint, CustomEndpointModel,
+    OllamaConnectionState,
+};
 pub use ai::{LLMId, LLMProvider};
 use parking_lot::FairMutex;
 use serde::{Deserialize, Serialize, de};
@@ -21,6 +24,18 @@ use crate::user_config::{WarpConfig, WarpConfigUpdateEvent};
 use crate::workspaces::user_workspaces::ResolvedTeamScope;
 use crate::workspaces::user_workspaces::{TeamScope, UserWorkspaces, UserWorkspacesEvent};
 
+const OLLAMA_MODEL_ID_PREFIX: &str = "ollama:";
+
+pub fn ollama_model_id(model_name: &str) -> LLMId {
+    format!("{OLLAMA_MODEL_ID_PREFIX}{model_name}").into()
+}
+
+pub fn ollama_model_name_from_id(id: &LLMId) -> Option<&str> {
+    id.as_str()
+        .strip_prefix(OLLAMA_MODEL_ID_PREFIX)
+        .filter(|name| !name.is_empty())
+}
+
 /// Checks if a user's' API key is being used for the given provider.
 /// Returns `true` if BYO API key is enabled and a key exists for the provider.
 /// For xAI, a connected Grok subscription counts: its OAuth access token is
@@ -36,6 +51,7 @@ pub fn is_using_api_key_for_provider(provider: &LLMProvider, app: &AppContext) -
         LLMProvider::Anthropic => manager.keys().anthropic.is_some(),
         LLMProvider::Google => manager.keys().google.is_some(),
         LLMProvider::Xai => manager.grok_tokens().is_some(),
+        LLMProvider::Ollama => false,
         LLMProvider::Unknown => false,
     }
 }
@@ -726,6 +742,7 @@ struct AvailableLLMsUpdate {
 pub struct LLMPreferences {
     /// Whether the most recent authed agent-mode model-list fetch failed.
     agent_mode_models_unavailable: HashMap<Option<ServerId>, bool>,
+    ollama_agent_models: Option<AvailableLLMs>,
     last_update: Option<AvailableLLMsUpdate>,
     // Stores model overrides for a given terminal view. User selections are
     // normalized against the GUI profile default, while explicit child-run
@@ -758,6 +775,7 @@ impl LLMPreferences {
         ctx.subscribe_to_model(
             &ApiKeyManager::handle(ctx),
             |me, _, _event: &ApiKeyManagerEvent, ctx| {
+                me.refresh_ollama_agent_models(ctx);
                 me.rebuild_custom_llms(ctx);
                 me.reconcile_disabled_model_preferences_for_known_scopes(ctx);
                 ctx.emit(LLMPreferencesEvent::UpdatedAvailableLLMs);
@@ -777,9 +795,14 @@ impl LLMPreferences {
 
         let base_llm_for_terminal_view = HashMap::new();
         let custom_llms = build_custom_llm_infos(ApiKeyManager::as_ref(ctx).custom_endpoints());
+        let ollama_agent_models = ollama_available_from_config(
+            ApiKeyManager::as_ref(ctx).keys(),
+            ApiKeyManager::as_ref(ctx).ollama_connection_state(),
+        );
 
         let mut me = Self {
             agent_mode_models_unavailable: HashMap::new(),
+            ollama_agent_models,
             last_update: None,
             base_llm_for_terminal_view,
             custom_llms,
@@ -818,6 +841,9 @@ impl LLMPreferences {
         app: &'a AppContext,
         terminal_view_id: Option<EntityId>,
     ) -> &'a LLMInfo {
+        if let Some(ollama_models) = &self.ollama_agent_models {
+            return ollama_models.default_llm_info();
+        }
         let models_by_feature =
             UserWorkspaces::as_ref(app).feature_model_choice_for_team_uid(team_uid);
         if let Some(terminal_view_id) = terminal_view_id {
@@ -845,6 +871,10 @@ impl LLMPreferences {
         app: &'a AppContext,
         terminal_view_id: Option<EntityId>,
     ) -> &'a LLMInfo {
+        if let Some(ollama_models) = &self.ollama_agent_models {
+            return ollama_models.default_llm_info();
+        }
+
         let models_by_feature = UserWorkspaces::as_ref(app).feature_model_choice_for_scope(scope);
         if let Some(terminal_view_id) = terminal_view_id {
             let raw_override = self.base_llm_for_terminal_view.get(&terminal_view_id);
@@ -917,6 +947,11 @@ impl LLMPreferences {
         app: &'a AppContext,
     ) -> Option<&'a LLMInfo> {
         Self::server_info_for_id_router_gated(available, id)
+            .or_else(|| {
+                self.ollama_agent_models
+                    .as_ref()
+                    .and_then(|models| models.info_for_id(id))
+            })
             .or_else(|| self.custom_llm_info_for_id_if_enabled(id, app))
             .or_else(|| self.custom_router_llm_info_for_id_if_enabled(id))
     }
@@ -980,9 +1015,15 @@ impl LLMPreferences {
         team_uid: Option<ServerId>,
         app: &'a AppContext,
     ) -> impl Iterator<Item = &'a LLMInfo> + use<'a> {
+        let ollama_choices = self
+            .ollama_agent_models
+            .as_ref()
+            .into_iter()
+            .flat_map(|models| models.choices.iter());
+
         // Don't show admin-disabled models in the dropdown
         let routers_enabled = FeatureFlag::CustomModelRouters.is_enabled();
-        UserWorkspaces::as_ref(app)
+        let server_choices = UserWorkspaces::as_ref(app)
             .feature_model_choice_for_team_uid(team_uid)
             .agent_mode
             .choices
@@ -992,7 +1033,10 @@ impl LLMPreferences {
             // the entire custom-router feature is controlled by one flag.
             .filter(move |llm| {
                 routers_enabled || !custom_model_routers::is_cloud_custom_router_id(llm.id.as_str())
-            })
+            });
+
+        ollama_choices
+            .chain(server_choices)
             .chain(self.custom_llm_choices(app))
             .chain(self.custom_router_choices())
     }
@@ -1183,17 +1227,22 @@ impl LLMPreferences {
     /// Falls back to the user's custom-endpoint LLMs when the id isn't a server-known model
     /// id (e.g. when it's a `config_key` UUID).
     pub fn get_llm_info<'a>(&'a self, id: &LLMId, app: &'a AppContext) -> Option<&'a LLMInfo> {
-        let workspaces = UserWorkspaces::as_ref(app);
-        workspaces
-            .current_workspace()
-            .map(|workspace| workspace.teams.iter())
-            .into_iter()
-            .flatten()
-            .find_map(|team| team.feature_model_choice.info_for_id(id))
+        self.ollama_agent_models
+            .as_ref()
+            .and_then(|models| models.info_for_id(id))
             .or_else(|| {
+                let workspaces = UserWorkspaces::as_ref(app);
                 workspaces
-                    .feature_model_choice_for_team_uid(None)
-                    .info_for_id(id)
+                    .current_workspace()
+                    .map(|workspace| workspace.teams.iter())
+                    .into_iter()
+                    .flatten()
+                    .find_map(|team| team.feature_model_choice.info_for_id(id))
+                    .or_else(|| {
+                        workspaces
+                            .feature_model_choice_for_team_uid(None)
+                            .info_for_id(id)
+                    })
             })
             .or_else(|| self.custom_llm_info_for_id(id))
             .or_else(|| self.custom_router_llm_info_for_id(id))
@@ -1625,6 +1674,20 @@ impl LLMPreferences {
         terminal_view_id: EntityId,
         ctx: &mut ModelContext<Self>,
     ) {
+        if let Some(ollama_model) = ollama_model_name_from_id(preferred_llm_id) {
+            ApiKeyManager::handle(ctx).update(ctx, |manager, ctx| {
+                manager.set_ollama_model(Some(ollama_model.to_string()), ctx);
+            });
+            self.refresh_ollama_agent_models(ctx);
+            ctx.emit(LLMPreferencesEvent::UpdatedActiveAgentModeLLM);
+            return;
+        } else if self.ollama_agent_models.is_some() {
+            ApiKeyManager::handle(ctx).update(ctx, |manager, ctx| {
+                manager.set_ollama_model(None, ctx);
+            });
+            self.refresh_ollama_agent_models(ctx);
+        }
+
         self.update_preferred_agent_mode_llm_for_team_uid(
             scope.team_uid(),
             preferred_llm_id,
@@ -1926,6 +1989,16 @@ impl LLMPreferences {
         }
     }
 
+    fn refresh_ollama_agent_models(&mut self, ctx: &mut ModelContext<Self>) {
+        let manager = ApiKeyManager::as_ref(ctx);
+        let updated =
+            ollama_available_from_config(manager.keys(), manager.ollama_connection_state());
+        if self.ollama_agent_models != updated {
+            self.ollama_agent_models = updated;
+            ctx.emit(LLMPreferencesEvent::UpdatedAvailableLLMs);
+        }
+    }
+
     fn on_server_update(
         &mut self,
         team_uid: Option<ServerId>,
@@ -2157,6 +2230,7 @@ impl LLMPreferences {
     fn for_test(custom_llms: Vec<LLMInfo>) -> Self {
         Self {
             agent_mode_models_unavailable: HashMap::new(),
+            ollama_agent_models: None,
             last_update: None,
             base_llm_for_terminal_view: HashMap::new(),
             custom_llms,
@@ -2189,6 +2263,66 @@ fn get_new_agent_mode_choices(
         .filter(|info| !old_ids.contains(&info.id))
         .cloned()
         .collect()
+}
+
+fn ollama_available_from_config(
+    keys: &ApiKeys,
+    connection_state: &OllamaConnectionState,
+) -> Option<AvailableLLMs> {
+    let selected_model = keys
+        .ollama_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())?;
+    keys.ollama_base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())?;
+
+    let mut model_names = match connection_state {
+        OllamaConnectionState::Connected { models } => models.clone(),
+        OllamaConnectionState::Untested
+        | OllamaConnectionState::Testing
+        | OllamaConnectionState::Failed { .. } => Vec::new(),
+    };
+
+    if !model_names.iter().any(|model| model == selected_model) {
+        model_names.insert(0, selected_model.to_string());
+    }
+
+    let provider_label = crate::ai::ollama::openai_compatible_provider_label(
+        keys.ollama_base_url.as_deref().unwrap_or_default(),
+    );
+    let choices = model_names
+        .into_iter()
+        .map(|model_name| ollama_llm_info(model_name, provider_label))
+        .collect();
+    Some(AvailableLLMs {
+        default_id: ollama_model_id(selected_model),
+        choices,
+        preferred_codex_model_id: None,
+    })
+}
+
+fn ollama_llm_info(model_name: String, provider_label: &str) -> LLMInfo {
+    LLMInfo {
+        display_name: format!("{model_name} ({provider_label})"),
+        base_model_name: model_name.clone(),
+        id: ollama_model_id(&model_name),
+        reasoning_level: None,
+        usage_metadata: LLMUsageMetadata {
+            request_multiplier: 1,
+            credit_multiplier: Some(0.),
+        },
+        description: None,
+        disable_reason: None,
+        vision_supported: false,
+        spec: None,
+        provider: LLMProvider::Ollama,
+        host_configs: HashMap::new(),
+        discount_percentage: None,
+        context_window: LLMContextWindow::default(),
+    }
 }
 
 /// Builds synthetic [`LLMInfo`]s from the user's persisted custom endpoints.

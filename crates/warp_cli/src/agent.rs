@@ -285,6 +285,8 @@ pub enum Harness {
     OpenCode,
     /// Delegate to the `gemini` CLI.
     Gemini,
+    /// Run the agent loop in-process against a local Ollama server.
+    Ollama,
     /// Delegate to the `codex` CLI.
     Codex,
     /// A harness produced by a newer client/server that this client doesn't
@@ -313,6 +315,9 @@ impl ValueEnum for Harness {
                 .help("Delegate to the `opencode` CLI"),
             Harness::Gemini => PossibleValue::new("gemini").help("Delegate to the `gemini` CLI"),
             Harness::Codex => PossibleValue::new("codex").help("Delegate to the `codex` CLI"),
+            Harness::Ollama => {
+                PossibleValue::new("ollama").help("Run the agent loop against a local Ollama server")
+            }
             Harness::Unknown => return None,
         };
         if !self.should_display_in_help_text() {
@@ -331,7 +336,8 @@ impl Harness {
     pub fn parse_local_child_harness(value: &str) -> Option<Self> {
         match Self::parse_orchestration_harness(value) {
             Some(harness @ (Self::Claude | Self::OpenCode | Self::Codex)) => Some(harness),
-            Some(Self::Oz) | Some(Self::Gemini) | Some(Self::Unknown) | None => None,
+            Some(Self::Oz) | Some(Self::Gemini) | Some(Self::Ollama) | Some(Self::Unknown)
+            | None => None,
         }
     }
 
@@ -348,7 +354,7 @@ impl Harness {
     pub fn should_display_in_help_text(self) -> bool {
         match self {
             Self::Oz | Self::Claude | Self::Codex => true,
-            Self::OpenCode | Self::Gemini | Self::Unknown => false,
+            Self::OpenCode | Self::Gemini | Self::Ollama | Self::Unknown => false,
         }
     }
 
@@ -358,6 +364,7 @@ impl Harness {
             Self::Claude => "Claude Code",
             Self::OpenCode => "OpenCode",
             Self::Gemini => "Gemini CLI",
+            Self::Ollama => "Ollama",
             Self::Codex => "Codex",
             Self::Unknown => "Unknown",
         }
@@ -376,6 +383,7 @@ impl Harness {
             "claude" => Some(Harness::Claude),
             "opencode" => Some(Harness::OpenCode),
             "gemini" => Some(Harness::Gemini),
+            "ollama" => Some(Harness::Ollama),
             "codex" => Some(Harness::Codex),
             "unknown" => Some(Harness::Unknown),
             _ => None,
@@ -393,6 +401,7 @@ impl Harness {
             Harness::Claude => "claude",
             Harness::OpenCode => "opencode",
             Harness::Gemini => "gemini",
+            Harness::Ollama => "ollama",
             Harness::Codex => "codex",
             Harness::Unknown => "unknown",
         }

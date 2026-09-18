@@ -151,6 +151,12 @@
       "skillPath": ".agents/skills/write-pr-description/SKILL.md",
       "computedHash": "12dcdad5ff5180cf324165deb0c8fad902ae0a79ae9d86b18cf5d347501870cb"
     },
+    "write-feature-docs": {
+      "source": "warpdotdev/common-skills",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/write-feature-docs/SKILL.md",
+      "computedHash": "5aeb3b1b5b298deca5774023efd2bfbd1ac7c2b9b0cd4467dc721e336f8fd344"
+    },
     "write-product-spec": {
       "source": "warpdotdev/common-skills",
       "sourceType": "github",

@@ -1,0 +1,31 @@
+{
+  "id": "chatcmpl-a29f2e45-9025-4b94-bcac-e00c7120a667",
+  "created": 1785394952,
+  "model": "qwen3-coder:latest",
+  "object": "chat.completion",
+  "choices": [
+    {
+      "finish_reason": "tool_calls",
+      "index": 0,
+      "message": {
+        "content": "",
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "function": {
+              "arguments": "{\"todos\": [{\"id\": \"t2\", \"title\": \"Write patch (v2)\"}, {\"id\": \"t3\", \"title\": \"Run tests\"}]}",
+              "name": "update_todos"
+            },
+            "id": "call_8awmq04a",
+            "type": "function"
+          }
+        ]
+      }
+    }
+  ],
+  "usage": {
+    "completion_tokens": 50,
+    "prompt_tokens": 831,
+    "total_tokens": 881
+  }
+}

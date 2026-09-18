@@ -232,7 +232,7 @@ impl SharedSessionScrollbackType {
     /// even if they were specified as part of the scrollback type.
     /// For example, if the [`Self::All]` variant is used, restored blocks
     /// _won't_ be included in scrollback, and neither will hidden active blocks.
-    fn to_scrollback(self, model: &TerminalModel) -> Scrollback {
+    pub(crate) fn to_scrollback(self, model: &TerminalModel) -> Scrollback {
         let first_block_index = self.first_block_index(model);
         let blocks = model
             .block_list()
@@ -279,6 +279,35 @@ impl SharedSessionScrollbackType {
             }
             .first_block_index(model),
         }
+    }
+}
+
+/// Scrollback for a local LAN share, which mirrors what the host currently has
+/// on screen.
+///
+/// Unlike [`SharedSessionScrollbackType::to_scrollback`], restored blocks are
+/// included. A cloud shared session omits them because they belong to an
+/// earlier session that the viewer never observed, but a local share is a live
+/// mirror of this window: after a restart the restored blocks are exactly the
+/// history the host is looking at, so dropping them leaves the guest blank.
+pub(crate) fn local_share_scrollback(model: &TerminalModel) -> Scrollback {
+    let transcript_scope = model.block_list().transcript_scope();
+    let blocks = model
+        .block_list()
+        .blocks()
+        .iter()
+        .filter(|block| !block.should_hide_block(transcript_scope))
+        .filter_map(|block| {
+            let serialized_block: SerializedBlock = block.into();
+            serde_json::to_vec(&serialized_block)
+                .ok()
+                .map(|raw| ScrollbackBlock { raw })
+        })
+        .collect();
+
+    Scrollback {
+        blocks,
+        is_alt_screen_active: model.is_alt_screen_active(),
     }
 }
 

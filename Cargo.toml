@@ -31,6 +31,7 @@ publish = false
 # Local workspace crates. This lets us reference them in other crates without specifying a path.
 ai = { path = "crates/ai" }
 ai_types = { path = "crates/ai_types" }
+local_agent_runtime = { path = "crates/local_agent_runtime" }
 app-installation-detection = { path = "crates/app-installation-detection" }
 asset_cache = { path = "crates/asset_cache" }
 asset_macro = { path = "crates/asset_macro" }
@@ -177,6 +178,7 @@ hyper = "1.6.0"
 html5ever = "0.35.0"
 http = "1.1.0"
 humantime = "2.1.0"
+if-addrs = "0.15.0"
 image = { version = "0.25.9", default-features = false, features = [
   "rayon",
   "jpeg",
@@ -291,6 +293,7 @@ strum_macros = "0.27"
 tempfile = "3.8.0"
 thiserror = "2.0.17"
 tokio = "1.47.1"
+tokio-tungstenite = "0.26"
 tokio-util = { version = "0.7", features = ["io"] }
 toml_edit = "0.25.5"
 tower = "0.5.2"
