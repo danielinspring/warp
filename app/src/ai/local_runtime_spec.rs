@@ -345,19 +345,21 @@ fn render_context_line(context: &AIAgentContext, vision_enabled: bool) -> String
             option_or_unknown(branch.as_deref()),
             head
         ),
-        AIAgentContext::Repository { name, owner } => format!(
-            "Repository: name={}, owner={}",
+        AIAgentContext::Repository { name, owner, host } => format!(
+            "Repository: name={}, owner={}, host={}",
             name,
-            option_or_unknown(owner.as_deref())
+            option_or_unknown(owner.as_deref()),
+            option_or_unknown(host.as_deref())
         ),
         AIAgentContext::PullRequest {
             number,
             state,
             draft,
             base_branch,
+            url,
         } => format!(
-            "Pull request: number={}, state={}, draft={}, base_branch={}",
-            number, state, draft, base_branch
+            "Pull request: number={}, state={}, draft={}, base_branch={}, url={}",
+            number, state, draft, base_branch, url
         ),
         AIAgentContext::Skills { skills } => format!(
             "Skills available in request context: {}",

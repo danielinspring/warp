@@ -2,12 +2,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
+use chrono::{DateTime, Utc};
 use futures::StreamExt as _;
 use instant::Duration;
 use parking_lot::{Mutex, RwLock};
 use warp_graphql::client::RequestOptions;
 use warp_server_auth::auth_state::AuthState;
 use warp_server_auth::credentials::AuthToken;
+#[cfg(feature = "agent_mode_evals")]
+use warp_server_auth::credentials::Credentials;
 
 use crate::auth::{AuthEvent, AuthSession, UserUid};
 
@@ -19,8 +22,13 @@ pub const CLOUD_AGENT_ID_HEADER: &str = "X-Warp-Cloud-Agent-ID";
 
 /// Header used to communicate the source of an agent run.
 pub const AGENT_SOURCE_HEADER: &str = "X-Oz-Api-Source";
-/// Header used to route agent-mode eval requests to a selected eval user.
-pub const EVAL_USER_ID_HEADER: &str = "X-Eval-User-ID";
+
+/// Header carrying the request-local team scope for an operation whose team is inferred
+/// from the current window rather than named explicitly in the request body. See
+/// `specs/multi-team-api-context/TECH.md`. The server authenticates membership and rejects
+/// a header that disagrees with the request body or an existing resource; adding this header
+/// is not itself proof of membership.
+pub const TEAM_UID_HEADER: &str = "X-Warp-Team-Uid";
 
 /// IDs in the staging database that were created specifically for evals.
 ///
@@ -32,6 +40,10 @@ const EVAL_USER_IDS: [i32; 11] = [
 
 /// Duration for which an ambient agent workload token is valid.
 const AMBIENT_WORKLOAD_TOKEN_DURATION: Duration = Duration::from_secs(3 * 60 * 60);
+
+/// Margin by which a token must outlast the moment it is needed, so one that is
+/// nominally still valid cannot expire while a request using it is in flight.
+const AMBIENT_WORKLOAD_TOKEN_EXPIRY_MARGIN: Duration = Duration::from_secs(5 * 60);
 
 /// Selects whether a contextual header is inherited, set, or omitted for one request.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -116,8 +128,6 @@ pub struct BaseClient {
     graphql_routing: GraphqlRoutingConfig,
     authenticated_graphql: AuthenticatedGraphqlConfig,
     iap_token_provider: Option<Arc<dyn http_client::iap::IapTokenProvider>>,
-    #[cfg(feature = "agent_mode_evals")]
-    eval_user_id: Option<i32>,
 }
 
 impl BaseClient {
@@ -147,9 +157,16 @@ impl BaseClient {
         };
         #[cfg(feature = "agent_mode_evals")]
         if let Some(eval_user_id) = eval_user_id {
-            authenticated_graphql
-                .headers
-                .insert(EVAL_USER_ID_HEADER.to_string(), eval_user_id.to_string());
+            // Set a deterministic per-user API key so all requests — including
+            // REST endpoints like the SSE event stream — carry a real
+            // Authorization header. The key format mirrors what SeedEvalAPIKeys()
+            // inserts in warp-server at eval startup:
+            // wk-1.<user_id as 64-char zero-padded lowercase hex>.
+            let eval_key = format!("wk-1.{eval_user_id:0>64x}");
+            auth_state.set_credentials(Some(Credentials::ApiKey {
+                key: eval_key,
+                owner_type: None,
+            }));
         }
         let auth_session = Arc::new(AuthSession::new(
             client.clone(),
@@ -167,17 +184,11 @@ impl BaseClient {
             graphql_routing,
             authenticated_graphql,
             iap_token_provider,
-            #[cfg(feature = "agent_mode_evals")]
-            eval_user_id,
         }
     }
 
     /// Returns whether authenticated GraphQL decoration would override BaseClient-owned headers.
     fn is_reserved_authenticated_graphql_header(name: &str) -> bool {
-        #[cfg(feature = "agent_mode_evals")]
-        if name.eq_ignore_ascii_case(EVAL_USER_ID_HEADER) {
-            return true;
-        }
         [
             http::header::AUTHORIZATION.as_str(),
             http::header::CONTENT_TYPE.as_str(),
@@ -186,6 +197,7 @@ impl BaseClient {
             AMBIENT_WORKLOAD_TOKEN_HEADER,
             CLOUD_AGENT_ID_HEADER,
             AGENT_SOURCE_HEADER,
+            TEAM_UID_HEADER,
         ]
         .iter()
         .any(|reserved| name.eq_ignore_ascii_case(reserved))
@@ -213,16 +225,9 @@ impl BaseClient {
         self.auth_state.user_id()
     }
 
-    /// Returns the eval user selected for this client, if eval routing is enabled.
-    pub fn eval_user_id(&self) -> Option<i32> {
-        #[cfg(feature = "agent_mode_evals")]
-        {
-            self.eval_user_id
-        }
-        #[cfg(not(feature = "agent_mode_evals"))]
-        {
-            None
-        }
+    /// Returns whether the authenticated principal is a service account.
+    pub fn is_service_account(&self) -> bool {
+        self.auth_state.is_service_account()
     }
 
     pub fn access_token_ignoring_validity(&self) -> Option<String> {
@@ -257,37 +262,100 @@ impl BaseClient {
     pub fn set_ambient_agent_task_id(&self, task_id: Option<String>) {
         *self.ambient_agent_task_id.write() = task_id;
     }
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn set_ambient_workload_token_for_test(
+        &self,
+        token: String,
+        expires_at: Option<DateTime<Utc>>,
+    ) {
+        *self.ambient_workload_token.lock() =
+            Some(warp_isolation_platform::WorkloadToken { token, expires_at });
+    }
 
     /// Returns an ambient agent workload token when the current runtime can issue one.
+    ///
+    /// The token is only guaranteed to be valid for the request it is attached to. Callers
+    /// that pin one for later reuse want
+    /// [`Self::get_ambient_workload_token_valid_until`] instead.
     pub async fn get_or_create_ambient_workload_token(&self) -> Result<Option<String>> {
+        let valid_until = Utc::now() + AMBIENT_WORKLOAD_TOKEN_EXPIRY_MARGIN;
+        Ok(self
+            .workload_token_valid_until(valid_until, AMBIENT_WORKLOAD_TOKEN_DURATION)
+            .await?
+            .map(|workload_token| workload_token.token))
+    }
+
+    /// Returns an ambient agent workload token that is still valid at `must_outlive`, or
+    /// `None` when the current runtime cannot issue one that long-lived.
+    ///
+    /// warp-server rejects a request carrying an expired workload token outright, but accepts
+    /// one carrying no token at all in a degraded, unverified mode. A caller that pins a token
+    /// into a long-lived transport, rather than resolving one per request, is therefore worse
+    /// off pinning a token that expires partway through than pinning none, and uses this to
+    /// distinguish the two cases up front.
+    pub async fn get_ambient_workload_token_valid_until(
+        &self,
+        must_outlive: DateTime<Utc>,
+    ) -> Result<Option<String>> {
+        let requested_duration = (must_outlive + AMBIENT_WORKLOAD_TOKEN_EXPIRY_MARGIN - Utc::now())
+            .to_std()
+            .unwrap_or_default()
+            .max(AMBIENT_WORKLOAD_TOKEN_DURATION);
+        let Some(workload_token) = self
+            .workload_token_valid_until(must_outlive, requested_duration)
+            .await?
+        else {
+            return Ok(None);
+        };
+        // The issuing platform is free to cap the requested duration, so a token that reaches
+        // `must_outlive` was asked for but not necessarily granted.
+        if let Some(expires_at) = workload_token.expires_at
+            && expires_at <= must_outlive
+        {
+            log::warn!(
+                "Not pinning an ambient workload token: the longest one this platform will \
+                 issue expires at {expires_at}, before this workload needs it to at {must_outlive}"
+            );
+            return Ok(None);
+        }
+        Ok(Some(workload_token.token))
+    }
+
+    /// Returns a cached or freshly issued workload token that is still valid at `valid_until`,
+    /// asking the isolation platform for `requested_duration` when a new one is needed.
+    ///
+    /// The platform may issue a shorter-lived token than requested, so the result is not
+    /// guaranteed to reach `valid_until`.
+    async fn workload_token_valid_until(
+        &self,
+        valid_until: DateTime<Utc>,
+        requested_duration: Duration,
+    ) -> Result<Option<warp_isolation_platform::WorkloadToken>> {
         if cfg!(target_family = "wasm") {
             return Ok(None);
         }
         {
             let cached = self.ambient_workload_token.lock();
-            if let Some(token) = cached.as_ref() {
-                let is_valid = token.expires_at.is_none_or(|expires_at| {
-                    chrono::Utc::now() + chrono::Duration::minutes(5) < expires_at
-                });
-                if is_valid {
-                    return Ok(Some(token.token.clone()));
-                }
+            if let Some(token) = cached.as_ref()
+                && token
+                    .expires_at
+                    .is_none_or(|expires_at| valid_until < expires_at)
+            {
+                return Ok(Some(token.clone()));
             }
         }
-        let workload_token = match warp_isolation_platform::issue_workload_token(Some(
-            AMBIENT_WORKLOAD_TOKEN_DURATION,
-        ))
-        .await
-        {
-            Ok(token) => token,
-            Err(warp_isolation_platform::IsolationPlatformError::NoIsolationPlatformDetected) => {
-                return Ok(None);
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let token = workload_token.token.clone();
-        *self.ambient_workload_token.lock() = Some(workload_token);
-        Ok(Some(token))
+        let workload_token =
+            match warp_isolation_platform::issue_workload_token(Some(requested_duration)).await {
+                Ok(token) => token,
+                Err(
+                    warp_isolation_platform::IsolationPlatformError::NoIsolationPlatformDetected,
+                ) => {
+                    return Ok(None);
+                }
+                Err(error) => return Err(error.into()),
+            };
+        *self.ambient_workload_token.lock() = Some(workload_token.clone());
+        Ok(Some(workload_token))
     }
 
     /// Resolves request-local ambient agent policy into wire headers.

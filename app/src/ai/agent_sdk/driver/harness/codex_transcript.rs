@@ -20,7 +20,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::json_utils::entries_to_jsonl;
-use crate::ai::agent::conversation::AIConversationId;
+use crate::ai::agent::api::ServerConversationToken;
 
 /// Env var codex honors to override `~/.codex` (see codex `core/src/config/mod.rs`).
 const CODEX_HOME_ENV: &str = "CODEX_HOME";
@@ -78,7 +78,7 @@ pub(crate) struct CodexSessionMetadata {
 pub(crate) struct CodexResumeInfo {
     /// Warp server-side conversation id. Reused so subsequent transcript/block-snapshot
     /// uploads overwrite the same GCS objects.
-    pub(crate) conversation_id: AIConversationId,
+    pub(crate) conversation_id: ServerConversationToken,
     /// Codex session uuid passed to `codex resume <session_id>`. Matches `envelope.session_id`.
     pub(crate) session_id: Uuid,
     /// Envelope fetched from the server, written back to disk before launching codex.
@@ -133,7 +133,7 @@ pub(crate) fn find_session_file(sessions_root: &Path, session_id: Uuid) -> Optio
     None
 }
 
-fn read_subdirs(parent: &Path) -> impl Iterator<Item = PathBuf> {
+fn read_subdirs(parent: &Path) -> impl Iterator<Item = PathBuf> + use<> {
     fs::read_dir(parent)
         .into_iter()
         .flatten()
@@ -200,15 +200,14 @@ pub(crate) fn rehydrate_codex_transcript(
     local_cwd: &Path,
 ) -> Result<CodexLocalContinuation> {
     envelope.cwd = local_cwd.to_path_buf();
-    if let Some(Value::Object(entry)) = envelope.entries.first_mut() {
-        if entry.get("type").and_then(|value| value.as_str()) == Some("session_meta") {
-            if let Some(Value::Object(payload)) = entry.get_mut("payload") {
-                payload.insert(
-                    "cwd".to_string(),
-                    Value::String(local_cwd.to_string_lossy().to_string()),
-                );
-            }
-        }
+    if let Some(Value::Object(entry)) = envelope.entries.first_mut()
+        && entry.get("type").and_then(|value| value.as_str()) == Some("session_meta")
+        && let Some(Value::Object(payload)) = entry.get_mut("payload")
+    {
+        payload.insert(
+            "cwd".to_string(),
+            Value::String(local_cwd.to_string_lossy().to_string()),
+        );
     }
 
     let session_id = envelope.session_id;

@@ -1,8 +1,13 @@
+use std::collections::BTreeMap;
+
 use warp_graphql::ai::{AgentTaskState, PlatformErrorCode};
+use warp_graphql::platform_error::{PlatformErrorInfo, PlatformErrorMessageFormat};
 
 use super::classify_driver_error;
-use crate::ai::agent_sdk::driver::terminal::{BootstrapError, ShareSessionError};
+use crate::ai::agent::{RenderableAIError, TransientNetworkErrorKind};
 use crate::ai::agent_sdk::driver::AgentDriverError;
+use crate::ai::agent_sdk::driver::terminal::{BootstrapError, ShareSessionError};
+use crate::server::server_api::ai::TaskGitCredentialsError;
 
 fn assert_state_and_code(
     error: AgentDriverError,
@@ -15,6 +20,117 @@ fn assert_state_and_code(
         update.error_code, expected_code,
         "unexpected error_code for {error}"
     );
+}
+
+#[test]
+fn retryable_dependency_credentials_failure_is_error_with_structured_metadata() {
+    let info = PlatformErrorInfo {
+        error_message: Some("GitHub is temporarily unavailable.".to_string()),
+        code: PlatformErrorCode::ResourceUnavailable,
+        http_status: Some(503),
+        user_facing_messages: BTreeMap::from([
+            (
+                PlatformErrorMessageFormat::PlainText,
+                "GitHub is temporarily unavailable.".to_string(),
+            ),
+            (
+                PlatformErrorMessageFormat::Markdown,
+                "**GitHub** is temporarily unavailable.".to_string(),
+            ),
+        ]),
+        detail: Some("Repository access could not be resolved.".to_string()),
+        retryable: true,
+        is_user_error: Some(false),
+        metadata: BTreeMap::from([
+            ("provider".to_string(), "github".to_string()),
+            ("resource".to_string(), "installation".to_string()),
+        ]),
+        debug: Some("request-id=dogfood-only".to_string()),
+        metrics_category: Some("dependency_unavailable".to_string()),
+        trace_id: Some("0123456789abcdef".to_string()),
+    };
+    let (state, update) = classify_driver_error(&AgentDriverError::GitCredentialsFetchFailed(
+        TaskGitCredentialsError::Platform {
+            message: "External dependency is unavailable.".to_string(),
+            detail: Some("Repository access could not be resolved.".to_string()),
+            info: Box::new(info.clone()),
+        },
+    ));
+
+    assert_eq!(state, AgentTaskState::Error);
+    assert_eq!(
+        update.error_code,
+        Some(PlatformErrorCode::ResourceUnavailable)
+    );
+    let platform_error = update.platform_error.expect("structured platform error");
+    assert_eq!(*platform_error, info);
+    assert!(
+        update
+            .message
+            .contains("Repository access could not be resolved")
+    );
+}
+
+#[test]
+fn user_credentials_failure_remains_failed() {
+    let (state, update) = classify_driver_error(&AgentDriverError::GitCredentialsFetchFailed(
+        TaskGitCredentialsError::Platform {
+            message: "Repository was not found.".to_string(),
+            detail: None,
+            info: Box::new(PlatformErrorInfo {
+                error_message: Some("Repository was not found.".to_string()),
+                code: PlatformErrorCode::ResourceNotFound,
+                http_status: Some(404),
+                user_facing_messages: BTreeMap::from([(
+                    PlatformErrorMessageFormat::PlainText,
+                    "Repository was not found.".to_string(),
+                )]),
+                detail: None,
+                retryable: false,
+                is_user_error: Some(true),
+                metadata: BTreeMap::from([
+                    ("provider".to_string(), "github".to_string()),
+                    ("resource".to_string(), "repository".to_string()),
+                ]),
+                debug: None,
+                metrics_category: Some("resource_not_found".to_string()),
+                trace_id: None,
+            }),
+        },
+    ));
+
+    assert_eq!(state, AgentTaskState::Failed);
+    assert_eq!(update.error_code, Some(PlatformErrorCode::ResourceNotFound));
+    assert!(!update.platform_error.unwrap().retryable);
+}
+
+#[test]
+fn credential_request_error_redacts_internal_cause_from_status() {
+    let internal = "token=not-for-production";
+    let (state, update) = classify_driver_error(&AgentDriverError::GitCredentialsFetchFailed(
+        TaskGitCredentialsError::Request(anyhow::anyhow!(internal)),
+    ));
+
+    assert_eq!(state, AgentTaskState::Error);
+    assert_eq!(update.error_code, Some(PlatformErrorCode::InternalError));
+    assert!(update.platform_error.unwrap().retryable);
+    assert!(!update.message.contains(internal));
+}
+
+#[test]
+fn unstructured_credentials_failure_is_failed_with_invalid_request() {
+    let (state, update) = classify_driver_error(&AgentDriverError::GitCredentialsFetchFailed(
+        TaskGitCredentialsError::Unstructured {
+            message: "Unable to access task git credentials".to_string(),
+        },
+    ));
+
+    assert_eq!(state, AgentTaskState::Failed);
+    assert_eq!(update.error_code, Some(PlatformErrorCode::InvalidRequest));
+    let platform_error = update.platform_error.expect("structured platform error");
+    assert!(!platform_error.retryable);
+    assert!(platform_error.metadata.is_empty());
+    assert_eq!(platform_error.debug, None);
 }
 
 // --- Infrastructure errors → ERROR ---
@@ -142,12 +258,16 @@ fn mcp_startup_failed_is_failed_with_env_setup_and_per_server_details() {
         Some(PlatformErrorCode::EnvironmentSetupFailed)
     );
     // Each unavailable server is rendered as its own bullet line.
-    assert!(update
-        .message
-        .contains("- 'devin' failed to start: connection refused"));
-    assert!(update
-        .message
-        .contains("- 'datadog' did not start within 20s"));
+    assert!(
+        update
+            .message
+            .contains("- 'devin' failed to start: connection refused")
+    );
+    assert!(
+        update
+            .message
+            .contains("- 'datadog' did not start within 20s")
+    );
 }
 
 #[test]
@@ -156,6 +276,28 @@ fn environment_setup_failed_is_failed() {
         AgentDriverError::EnvironmentSetupFailed("bad repo".into()),
         AgentTaskState::Failed,
         Some(PlatformErrorCode::EnvironmentSetupFailed),
+    );
+}
+
+#[test]
+fn setup_command_exited_shell_is_failed_with_env_setup_and_names_command() {
+    let (state, update) = classify_driver_error(&AgentDriverError::SetupCommandExitedShell {
+        command: "./setup.sh".into(),
+    });
+    assert_eq!(state, AgentTaskState::Failed);
+    assert_eq!(
+        update.error_code,
+        Some(PlatformErrorCode::EnvironmentSetupFailed)
+    );
+    // The message must name the setup command that exited the shell and
+    // point the user at the environment's setup commands.
+    assert!(update.message.contains("./setup.sh"), "{}", update.message);
+    assert!(
+        update
+            .message
+            .contains("Check the setup commands for this environment"),
+        "{}",
+        update.message
     );
 }
 
@@ -244,6 +386,42 @@ fn share_session_failed_includes_reason() {
 // --- Conversation-level outcomes ---
 
 #[test]
+fn conversation_error_classifies_network_failure() {
+    let error = AgentDriverError::ConversationError {
+        error: RenderableAIError::transient_network_error(
+            false,
+            false,
+            TransientNetworkErrorKind::UnfinishedExchange,
+        ),
+    };
+
+    let (state, update) = classify_driver_error(&error);
+    assert_eq!(state, AgentTaskState::Error);
+    assert_eq!(
+        update.error_code,
+        Some(PlatformErrorCode::AgentStreamNetworkError)
+    );
+    assert!(!update.platform_error.unwrap().retryable);
+}
+
+#[test]
+fn conversation_error_classifies_server_stream_failure() {
+    let error = AgentDriverError::ConversationError {
+        error: RenderableAIError::AgentStreamFailure {
+            error_message: "Response stream finished with an internal error.".into(),
+        },
+    };
+
+    let (state, update) = classify_driver_error(&error);
+    assert_eq!(state, AgentTaskState::Error);
+    assert_eq!(
+        update.error_code,
+        Some(PlatformErrorCode::AgentStreamFailure)
+    );
+    assert!(!update.platform_error.unwrap().retryable);
+}
+
+#[test]
 fn conversation_cancelled_is_cancelled() {
     let (state, update) = classify_driver_error(&AgentDriverError::ConversationCancelled {
         reason: crate::ai::agent::CancellationReason::ManuallyCancelled,
@@ -297,4 +475,57 @@ fn harness_runtime_failure_detected_is_failed_with_auth_required() {
     assert!(update.message.contains("claude"));
     assert!(update.message.contains("credit balance is too low"));
     assert!(update.message.contains("Your credit balance is too low"));
+}
+
+// --- Harness exit escalation ---
+
+#[test]
+fn harness_exit_timed_out_is_failed_with_internal_and_names_harness() {
+    let (state, update) = classify_driver_error(&AgentDriverError::HarnessExitTimedOut {
+        harness: "claude".into(),
+    });
+    assert_eq!(state, AgentTaskState::Failed);
+    assert_eq!(update.error_code, Some(PlatformErrorCode::InternalError));
+    assert!(update.message.contains("claude"));
+    assert!(update.message.contains("forcibly terminated"));
+}
+
+// --- Sandbox runtime limit (QUALITY-1759) ---
+
+#[test]
+fn sandbox_deadline_reached_is_failed_with_exact_message_and_no_error_code() {
+    let (state, update) = classify_driver_error(&AgentDriverError::SandboxDeadlineReached {
+        on_free_plan: false,
+    });
+    assert_eq!(state, AgentTaskState::Failed);
+    assert!(update.error_code.is_none());
+    assert_eq!(update.message, "Sandbox maximum runtime reached.");
+}
+
+/// The limit is only fixed on the free plan, so the upgrade hint must be
+/// scoped to it — paid plans can configure the limit instead.
+#[test]
+fn sandbox_deadline_reached_on_free_plan_suggests_upgrading() {
+    let (state, update) =
+        classify_driver_error(&AgentDriverError::SandboxDeadlineReached { on_free_plan: true });
+    assert_eq!(state, AgentTaskState::Failed);
+    assert!(update.error_code.is_none());
+    assert_eq!(
+        update.message,
+        "Sandbox maximum runtime reached. Upgrade to a paid plan to remove this limit."
+    );
+}
+
+// --- SIGTERM abort ---
+
+#[test]
+fn terminated_by_signal_is_failed_with_no_error_code() {
+    let (state, update) = classify_driver_error(&AgentDriverError::TerminatedBySignal);
+    assert_eq!(state, AgentTaskState::Failed);
+    assert!(update.error_code.is_none());
+    assert_eq!(
+        update.message,
+        "The agent process was terminated (SIGTERM) before the run completed, most likely \
+         because the instance or worker hosting the run was shut down."
+    );
 }

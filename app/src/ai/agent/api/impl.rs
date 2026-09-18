@@ -8,12 +8,15 @@ use warp_multi_agent_api as api;
 use super::convert_to::convert_input;
 use super::{ConvertToAPITypeError, RequestParams, ResponseStream};
 use crate::ai::agent::redaction;
+use crate::ai::blocklist::video_recording_enabled;
 use crate::server::server_api::{AIApiError, ServerApi};
+use crate::server::team_scope::RequestTeamScope;
 use crate::terminal::model::session::SessionType;
 
 pub async fn generate_multi_agent_output(
     server_api: Arc<ServerApi>,
     mut params: RequestParams,
+    team_scope: RequestTeamScope,
     cancellation_rx: futures::channel::oneshot::Receiver<()>,
 ) -> Result<ResponseStream, ConvertToAPITypeError> {
     // If the user has configured a local Ollama server, route the entire
@@ -91,6 +94,7 @@ pub async fn generate_multi_agent_output(
             use_anthropic_text_editor_tools: false,
             planning_enabled: params.planning_enabled,
             supports_create_files: true,
+            supports_create_file_overwrite: true,
             supported_tools: supported_tools.into_iter().map(Into::into).collect(),
             supports_long_running_commands: true,
             should_preserve_file_content_in_history: true,
@@ -114,10 +118,13 @@ pub async fn generate_multi_agent_output(
             supports_bundled_skills: FeatureFlag::BundledSkills.is_enabled(),
             supports_research_agent: params.research_agent_enabled,
             supports_orchestration_v2: supports_orchestration_v2(params.orchestration_enabled),
+            supports_orchestration_runners: params.orchestration_enabled
+                && FeatureFlag::CloudAgentRunners.is_enabled(),
+            supports_background_computer_use: FeatureFlag::BackgroundComputerUse.is_enabled()
+                && computer_use::background_supported(),
+            supports_stored_screenshots: FeatureFlag::StoredScreenshots.is_enabled(),
             custom_model_providers: params.custom_model_providers,
             custom_model_routers: params.custom_model_routers,
-            // Background computer use is not supported by the local client yet.
-            supports_background_computer_use: false,
         }),
         metadata: Some(api::request::Metadata {
             logging: logging_metadata,
@@ -149,8 +156,12 @@ pub async fn generate_multi_agent_output(
         mcp_context: params.mcp_context.map(Into::into),
     };
 
-    let response_stream =
-        warp_multi_agent_client::generate_multi_agent_output(server_api.as_ref(), &request).await;
+    let response_stream = warp_multi_agent_client::generate_multi_agent_output(
+        server_api.as_ref(),
+        &request,
+        team_scope.team_uid().map(|uid| uid.uid()),
+    )
+    .await;
     match response_stream {
         Ok(stream) => {
             let output_stream = stream
@@ -212,6 +223,7 @@ fn api_keys_with_warp_credit_fallback_setting(
 fn supports_orchestration_v2(orchestration_enabled: bool) -> bool {
     orchestration_enabled
 }
+
 fn get_supported_tools(params: &RequestParams) -> Vec<api::ToolType> {
     let mut supported_tools = vec![
         api::ToolType::Grep,
@@ -265,12 +277,14 @@ fn get_supported_tools(params: &RequestParams) -> Vec<api::ToolType> {
 
     if FeatureFlag::AgentModeComputerUse.is_enabled() && params.computer_use_enabled {
         supported_tools.extend(&[api::ToolType::UseComputer]);
-        supported_tools.extend(&[api::ToolType::RequestComputerUse])
+        supported_tools.extend(&[api::ToolType::RequestComputerUse]);
+
+        if video_recording_enabled() {
+            supported_tools.extend(&[api::ToolType::StartRecording, api::ToolType::StopRecording]);
+        }
     }
 
-    if FeatureFlag::PRCommentsSlashCommand.is_enabled() {
-        supported_tools.push(api::ToolType::InsertReviewComments);
-    }
+    supported_tools.push(api::ToolType::InsertReviewComments);
 
     if FeatureFlag::ListSkills.is_enabled() {
         supported_tools.push(api::ToolType::ReadSkill);

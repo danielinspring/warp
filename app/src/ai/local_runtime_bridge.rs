@@ -39,8 +39,8 @@ use crate::ai::agent::{
     ReadShellCommandOutputResult, RequestCommandOutputResult, RequestComputerUseRequest,
     RequestComputerUseResult, RunAgentsAgentOutcomeKind, RunAgentsAgentRunConfig,
     RunAgentsExecutionMode, RunAgentsLaunchedExecutionMode, RunAgentsRequest, RunAgentsResult,
-    SearchCodebaseResult, ShellCommandDelay, UseComputerRequest, UseComputerResult,
-    WriteToLongRunningShellCommandResult,
+    ScreenshotSource, SearchCodebaseResult, ShellCommandDelay, UseComputerRequest,
+    UseComputerResult, WriteToLongRunningShellCommandResult,
 };
 use crate::terminal::model::block::BlockId;
 
@@ -1494,6 +1494,7 @@ fn request_computer_use_tool_call_to_ai_action(
                 max_long_edge_px: None,
                 max_total_px: None,
                 region: None,
+                target: computer_use::Target::default(),
             }),
         },
     ))
@@ -1514,10 +1515,21 @@ fn use_computer_tool_call_to_ai_action(
             .ok_or_else(|| ToolExecutionError::InvalidInput {
                 reason: "Tool `use_computer` requires array argument `actions`".to_string(),
             })?;
-    let actions: Vec<computer_use::Action> = serde_json::from_value(actions_value.clone())
-        .map_err(|err| ToolExecutionError::InvalidInput {
-            reason: format!("Tool `use_computer` actions JSON is invalid: {err}"),
-        })?;
+    let actions: Vec<computer_use::TargetedAction> =
+        serde_json::from_value(actions_value.clone())
+            .or_else(|_| {
+                serde_json::from_value::<Vec<computer_use::Action>>(actions_value.clone()).map(
+                    |actions| {
+                        actions
+                            .into_iter()
+                            .map(computer_use::TargetedAction::screen)
+                            .collect()
+                    },
+                )
+            })
+            .map_err(|err| ToolExecutionError::InvalidInput {
+                reason: format!("Tool `use_computer` actions JSON is invalid: {err}"),
+            })?;
     if actions.is_empty() {
         return Err(ToolExecutionError::InvalidInput {
             reason: "Tool `use_computer` requires at least one action".to_string(),
@@ -1528,6 +1540,7 @@ fn use_computer_tool_call_to_ai_action(
         max_long_edge_px: None,
         max_total_px: None,
         region: None,
+        target: computer_use::Target::default(),
     });
     Ok(AIAgentActionType::UseComputer(UseComputerRequest {
         action_summary,
@@ -1642,6 +1655,8 @@ fn parse_run_agents_agent(value: &Value) -> Result<RunAgentsAgentRunConfig, Tool
         name,
         prompt,
         title,
+        agent_identity_uid: String::new(),
+        model_id: String::new(),
     })
 }
 
@@ -1761,6 +1776,7 @@ fn parse_file_edit(value: &Value) -> Result<FileEdit, ToolExecutionError> {
                 "content",
                 "edit_files create edit",
             )?),
+            allow_overwrite: false,
         }),
         "delete" => Ok(FileEdit::Delete { file }),
         _ => Err(ToolExecutionError::InvalidInput {
@@ -1948,7 +1964,7 @@ fn action_result_to_content(result: &AIAgentActionResultType) -> String {
             "error": "Command is on the denylist and cannot be executed.",
         })
         .to_string(),
-        AIAgentActionResultType::ReadFiles(ReadFilesResult::Success { files }) => {
+        AIAgentActionResultType::ReadFiles(ReadFilesResult::Success { files, .. }) => {
             file_contexts_to_json(files)
         }
         AIAgentActionResultType::SearchCodebase(SearchCodebaseResult::Success { files }) => {
@@ -2121,11 +2137,13 @@ fn action_result_to_content(result: &AIAgentActionResultType) -> String {
                         environment_id,
                         worker_host,
                         computer_use_enabled,
+                        runner_id,
                     } => serde_json::json!({
                         "type": "remote",
                         "environment_id": environment_id,
                         "worker_host": worker_host,
                         "computer_use_enabled": computer_use_enabled,
+                        "runner_id": runner_id,
                     }),
                 };
                 serde_json::json!({
@@ -2280,6 +2298,7 @@ fn action_result_to_content(result: &AIAgentActionResultType) -> String {
             RequestComputerUseResult::Approved {
                 screenshot,
                 platform,
+                windows: _,
             } => serde_json::json!({
                 "status": "approved",
                 "platform": format!("{platform:?}"),
@@ -2300,14 +2319,23 @@ fn action_result_to_content(result: &AIAgentActionResultType) -> String {
             }
         },
         AIAgentActionResultType::UseComputer(result) => match result {
-            UseComputerResult::Success(action_result) => {
-                let screenshot = action_result.screenshot.as_ref().map(|shot| {
-                    serde_json::json!({
+            UseComputerResult::Success {
+                screenshot,
+                cursor_position,
+                windows: _,
+                captured_window: _,
+            } => {
+                let screenshot = screenshot.as_ref().map(|shot| match shot {
+                    ScreenshotSource::Inline(shot) => serde_json::json!({
                         "width": shot.original_width,
                         "height": shot.original_height,
-                    })
+                    }),
+                    ScreenshotSource::Stored { width, height, .. } => serde_json::json!({
+                        "width": width,
+                        "height": height,
+                    }),
                 });
-                let cursor = action_result.cursor_position.map(|pos| {
+                let cursor = cursor_position.map(|pos| {
                     serde_json::json!({ "x": pos.x(), "y": pos.y() })
                 });
                 serde_json::json!({
@@ -2567,10 +2595,14 @@ fn run_agents_tool_call_to_proto(call: &ToolCall) -> Result<api::RunAgents, Tool
                 name: config.name,
                 prompt: config.prompt,
                 title: config.title,
+                agent_identity_uid: config.agent_identity_uid,
+                model_id: config.model_id,
+                execution_mode: None,
+                harness: None,
             })
             .collect(),
         plan_id: request.plan_id,
-        execution_mode: Some(api::run_agents::ExecutionMode::Local(
+        execution_mode: Some(api::run_agents::ExecutionModeOneOf::Local(
             api::run_agents::Local {},
         )),
     })
@@ -3036,6 +3068,7 @@ fn edit_files_tool_call_to_proto(
                 new_files.push(api::message::tool_call::apply_file_diffs::NewFile {
                     file_path,
                     content: required_string(&arguments, "content", "edit_files create edit")?,
+                    allow_overwrite: false,
                 });
             }
             "delete" => {

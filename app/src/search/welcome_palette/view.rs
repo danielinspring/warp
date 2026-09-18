@@ -257,7 +257,12 @@ impl WelcomePalette {
         });
         ctx.observe(&search_bar_state, |_, _, ctx| ctx.notify());
 
-        let binding_source = ctx.add_model(|_| binding_source);
+        let binding_source_value = binding_source;
+        let warp_drive_window_id = match &binding_source_value {
+            BindingSource::View { window_id, .. } => *window_id,
+            BindingSource::None => ctx.window_id(),
+        };
+        let binding_source = ctx.add_model(|_| binding_source_value);
         let actions_data_source =
             ctx.add_model(|ctx| CommandBindingDataSource::new(binding_source.clone(), ctx));
         ctx.subscribe_to_model(&actions_data_source, Self::handle_actions_data_source_event);
@@ -270,7 +275,8 @@ impl WelcomePalette {
             NewSessionDataSource::new(binding_source.clone(), ctx)
                 .with_allowed_kinds(AllowedSessionKinds::tabs_only())
         });
-        let warp_drive_data_source = ctx.add_model(warp_drive::DataSource::new);
+        let warp_drive_data_source =
+            ctx.add_model(|ctx| warp_drive::DataSource::new(warp_drive_window_id, ctx));
 
         let mixer = ctx.add_model(|ctx| {
             let mut mixer = CommandPaletteMixer::new();

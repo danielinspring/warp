@@ -1,9 +1,10 @@
 use std::borrow::Cow;
 
 use async_channel::Sender;
+use warp_completer::meta::Span;
 #[cfg(unix)]
 use warpui::AppContext;
-use warpui::{Entity, View, ViewContext};
+use warpui::{Entity, ViewContext};
 
 use crate::ai::agent::AIAgentPtyWriteMode;
 #[cfg(unix)]
@@ -22,6 +23,8 @@ use crate::terminal::{ShellLaunchData, SizeUpdate};
 /// resizing, command execution, and native shell completions.
 pub enum PtyIntent {
     CtrlD,
+    #[cfg(not(target_family = "wasm"))]
+    Interrupt,
     ShutdownPty,
     WriteBytes(Cow<'static, [u8]>),
     WriteAgentInput {
@@ -32,7 +35,7 @@ pub enum PtyIntent {
     ExecuteCommand(ExecuteCommandEvent),
     RunNativeShellCompletions {
         buffer_text: String,
-        results_tx: Sender<Vec<ShellCompletion>>,
+        results_tx: Sender<(Vec<ShellCompletion>, Option<Span>)>,
     },
 }
 
@@ -46,30 +49,37 @@ pub trait PtyIntentEvent {
 /// A terminal frontend surface driven by `TerminalManager`.
 ///
 /// Each surface defines how its own event type collapses into a PTY/session intent.
-pub trait TerminalSurface: View + 'static
+/// This is bounded by [`Entity`] instead of [`View`](warpui::View) so the same
+/// manager can drive both GUI views and TUI views.
+pub trait TerminalSurface: Entity + 'static
 where
     <Self as Entity>::Event: PtyIntentEvent,
 {
     /// Whether the local manager should start polling termios for a password prompt
     /// after the given block starts.
     #[cfg(unix)]
-    fn should_start_password_prompt_polling(&self, command: &str, ctx: &AppContext) -> bool;
+    fn should_start_password_prompt_polling(&self, _command: &str, _ctx: &AppContext) -> bool {
+        false
+    }
 
     /// Whether the local manager should stop password-prompt polling for this completed block.
     #[cfg(unix)]
-    fn should_stop_password_prompt_polling(&self, completed: &AfterBlockCompletedEvent) -> bool;
+    fn should_stop_password_prompt_polling(&self, _completed: &AfterBlockCompletedEvent) -> bool {
+        false
+    }
 
     /// Called once the shell starter has been determined and the PTY event loop
     /// has started, so the surface can react to shell launch metadata.
     #[cfg(feature = "local_tty")]
-    fn on_shell_determined(&mut self, ctx: &mut ViewContext<Self>);
+    fn on_shell_determined(&mut self, _ctx: &mut ViewContext<Self>) {}
 
     /// Called when the active shell launch data is updated (e.g. shell indicator metadata).
     fn on_active_shell_launch_data_updated(
         &mut self,
-        shell_launch_data: Option<ShellLaunchData>,
-        ctx: &mut ViewContext<Self>,
-    );
+        _shell_launch_data: Option<ShellLaunchData>,
+        _ctx: &mut ViewContext<Self>,
+    ) {
+    }
 
     /// Called when the PTY fails to spawn so the surface can surface the error.
     #[cfg(feature = "local_tty")]
@@ -79,15 +89,17 @@ where
     #[cfg(unix)]
     fn on_possible_password_prompt(
         &mut self,
-        block_index: Option<BlockIndex>,
-        ctx: &mut ViewContext<Self>,
-    );
+        _block_index: Option<BlockIndex>,
+        _ctx: &mut ViewContext<Self>,
+    ) {
+    }
 
     /// Called when the block the poller was tracking completes.
     #[cfg(unix)]
     fn on_polled_block_completed(
         &mut self,
-        completed: &AfterBlockCompletedEvent,
-        ctx: &mut ViewContext<Self>,
-    );
+        _completed: &AfterBlockCompletedEvent,
+        _ctx: &mut ViewContext<Self>,
+    ) {
+    }
 }
