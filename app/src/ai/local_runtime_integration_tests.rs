@@ -144,7 +144,7 @@ fn extract_user_input_attaches_processed_image_as_content_part() {
         vec![image_context(&png_base64, "image/png", "shot.png")],
     )];
 
-    let user_message = extract_user_input(&params);
+    let user_message = extract_user_input(&params).expect("user query");
 
     assert_eq!(user_message.text_content(), "what is in this screenshot?");
     assert!(user_message.has_images());
@@ -171,7 +171,7 @@ fn extract_user_input_is_text_only_when_no_images_are_attached() {
     let mut params = RequestParams::new_for_test();
     params.input = vec![user_query_input("just text, no images", vec![])];
 
-    let user_message = extract_user_input(&params);
+    let user_message = extract_user_input(&params).expect("user query");
 
     assert_eq!(user_message.text_content(), "just text, no images");
     assert!(!user_message.has_images());
@@ -187,7 +187,7 @@ fn extract_user_input_caps_images_at_max_query_count() {
         .collect();
     params.input = vec![user_query_input("many images", contexts)];
 
-    let user_message = extract_user_input(&params);
+    let user_message = extract_user_input(&params).expect("user query");
 
     let image_count = user_message
         .parts
@@ -209,8 +209,94 @@ fn extract_user_input_skips_unparseable_image_bytes() {
         )],
     )];
 
-    let user_message = extract_user_input(&params);
+    let user_message = extract_user_input(&params).expect("user query");
 
     assert_eq!(user_message.text_content(), "bad image");
     assert!(!user_message.has_images());
+}
+
+fn parsed_skill(name: &str, content: &str) -> ai::skills::ParsedSkill {
+    ai::skills::ParsedSkill {
+        path: warp_util::local_or_remote_path::LocalOrRemotePath::Local(std::path::PathBuf::from(
+            format!("/tmp/{name}/SKILL.md"),
+        )),
+        name: name.to_string(),
+        description: "A test skill".to_string(),
+        content: content.to_string(),
+        line_range: None,
+        provider: ai::skills::SkillProvider::Agents,
+        scope: ai::skills::SkillScope::Project,
+    }
+}
+
+fn action_result_input() -> AIAgentInput {
+    use crate::ai::agent::{AIAgentActionResult, AIAgentActionResultType, ReadFilesResult};
+
+    AIAgentInput::ActionResult {
+        result: AIAgentActionResult {
+            id: "tool-1".to_string().into(),
+            task_id: ai_types::TaskId::new("task-1".to_string()),
+            result: AIAgentActionResultType::ReadFiles(ReadFilesResult::Cancelled),
+        },
+        context: std::sync::Arc::from([]),
+    }
+}
+
+#[test]
+fn extract_user_input_includes_skill_body_after_the_display_line() {
+    let mut params = RequestParams::new_for_test();
+    params.input = vec![AIAgentInput::InvokeSkill {
+        context: std::sync::Arc::from([]),
+        skill: parsed_skill("review-pr", "Check the diff carefully."),
+        user_query: Some(crate::ai::agent::InvokeSkillUserQuery {
+            query: "tighten the summary".to_string(),
+            referenced_attachments: Default::default(),
+        }),
+    }];
+
+    let user_message = extract_user_input(&params).expect("skill user query");
+
+    assert_eq!(
+        user_message.text_content(),
+        "/review-pr tighten the summary\n\nCheck the diff carefully."
+    );
+}
+
+#[test]
+fn extract_user_input_uses_summarize_prompt() {
+    let mut params = RequestParams::new_for_test();
+    params.input = vec![AIAgentInput::SummarizeConversation {
+        prompt: Some("Summarize the auth flow".to_string()),
+        context: std::sync::Arc::from([]),
+    }];
+
+    let user_message = extract_user_input(&params).expect("summarize prompt");
+
+    assert_eq!(user_message.text_content(), "Summarize the auth flow");
+}
+
+#[test]
+fn action_result_continuation_reuses_history_without_an_empty_user_message() {
+    let mut params = RequestParams::new_for_test();
+    params.input = vec![action_result_input()];
+    let history = vec![Message::User(UserMessage::text("where is main?"))];
+
+    let user_input =
+        prepare_local_turn(&params, &history).expect("history already has a user query");
+
+    assert!(user_input.is_none());
+}
+
+#[test]
+fn missing_user_query_is_rejected_before_a_provider_call() {
+    let params = RequestParams::new_for_test();
+
+    let error =
+        prepare_local_turn(&params, &[]).expect_err("system-only requests must not be sent");
+
+    assert!(
+        error
+            .to_string()
+            .contains("No user query found in messages.")
+    );
 }

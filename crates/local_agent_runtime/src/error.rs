@@ -97,6 +97,10 @@ pub enum RuntimeError {
     #[error("Runtime cancelled")]
     Cancelled,
 
+    /// The conversation has no non-empty user turn to send to the model.
+    #[error("No user query found in messages.")]
+    MissingUserQuery,
+
     #[error("Internal error: {0}")]
     Internal(String),
 }

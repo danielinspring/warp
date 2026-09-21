@@ -5,8 +5,8 @@ use local_agent_runtime::provider::ollama::{OllamaProvider, OllamaProviderConfig
 use local_agent_runtime::provider::{ChatRequest, ChatResponse, ChatStopReason, ChatStreamEvent};
 use local_agent_runtime::{
     AgentRuntime, FinishReason, LLMProvider, Message, PermissionDecision, ProviderCapabilities,
-    ProviderError, RuntimeConfig, RuntimeEvent, ToolCall, ToolCallResult, ToolExecutionError,
-    ToolExecutor, ToolSafetyClass, ToolSchema, ToolSchemaBuilder,
+    ProviderError, RuntimeConfig, RuntimeError, RuntimeEvent, ToolCall, ToolCallResult,
+    ToolExecutionError, ToolExecutor, ToolSafetyClass, ToolSchema, ToolSchemaBuilder, UserMessage,
 };
 
 /// A mock LLM provider that returns scripted responses.
@@ -368,9 +368,11 @@ async fn test_simple_text_response() {
         .unwrap();
 
     // Should have: TurnStarted, TextCompleted, TurnCompleted, Finished
-    assert!(events
-        .iter()
-        .any(|e| matches!(e, RuntimeEvent::TurnStarted { turn: 1 })));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, RuntimeEvent::TurnStarted { turn: 1 }))
+    );
     assert!(events.iter().any(|e| matches!(e, RuntimeEvent::TextCompleted { text } if text == "Hello! I can help you with that.")));
     assert!(events.iter().any(|e| matches!(
         e,
@@ -400,9 +402,11 @@ async fn test_streaming_text_response_emits_deltas_without_completed_text() {
         })
         .collect::<Vec<_>>();
     assert_eq!(deltas, vec!["streamed ", "hello"]);
-    assert!(!events
-        .iter()
-        .any(|event| matches!(event, RuntimeEvent::TextCompleted { .. })));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, RuntimeEvent::TextCompleted { .. }))
+    );
 
     let Some(Message::Assistant(message)) = messages.last() else {
         panic!("expected final assistant message");
@@ -427,13 +431,17 @@ async fn test_tool_call_flow() {
         .unwrap();
 
     // Should have tool call events
-    assert!(events
-        .iter()
-        .any(|e| matches!(e, RuntimeEvent::ToolCallsRequested { .. })));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, RuntimeEvent::ToolCallsRequested { .. }))
+    );
     assert!(events.iter().any(|e| matches!(e, RuntimeEvent::ToolExecutionStarted { tool_name, .. } if tool_name == "run_shell_command")));
-    assert!(events
-        .iter()
-        .any(|e| matches!(e, RuntimeEvent::ToolResult { .. })));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, RuntimeEvent::ToolResult { .. }))
+    );
     // Should have final text
     assert!(events.iter().any(|e| matches!(e, RuntimeEvent::TextCompleted { text } if text == "Here are the files in /tmp.")));
     assert!(events.iter().any(|e| matches!(
@@ -466,12 +474,16 @@ async fn test_run_streams_events() {
         }
     }
 
-    assert!(collected
-        .iter()
-        .any(|e| matches!(e, RuntimeEvent::TurnStarted { turn: 1 })));
-    assert!(collected
-        .iter()
-        .any(|e| matches!(e, RuntimeEvent::TextCompleted { text } if text == "streamed hello")));
+    assert!(
+        collected
+            .iter()
+            .any(|e| matches!(e, RuntimeEvent::TurnStarted { turn: 1 }))
+    );
+    assert!(
+        collected
+            .iter()
+            .any(|e| matches!(e, RuntimeEvent::TextCompleted { text } if text == "streamed hello"))
+    );
     assert!(collected.iter().any(|e| matches!(
         e,
         RuntimeEvent::Finished {
@@ -660,9 +672,11 @@ async fn test_permission_denied_stops_when_configured() {
         }
     )));
     // Should NOT have the "Done!" text
-    assert!(!events
-        .iter()
-        .any(|e| matches!(e, RuntimeEvent::TextCompleted { text } if text == "Done!")));
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, RuntimeEvent::TextCompleted { text } if text == "Done!"))
+    );
 }
 
 #[tokio::test]
@@ -965,9 +979,11 @@ async fn test_cancellation_after_tool_calls_emits_paired_cancelled_results() {
     assert_eq!(cancelled_results.len(), 2);
     assert_eq!(cancelled_results[0].0, "call_1");
     assert_eq!(cancelled_results[1].0, "call_2");
-    assert!(cancelled_results
-        .iter()
-        .all(|(_, content)| content.contains("\"code\":\"cancelled\"")));
+    assert!(
+        cancelled_results
+            .iter()
+            .all(|(_, content)| content.contains("\"code\":\"cancelled\""))
+    );
     assert!(collected.iter().any(|event| matches!(
         event,
         RuntimeEvent::Finished {
@@ -1250,4 +1266,55 @@ async fn manual_live_ollama_fifteen_tool_call_parity() {
         messages.last(),
         Some(Message::Assistant(message)) if message.content.contains("PARITY_DONE")
     ));
+}
+
+#[tokio::test]
+async fn empty_user_input_is_rejected_before_the_provider_is_called() {
+    let provider = MockProvider::text_only("should not be called");
+    let requests = std::sync::Arc::clone(&provider.requests);
+    let runtime = AgentRuntime::new(
+        provider,
+        MockExecutor::allow_all(),
+        RuntimeConfig::default(),
+    );
+
+    let error = runtime
+        .run_to_completion("test-model", vec![], "   ")
+        .await
+        .expect_err("whitespace is not a user query");
+
+    assert!(matches!(error, RuntimeError::MissingUserQuery));
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn tool_continuation_does_not_append_an_empty_user_message() {
+    let provider = MockProvider::text_only("done");
+    let requests = std::sync::Arc::clone(&provider.requests);
+    let runtime = AgentRuntime::new(
+        provider,
+        MockExecutor::allow_all(),
+        RuntimeConfig::default(),
+    );
+    let history = vec![Message::User(UserMessage::text("where is main?"))];
+
+    let (_events, messages) = runtime
+        .run_to_completion("test-model", history, "")
+        .await
+        .expect("prior user query is enough");
+
+    let sent = requests.lock().unwrap();
+    let user_texts = sent[0]
+        .messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::User(user) => Some(user.text_content()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(user_texts, vec!["where is main?".to_string()]);
+    assert!(messages.iter().all(|message| match message {
+        Message::User(user) => user.has_query(),
+        _ => true,
+    }));
 }

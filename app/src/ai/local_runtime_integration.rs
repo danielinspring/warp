@@ -21,8 +21,8 @@ use std::sync::Arc;
 
 use async_channel::Sender;
 use base64::Engine;
-use futures::channel::oneshot;
 use futures::StreamExt;
+use futures::channel::oneshot;
 use local_agent_runtime::messages::{
     AssistantMessage, ContentPart, ToolResultMessage, UserMessage,
 };
@@ -39,13 +39,13 @@ use crate::ai::agent::api::{Event, OllamaConfig, RequestParams, ResponseStream};
 use crate::ai::agent::{AIAgentContext, AIAgentInput, ImageContext};
 use crate::ai::local_runtime_bridge::event_mapper::EventMapper;
 use crate::ai::local_runtime_bridge::{
+    LocalRuntimeToolRegistry, ToolExecutionRequest, WarpToolExecutor,
     decode_local_runtime_tool_call_data, decode_local_runtime_tool_result_data,
-    proto_tool_call_to_runtime_with_registry, LocalRuntimeToolRegistry, ToolExecutionRequest,
-    WarpToolExecutor,
+    proto_tool_call_to_runtime_with_registry,
 };
 use crate::ai::{local_runtime_event_bus, local_runtime_spec};
 use crate::server::server_api::AIApiError;
-use crate::util::image::{process_image_for_agent, ProcessImageResult, MAX_IMAGE_COUNT_FOR_QUERY};
+use crate::util::image::{MAX_IMAGE_COUNT_FOR_QUERY, ProcessImageResult, process_image_for_agent};
 
 /// Build a `ResponseStream` using the new local agent runtime.
 ///
@@ -148,7 +148,9 @@ async fn run_runtime(
     let initial_messages = build_initial_messages(&params, &registry);
 
     // Extract the user's latest input, including any attached images.
-    let user_input = extract_user_input(&params);
+    // Tool-result continuations reuse history and must not append a blank user turn.
+    let user_input = prepare_local_turn(&params, &initial_messages)?;
+    let user_input = user_input.unwrap_or_else(|| UserMessage::text(String::new()));
 
     let mut mapper = EventMapper::new(
         conversation_id,
@@ -343,13 +345,93 @@ fn retain_paired_tool_messages(messages: Vec<Message>) -> Vec<Message> {
 /// any attached images as image content parts (capped at
 /// `MAX_IMAGE_COUNT_FOR_QUERY`). Non-vision models strip these back to text
 /// only at the provider layer (see `OllamaProvider::translate_messages`).
-fn extract_user_input(params: &RequestParams) -> UserMessage {
-    for input in &params.input {
-        if let AIAgentInput::UserQuery { query, context, .. } = input {
-            return build_user_message(query, context);
+///
+/// Returns `None` when this turn has no user text (for example a tool-result
+/// continuation). Callers must not synthesize an empty user message.
+fn extract_user_input(params: &RequestParams) -> Option<UserMessage> {
+    local_turn_user_message(&params.input)
+}
+
+/// Map the current turn's inputs to a user message for a local model.
+///
+/// `UserQuery` wins over other inputs. Other variants use their display text,
+/// and skills also include the skill body. Empty or whitespace-only text is
+/// omitted so chat templates that require a user query are not given `""`.
+pub(crate) fn local_turn_user_message(inputs: &[AIAgentInput]) -> Option<UserMessage> {
+    inputs
+        .iter()
+        .find_map(|input| match input {
+            AIAgentInput::UserQuery { query, context, .. } => {
+                substantive_user_message(build_user_message(query, context))
+            }
+            _ => None,
+        })
+        .or_else(|| inputs.iter().find_map(user_message_from_other_input))
+}
+
+fn user_message_from_other_input(input: &AIAgentInput) -> Option<UserMessage> {
+    match input {
+        AIAgentInput::UserQuery { .. } => None,
+        AIAgentInput::AutoCodeDiffQuery { query, context, .. } => {
+            substantive_user_message(build_user_message(query, context))
         }
+        AIAgentInput::SummarizeConversation { prompt, .. } => prompt
+            .as_deref()
+            .and_then(|prompt| substantive_user_message(UserMessage::text(prompt))),
+        AIAgentInput::InvokeSkill { skill, .. } => {
+            let mut sections = Vec::new();
+            if let Some(display) = input.display_query() {
+                let display = display.trim();
+                if !display.is_empty() {
+                    sections.push(display.to_string());
+                }
+            }
+            let content = skill.content.trim();
+            if !content.is_empty() {
+                sections.push(content.to_string());
+            }
+            substantive_user_message(UserMessage::text(sections.join("\n\n")))
+        }
+        AIAgentInput::InitProjectRules { .. }
+        | AIAgentInput::CreateEnvironment { .. }
+        | AIAgentInput::CreateNewProject { .. }
+        | AIAgentInput::CloneRepository { .. }
+        | AIAgentInput::CodeReview { .. }
+        | AIAgentInput::ActionResult { .. }
+        | AIAgentInput::PassiveSuggestionResult { .. } => input
+            .display_query()
+            .and_then(|text| substantive_user_message(UserMessage::text(text))),
+        AIAgentInput::ResumeConversation { .. }
+        | AIAgentInput::TriggerPassiveSuggestion { .. }
+        | AIAgentInput::StartFromAmbientRunPrompt { .. }
+        | AIAgentInput::MessagesReceivedFromAgents { .. }
+        | AIAgentInput::EventsFromAgents { .. }
+        | AIAgentInput::OrchestrationConfigUpdate { .. } => None,
     }
-    UserMessage::text(String::new())
+}
+
+fn substantive_user_message(message: UserMessage) -> Option<UserMessage> {
+    message.has_query().then_some(message)
+}
+
+fn prepare_local_turn(
+    params: &RequestParams,
+    history: &[Message],
+) -> Result<Option<UserMessage>, AIApiError> {
+    let user_input = extract_user_input(params);
+    if user_input.is_none() && !messages_have_user_query(history) {
+        return Err(AIApiError::Other(anyhow::anyhow!(
+            "No user query found in messages."
+        )));
+    }
+    Ok(user_input)
+}
+
+fn messages_have_user_query(messages: &[Message]) -> bool {
+    messages.iter().any(|message| match message {
+        Message::User(user) => user.has_query(),
+        Message::System(_) | Message::Assistant(_) | Message::ToolResult(_) => false,
+    })
 }
 
 fn build_user_message(query: &str, context: &[AIAgentContext]) -> UserMessage {

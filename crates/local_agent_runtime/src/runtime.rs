@@ -5,9 +5,9 @@
 
 use std::sync::Arc;
 
+use futures::SinkExt;
 use futures::channel::mpsc;
 use futures::future::join_all;
-use futures::SinkExt;
 use instant::Instant;
 use tokio::sync::watch;
 
@@ -186,6 +186,13 @@ struct RunRequest {
     user_input: UserMessage,
 }
 
+fn history_has_user_query(messages: &[Message]) -> bool {
+    messages.iter().any(|message| match message {
+        Message::User(user) => user.has_query(),
+        Message::System(_) | Message::Assistant(_) | Message::ToolResult(_) => false,
+    })
+}
+
 async fn emit_finished<S>(
     hooks: &Arc<dyn LifecycleHooks>,
     telemetry: &Arc<dyn RuntimeTelemetrySink>,
@@ -233,7 +240,12 @@ where
     for msg in initial_messages {
         history.messages_mut().push(msg);
     }
-    history.push_user_message(user_input);
+    if user_input.has_query() {
+        history.push_user_message(user_input);
+    }
+    if !history_has_user_query(history.messages()) {
+        return Err(RuntimeError::MissingUserQuery);
+    }
 
     telemetry.emit(RuntimeTelemetryEvent::RunStarted {
         model: model.clone(),

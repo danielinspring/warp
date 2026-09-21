@@ -1515,21 +1515,20 @@ fn use_computer_tool_call_to_ai_action(
             .ok_or_else(|| ToolExecutionError::InvalidInput {
                 reason: "Tool `use_computer` requires array argument `actions`".to_string(),
             })?;
-    let actions: Vec<computer_use::TargetedAction> =
-        serde_json::from_value(actions_value.clone())
-            .or_else(|_| {
-                serde_json::from_value::<Vec<computer_use::Action>>(actions_value.clone()).map(
-                    |actions| {
-                        actions
-                            .into_iter()
-                            .map(computer_use::TargetedAction::screen)
-                            .collect()
-                    },
-                )
-            })
-            .map_err(|err| ToolExecutionError::InvalidInput {
-                reason: format!("Tool `use_computer` actions JSON is invalid: {err}"),
-            })?;
+    let actions: Vec<computer_use::TargetedAction> = serde_json::from_value(actions_value.clone())
+        .or_else(|_| {
+            serde_json::from_value::<Vec<computer_use::Action>>(actions_value.clone()).map(
+                |actions| {
+                    actions
+                        .into_iter()
+                        .map(computer_use::TargetedAction::screen)
+                        .collect()
+                },
+            )
+        })
+        .map_err(|err| ToolExecutionError::InvalidInput {
+            reason: format!("Tool `use_computer` actions JSON is invalid: {err}"),
+        })?;
     if actions.is_empty() {
         return Err(ToolExecutionError::InvalidInput {
             reason: "Tool `use_computer` requires at least one action".to_string(),
@@ -2555,8 +2554,8 @@ fn read_shell_command_output_tool_call_to_proto(
 fn write_to_long_running_shell_command_tool_call_to_proto(
     call: &ToolCall,
 ) -> Result<api::message::tool_call::WriteToLongRunningShellCommand, ToolExecutionError> {
-    use api::message::tool_call::write_to_long_running_shell_command::mode::Mode as ModeVariant;
     use api::message::tool_call::write_to_long_running_shell_command::Mode;
+    use api::message::tool_call::write_to_long_running_shell_command::mode::Mode as ModeVariant;
 
     let AIAgentActionType::WriteToLongRunningShellCommand {
         block_id,
@@ -2736,8 +2735,8 @@ pub fn proto_tool_call_to_runtime_with_registry(
     tool_call: &api::message::ToolCall,
     registry: &LocalRuntimeToolRegistry,
 ) -> Option<ToolCall> {
-    use api::message::tool_call::read_skill::SkillReference as ProtoSkillReference;
     use api::message::tool_call::Tool;
+    use api::message::tool_call::read_skill::SkillReference as ProtoSkillReference;
 
     let tool = tool_call.tool.as_ref()?;
     let (name, arguments) = match tool {
@@ -3516,6 +3515,7 @@ mod tests {
                 grid_contents: "/Users/me/foo\n".to_string(),
                 cursor: String::new(),
                 is_alt_screen_active: false,
+                activity: None,
             },
         );
         let content = action_result_to_content(&long_running);
@@ -4113,7 +4113,7 @@ mod tests {
                 assert_eq!(actions.len(), 1);
                 assert!(screenshot_params.is_none());
                 assert!(matches!(
-                    &actions[0],
+                    &actions[0].action,
                     computer_use::Action::TypeText { text } if text == "hello"
                 ));
             }
@@ -4262,12 +4262,14 @@ mod tests {
                     kind: RunAgentsAgentOutcomeKind::Launched {
                         agent_id: "agent-1".to_string(),
                     },
+                    resolved_model_id: String::new(),
                 },
                 RunAgentsAgentOutcome {
                     name: "tester".to_string(),
                     kind: RunAgentsAgentOutcomeKind::Failed {
                         error: "spawn failed".to_string(),
                     },
+                    resolved_model_id: String::new(),
                 },
             ],
         });
@@ -4399,9 +4401,11 @@ mod tests {
             ]
         );
         assert!(!names.contains(&"create_file"));
-        assert!(schemas
-            .iter()
-            .all(|schema| schema.parameters["additionalProperties"] == false));
+        assert!(
+            schemas
+                .iter()
+                .all(|schema| schema.parameters["additionalProperties"] == false)
+        );
     }
 
     #[test]
@@ -4742,7 +4746,7 @@ mod tests {
                     )
                     && matches!(
                         &file_edits[1],
-                        FileEdit::Create { file, content }
+                        FileEdit::Create { file, content, allow_overwrite: _ }
                             if file.as_deref() == Some("README.md")
                                 && content.as_deref() == Some("# Readme\n")
                     )
@@ -4813,6 +4817,7 @@ mod tests {
                     None,
                     None,
                 )],
+                failed_files: vec![],
             }),
         };
 
@@ -4834,6 +4839,7 @@ mod tests {
                     None,
                     None,
                 )],
+                failed_files: vec![],
             }),
         };
 
@@ -4907,8 +4913,8 @@ pub mod event_mapper {
     use warp_multi_agent_api as api;
 
     use super::{
-        encode_local_runtime_tool_call_data, encode_local_runtime_tool_result_data,
-        tool_call_to_proto_tool_with_registry, LocalRuntimeToolRegistry,
+        LocalRuntimeToolRegistry, encode_local_runtime_tool_call_data,
+        encode_local_runtime_tool_result_data, tool_call_to_proto_tool_with_registry,
     };
 
     /// State for mapping runtime events to proto ResponseEvents.

@@ -64,6 +64,14 @@ impl UserMessage {
             .iter()
             .any(|part| matches!(part, ContentPart::Image { .. }))
     }
+
+    /// True when this message is a real user turn, not whitespace-only text.
+    ///
+    /// Chat templates such as llama.cpp `multi_step_tool` reject requests that
+    /// have tools and a system prompt but no user query.
+    pub fn has_query(&self) -> bool {
+        !self.text_content().trim().is_empty() || self.has_images()
+    }
 }
 
 impl From<String> for UserMessage {

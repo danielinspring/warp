@@ -20,6 +20,7 @@
 
 use std::sync::Arc;
 
+use anyhow::anyhow;
 use async_channel::Sender;
 use futures::stream::StreamExt;
 use uuid::Uuid;
@@ -27,7 +28,6 @@ use warp_multi_agent_api as api;
 
 use super::{ChatMessage, OllamaClient, ToolCallParsed};
 use crate::ai::agent::api::{Event, OllamaConfig, RequestParams, ResponseStream};
-use crate::ai::agent::AIAgentInput;
 use crate::server::server_api::AIApiError;
 
 /// Build a `ResponseStream` that runs one Ollama turn.
@@ -75,7 +75,7 @@ async fn run_turn(
 
     emit_init(tx, &conversation_id, &request_id, &run_id).await;
 
-    let messages = build_messages(&params);
+    let messages = build_messages(&params)?;
 
     let client = OllamaClient::new(cfg.base_url.clone(), cfg.api_key.clone());
     // Advertise built-in tools so models that honor OpenAI tool calling can use
@@ -116,7 +116,7 @@ fn first_task_id(params: &RequestParams) -> Option<String> {
 /// We don't try to be exhaustive — only the message types that actually
 /// shape an LLM turn (user queries, agent text replies, tool calls, tool
 /// results) are translated. Everything else is dropped silently.
-fn build_messages(params: &RequestParams) -> Vec<ChatMessage> {
+fn build_messages(params: &RequestParams) -> Result<Vec<ChatMessage>, AIApiError> {
     let mut messages = Vec::new();
     messages.push(ChatMessage::system(SYSTEM_PROMPT.to_string()));
 
@@ -128,13 +128,24 @@ fn build_messages(params: &RequestParams) -> Vec<ChatMessage> {
         }
     }
 
-    for input in &params.input {
-        if let Some(chat_msg) = translate_input(input) {
-            messages.push(chat_msg);
+    if let Some(user) = crate::ai::local_runtime_integration::local_turn_user_message(&params.input)
+    {
+        let content = user.text_content();
+        if !content.trim().is_empty() {
+            messages.push(ChatMessage::user(content));
         }
     }
 
-    messages
+    let has_user_query = messages
+        .iter()
+        .any(|message| message.role == "user" && !message.content.trim().is_empty());
+    if !has_user_query {
+        return Err(AIApiError::Other(anyhow!(
+            "No user query found in messages."
+        )));
+    }
+
+    Ok(messages)
 }
 
 const SYSTEM_PROMPT: &str = "You are a coding assistant running locally via Ollama, integrated into the Warp terminal. Reply concisely. When you need to take an action (run a command, read a file, etc.), prefer to call the matching tool; otherwise reply with plain text.";
@@ -150,18 +161,6 @@ fn translate_proto_message(msg: &api::Message) -> Option<ChatMessage> {
             // surface the result as a plain user message instead. Full
             // tool-result wiring is a follow-up; see module docs.
             // Best-effort: skip silently rather than fabricate.
-            None
-        }
-        _ => None,
-    }
-}
-
-fn translate_input(input: &AIAgentInput) -> Option<ChatMessage> {
-    match input {
-        AIAgentInput::UserQuery { query, .. } => Some(ChatMessage::user(query.clone())),
-        AIAgentInput::ActionResult { .. } => {
-            // Tool results round-trip through the proto Task on the next
-            // call; no extra message needed here.
             None
         }
         _ => None,
@@ -396,3 +395,7 @@ const _: fn() = || {
 fn _ensure_streamext_used<S: futures::Stream + Unpin>(s: S) {
     let _ = StreamExt::map(s, |x| x);
 }
+
+#[cfg(test)]
+#[path = "agent_loop_tests.rs"]
+mod tests;
