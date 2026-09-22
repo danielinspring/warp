@@ -1178,3 +1178,27 @@ fn grok_expired_refresh_token_ignores_in_flight_refresh() {
         Some("refresh".to_string())
     );
 }
+
+#[test]
+fn local_agent_url_is_none_until_configured() {
+    let keys = ApiKeys::default();
+    assert_eq!(keys.resolved_local_agent_url(), None);
+}
+
+#[test]
+fn local_agent_url_trims_and_treats_blank_as_unset() {
+    let keys = ApiKeys {
+        local_agent_url: Some("  http://127.0.0.1:9377  ".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        keys.resolved_local_agent_url().as_deref(),
+        Some("http://127.0.0.1:9377")
+    );
+
+    let blank = ApiKeys {
+        local_agent_url: Some("   ".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(blank.resolved_local_agent_url(), None);
+}

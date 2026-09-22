@@ -68,8 +68,15 @@ pub struct ApiKeys {
     pub ollama_base_url: Option<String>,
     pub ollama_model: Option<String>,
     pub ollama_api_key: Option<String>,
+    /// Base URL of the local agent service that runs Ollama turns out of process.
+    ///
+    /// `None` keeps those turns inside the app.
+    pub local_agent_url: Option<String>,
     pub custom_endpoints: Vec<CustomEndpoint>,
 }
+
+/// Development override for [`ApiKeys::resolved_local_agent_url`].
+pub const LOCAL_AGENT_URL_ENV: &str = "WARP_LOCAL_AGENT_URL";
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -423,6 +430,18 @@ impl ApiKeys {
 
     pub fn has_ollama_configured(&self) -> bool {
         self.ollama_base_url.is_some() && self.ollama_model.is_some()
+    }
+
+    /// The local agent service URL, preferring the environment override so a developer can point
+    /// at a service they are iterating on without touching their saved settings.
+    pub fn resolved_local_agent_url(&self) -> Option<String> {
+        std::env::var(LOCAL_AGENT_URL_ENV)
+            .ok()
+            .as_deref()
+            .or(self.local_agent_url.as_deref())
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .map(str::to_string)
     }
 
     /// Number of single-provider API keys currently configured (OpenAI,
@@ -982,6 +1001,12 @@ impl ApiKeyManager {
     pub fn set_ollama_api_key(&mut self, key: Option<String>, ctx: &mut ModelContext<Self>) {
         self.keys.ollama_api_key = key;
         self.ollama_connection_state = OllamaConnectionState::Untested;
+        ctx.emit(ApiKeyManagerEvent::KeysUpdated);
+        self.write_keys_to_secure_storage(ctx);
+    }
+
+    pub fn set_local_agent_url(&mut self, url: Option<String>, ctx: &mut ModelContext<Self>) {
+        self.keys.local_agent_url = url;
         ctx.emit(ApiKeyManagerEvent::KeysUpdated);
         self.write_keys_to_secure_storage(ctx);
     }

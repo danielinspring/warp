@@ -404,7 +404,11 @@ impl ResponseStream {
         let start_time = Local::now();
 
         let request_id = Uuid::new_v4();
-        let local_runtime_tool_loop = params.ollama_config.is_some()
+        // A configured service owns the tool loop, so the in-process one must stand down.
+        let local_runtime_tool_loop = params
+            .ollama_config
+            .as_ref()
+            .is_some_and(|cfg| cfg.service_url.is_none())
             && warp_core::features::FeatureFlag::LocalOllamaRuntimeToolUse.is_enabled();
 
         if local_runtime_tool_loop {

@@ -3,10 +3,11 @@ use warp_core::features::FeatureFlag;
 use warp_multi_agent_api as api;
 
 use super::{
-    api_keys_with_warp_credit_fallback_setting, get_supported_cli_agent_tools, get_supported_tools,
+    LOCAL_OLLAMA_CONFIG_KEY, api_keys_with_warp_credit_fallback_setting,
+    apply_local_agent_settings, get_supported_cli_agent_tools, get_supported_tools,
     supports_orchestration_v2,
 };
-use crate::ai::agent::api::RequestParams;
+use crate::ai::agent::api::{OllamaConfig, RequestParams};
 use crate::ai::blocklist::SessionContext;
 use crate::ai::llms::LLMId;
 use crate::terminal::model::session::SessionType;
@@ -195,4 +196,90 @@ fn remote_supported_tools_omit_search_codebase_when_remote_is_not_connected() {
 
     assert!(!supported_tools.contains(&api::ToolType::SearchCodebase));
     assert!(!supported_cli_agent_tools.contains(&api::ToolType::SearchCodebase));
+}
+
+fn ollama_config(service_url: Option<&str>) -> OllamaConfig {
+    OllamaConfig {
+        base_url: "http://127.0.0.1:11434".to_string(),
+        model: "qwen2.5-coder:7b".to_string(),
+        api_key: Some("local-key".to_string()),
+        service_url: service_url.map(str::to_string),
+    }
+}
+
+fn request_with_settings() -> api::Request {
+    api::Request {
+        settings: Some(api::request::Settings {
+            model_config: Some(api::request::settings::ModelConfig {
+                base: "claude-4".to_string(),
+                ..Default::default()
+            }),
+            api_keys: Some(api::request::settings::ApiKeys {
+                anthropic: "sk-ant".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn local_agent_settings_carry_the_ollama_endpoint_and_drop_warp_keys() {
+    let mut request = request_with_settings();
+
+    apply_local_agent_settings(&mut request, &ollama_config(Some("http://127.0.0.1:9377")));
+
+    let settings = request.settings.as_ref().unwrap();
+    assert!(settings.api_keys.is_none());
+    assert_eq!(
+        settings.model_config.as_ref().unwrap().base,
+        LOCAL_OLLAMA_CONFIG_KEY
+    );
+
+    let providers = &settings.custom_model_providers.as_ref().unwrap().providers;
+    assert_eq!(providers.len(), 1);
+    assert_eq!(providers[0].base_url, "http://127.0.0.1:11434");
+    assert_eq!(providers[0].api_key, "local-key");
+    assert_eq!(
+        providers[0].schema,
+        api::request::settings::custom_model_providers::CustomEndpointSchema::OpenaiChatCompletions
+            as i32
+    );
+    assert_eq!(providers[0].models.len(), 1);
+    assert_eq!(providers[0].models[0].slug, "qwen2.5-coder:7b");
+}
+
+/// The service looks its provider up by `config_key`, so the two must agree or the turn is
+/// rejected before a model is reached.
+#[test]
+fn local_agent_model_config_base_matches_the_provider_config_key() {
+    let mut request = request_with_settings();
+
+    apply_local_agent_settings(&mut request, &ollama_config(Some("http://127.0.0.1:9377")));
+
+    let settings = request.settings.as_ref().unwrap();
+    let base = &settings.model_config.as_ref().unwrap().base;
+    let config_key =
+        &settings.custom_model_providers.as_ref().unwrap().providers[0].models[0].config_key;
+    assert_eq!(base, config_key);
+}
+
+#[test]
+fn local_agent_settings_send_an_empty_api_key_when_ollama_has_none() {
+    let mut request = request_with_settings();
+    let mut config = ollama_config(Some("http://127.0.0.1:9377"));
+    config.api_key = None;
+
+    apply_local_agent_settings(&mut request, &config);
+
+    let providers = &request
+        .settings
+        .as_ref()
+        .unwrap()
+        .custom_model_providers
+        .as_ref()
+        .unwrap()
+        .providers;
+    assert!(providers[0].api_key.is_empty());
 }

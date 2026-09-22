@@ -10,20 +10,21 @@ Extract the in-process local Ollama agent into a standalone `warp-local-agent` s
 
 ## Active Feature
 
-None. feat-048 (§A runtime deferral), feat-049 (§B `crates/warp_local_agent`) and feat-050 (§C local transport) are done and committed; feat-051 (§D) and feat-052 (§E) are not started.
+feat-051 (§D). Its additive half is committed: the app can reach the service and the in-process path still works. The removal half is not started. feat-048, feat-049 and feat-050 are done.
 
 ## Branch
 
-- `daniel/dev` (feat-048, feat-049 and feat-050 are committed; nothing pushed)
+- `daniel/dev` (feat-048, feat-049, feat-050 and the additive half of feat-051 are committed; nothing pushed)
 
 ## Current State
 
 - Runtime: client-deferred tool calls land as `ToolCallsDeferred` + `AwaitingClientToolResults`; envelope lives in `local_agent_runtime::transcript`.
 - Service: `cargo run -p warp_local_agent -- --listen 127.0.0.1:9377` serves `/ai/multi-agent`, `/ai/passive-suggestions`, `/health`, `/debug/spec`. 115 tests pass.
 - Transport: `warp_multi_agent_client::generate_local_agent_output(client, base_url, request)` is ready and tested; nothing calls it yet.
-- App: only two match arms changed (`agent_viz/model.rs`, bridge `event_mapper`); the in-process path still works (61 `local_runtime` tests pass) and nothing routes to the service yet.
+- App: set `WARP_LOCAL_AGENT_URL=http://127.0.0.1:9377` (or `ApiKeys::local_agent_url`) and an Ollama turn goes to the service; leave it unset and the in-process path runs exactly as before.
+- The in-process path is untouched apart from one guard in `response_stream.rs` and two match arms, and its 61 tests still pass.
 - Environment notes: run cargo with `RUSTC_WRAPPER=` (sccache remote cache down); local clippy/rustfmt are 1.97 (no rustup).
 
 ## Recommended Next Step
 
-Implement feat-051 (TECH.md §D). Start with `app/src/ai/agent/api/impl.rs`: drop the early return at L26-33, and when `params.ollama_config` is set, point `settings.custom_model_providers` at one `CustomModelProvider` whose `models[].config_key` matches `model_config.base`, clear `api_keys`, then call `generate_local_agent_output`. The deletions in `response_stream.rs` and the `local_*` modules follow. This is the first step that edits and deletes under `app/`.
+Confirm the service works end to end before deleting anything. Start Ollama, run `cargo run -p warp_local_agent -- --listen 127.0.0.1:9377`, launch the app with `WARP_LOCAL_AGENT_URL=http://127.0.0.1:9377`, configure Ollama in Settings › AI, and walk the prompts in `dan_docs/how/local_ollama_manual_parity_prompts.md`. Then do the removal half of feat-051: delete the `local_*` modules and `ollama/agent_loop`, strip the tool loop from `response_stream.rs`, repoint `convert_from.rs` at `local_agent_runtime::transcript`, remove `FeatureFlag::LocalOllamaRuntimeToolUse` and its cargo feature, re-feed `agent_viz` from `ResponseEvent`s plus `GET /debug/spec`, and add the settings widget.

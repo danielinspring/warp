@@ -3,8 +3,8 @@
 ## Current State
 
 **Last Updated:** 2026-09-22  
-**Active Feature:** (none — feat-048, feat-049 and feat-050 complete)  
-**Status:** Idle  
+**Active Feature:** feat-051 (Section D), additive half landed  
+**Status:** In progress  
 
 ## What's Done
 
@@ -26,12 +26,26 @@
     cannot leak into a local URL.
   - Closed a pre-existing manifest gap: the crate relied on `app` enabling `tracing-futures/futures-03`
     through feature unification and could not build on its own. It now declares that feature.
+- feat-051 (TECH.md §D), additive half only: the app can route an Ollama turn to the service, and the
+  in-process path still works as a fallback.
+  - `ApiKeys::local_agent_url` plus `resolved_local_agent_url()`, which prefers the
+    `WARP_LOCAL_AGENT_URL` override and treats blank as unset. `OllamaConfig` carries `service_url`.
+  - `impl.rs` returns early only when no service is configured. Otherwise the full cloud request is
+    built and pointed at the service, with `model_config.base` and the provider's `config_key` both
+    set to `local-ollama` so the service's lookup matches, and Warp's own API keys cleared.
+  - The controller only takes the in-process tool loop when no service URL is set.
+  - An unreachable service reports its URL and how to start it.
+  - Still open in this feature: the settings widget, and the entire removal half.
 
 ## Verification (this session)
 
 - `cargo test -p local_agent_runtime`: 32 unit + 30 integration passed (1 ignored live test).
 - `cargo test -p warp_local_agent`: 115 passed (9 router tests with a scripted provider, incl. disconnect → cancel).
 - `cargo test -p warp_multi_agent_client`: 9 passed (3 new URL tests); clippy and fmt clean for that crate.
+- `cargo test -p ai --lib api_keys`: 79 passed (2 new). `cargo test -p warp --lib` filtered to the new
+  API tests: 6 passed (3 new). Clippy reports no findings in any file this session changed.
+- Live service check: an empty protobuf request returned `Init` with fresh ids, then
+  `Finished{InternalError}` naming the missing provider, exercising the HTTP path end to end.
 - `cargo check -p warp --lib`: ok. `cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use`: 61 passed.
 - `cargo clippy -p local_agent_runtime -p warp_local_agent --all-targets --tests -- -D warnings`: clean (local clippy is 1.97; no rustup, so the pinned 1.92 is unavailable).
 - Formatting: `cargo fmt -p local_agent_runtime` and `-p warp_local_agent` with the project config both report clean; neither changed app file appears in the formatter's diff list. Repo-wide `./script/format --check` fails on 27 files this change never touched (pre-existing drift on `daniel/dev`, local rustfmt 1.97 vs pinned 1.92).
@@ -47,4 +61,4 @@
 
 ## Next
 
-Implement Section D (feat-051): route Ollama-configured requests through `generate_local_agent_output` and delete the in-process loop. This is the first step that edits and deletes under `app/`.
+Run the service against a real Ollama model and confirm a turn works end to end, then do the removal half of feat-051: the deletions, the controller surgery, the feature-flag removal, the agent_viz re-feed and the settings widget.

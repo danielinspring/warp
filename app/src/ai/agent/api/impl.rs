@@ -6,7 +6,7 @@ use warp_core::features::FeatureFlag;
 use warp_multi_agent_api as api;
 
 use super::convert_to::convert_input;
-use super::{ConvertToAPITypeError, RequestParams, ResponseStream};
+use super::{ConvertToAPITypeError, OllamaConfig, RequestParams, ResponseStream};
 use crate::ai::agent::redaction;
 use crate::ai::blocklist::video_recording_enabled;
 use crate::server::server_api::{AIApiError, ServerApi};
@@ -19,11 +19,16 @@ pub async fn generate_multi_agent_output(
     team_scope: RequestTeamScope,
     cancellation_rx: futures::channel::oneshot::Receiver<()>,
 ) -> Result<ResponseStream, ConvertToAPITypeError> {
-    // If the user has configured a local Ollama server, route the entire
-    // turn through there instead of Warp's backend. The downstream
-    // controller/transcript code is unchanged — we synthesize the same
-    // `ResponseEvent` shape the server would have emitted.
-    if let Some(ollama_cfg) = params.ollama_config.clone() {
+    // A configured local agent service receives the same request the backend would have, built
+    // below. Without one, an Ollama turn is still answered entirely inside the app, synthesizing
+    // the `ResponseEvent` shape the server would have emitted.
+    let local_agent = params
+        .ollama_config
+        .clone()
+        .filter(|cfg| cfg.service_url.is_some());
+    if local_agent.is_none()
+        && let Some(ollama_cfg) = params.ollama_config.clone()
+    {
         if params.should_redact_secrets {
             redaction::redact_inputs(&mut params.input);
         }
@@ -74,7 +79,7 @@ pub async fn generate_multi_agent_output(
         params.allow_use_of_warp_credits,
     );
 
-    let request = api::Request {
+    let mut request = api::Request {
         task_context: Some(api::request::TaskContext {
             tasks: params.tasks,
         }),
@@ -156,19 +161,40 @@ pub async fn generate_multi_agent_output(
         mcp_context: params.mcp_context.map(Into::into),
     };
 
-    let response_stream = warp_multi_agent_client::generate_multi_agent_output(
-        server_api.as_ref(),
-        &request,
-        team_scope.team_uid().map(|uid| uid.uid()),
-    )
-    .await;
+    let local_agent_url = local_agent.as_ref().and_then(|cfg| cfg.service_url.clone());
+    let response_stream = match (&local_agent, &local_agent_url) {
+        (Some(cfg), Some(url)) => {
+            apply_local_agent_settings(&mut request, cfg);
+            warp_multi_agent_client::generate_local_agent_output(
+                server_api.as_ref().http_client(),
+                url,
+                &request,
+            )
+            .await
+        }
+        _ => {
+            warp_multi_agent_client::generate_multi_agent_output(
+                server_api.as_ref(),
+                &request,
+                team_scope.team_uid().map(|uid| uid.uid()),
+            )
+            .await
+        }
+    };
     match response_stream {
         Ok(stream) => {
             let output_stream = stream
-                .then(|result| async {
-                    match result {
-                        Ok(event) => Ok(event),
-                        Err(error) => Err(convert_multi_agent_client_error(error).await),
+                .then(move |result| {
+                    let local_agent_url = local_agent_url.clone();
+                    async move {
+                        match result {
+                            Ok(event) => Ok(event),
+                            Err(error) => Err(convert_multi_agent_client_error(
+                                error,
+                                local_agent_url.as_deref(),
+                            )
+                            .await),
+                        }
                     }
                 })
                 .take_until(cancellation_rx);
@@ -177,15 +203,54 @@ pub async fn generate_multi_agent_output(
         Err(e) => {
             let (tx, rx) = async_channel::unbounded();
             let _ = tx
-                .send(Err(convert_multi_agent_client_error(e).await))
+                .send(Err(convert_multi_agent_client_error(
+                    e,
+                    local_agent_url.as_deref(),
+                )
+                .await))
                 .await;
             Ok(Box::pin(rx))
         }
     }
 }
 
+/// The config key that ties `model_config.base` to the provider entry the service reads the
+/// Ollama endpoint from.
+const LOCAL_OLLAMA_CONFIG_KEY: &str = "local-ollama";
+
+/// Point a request at the local agent service.
+///
+/// The service has no Warp credentials and picks its provider out of `custom_model_providers`, so
+/// the user's Ollama endpoint travels with the request and Warp's own keys are dropped.
+fn apply_local_agent_settings(request: &mut api::Request, config: &OllamaConfig) {
+    use api::request::settings::custom_model_providers::{
+        CustomEndpointSchema, CustomModel, CustomModelProvider,
+    };
+
+    let Some(settings) = request.settings.as_mut() else {
+        return;
+    };
+    if let Some(model_config) = settings.model_config.as_mut() {
+        model_config.base = LOCAL_OLLAMA_CONFIG_KEY.to_string();
+    }
+    settings.api_keys = None;
+    settings.custom_model_providers = Some(api::request::settings::CustomModelProviders {
+        providers: vec![CustomModelProvider {
+            base_url: config.base_url.clone(),
+            api_key: config.api_key.clone().unwrap_or_default(),
+            schema: CustomEndpointSchema::OpenaiChatCompletions as i32,
+            models: vec![CustomModel {
+                slug: config.model.clone(),
+                config_key: LOCAL_OLLAMA_CONFIG_KEY.to_string(),
+                reasoning_effort: String::new(),
+            }],
+        }],
+    });
+}
+
 async fn convert_multi_agent_client_error(
     error: warp_multi_agent_client::Error,
+    local_agent_url: Option<&str>,
 ) -> Arc<AIApiError> {
     let error = match error {
         warp_multi_agent_client::Error::Authentication(error)
@@ -196,9 +261,15 @@ async fn convert_multi_agent_client_error(
         warp_multi_agent_client::Error::ProtobufDecode(error) => {
             AIApiError::Other(anyhow::Error::from(error))
         }
-        warp_multi_agent_client::Error::EventSource(error) => {
-            AIApiError::from_stream_error("GenerateMultiAgentOutput", *error).await
-        }
+        // A local service that is simply not running is the common failure here, and the
+        // transport error alone does not say how to fix it.
+        warp_multi_agent_client::Error::EventSource(error) => match local_agent_url {
+            Some(url) => AIApiError::Other(anyhow::anyhow!(
+                "Could not reach the local agent service at {url}. Start it with \
+                 `cargo run -p warp_local_agent`. ({error:?})"
+            )),
+            None => AIApiError::from_stream_error("GenerateMultiAgentOutput", *error).await,
+        },
     };
     Arc::new(error)
 }

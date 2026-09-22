@@ -135,6 +135,9 @@ pub struct OllamaConfig {
     pub base_url: String,
     pub model: String,
     pub api_key: Option<String>,
+    /// When set, the turn is sent to the local agent service at this URL instead of running
+    /// inside the app.
+    pub service_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -363,6 +366,7 @@ impl RequestParams {
                     ),
                     model: keys.ollama_model.clone().unwrap_or_default(),
                     api_key: keys.ollama_api_key.clone(),
+                    service_url: keys.resolved_local_agent_url(),
                 })
                 .filter(|cfg| !cfg.base_url.is_empty() && !cfg.model.is_empty())
         };
