@@ -78,6 +78,53 @@ pub async fn generate_multi_agent_output(
     }
 
     let raw_stream = client.wrap_eventsource_with_iap_detection(request_builder.eventsource());
+    Ok(decode_event_stream(
+        raw_stream,
+        tracing::info_span!(
+            "generate_multi_agent_output",
+            tags.cloud_agent = true,
+            conversation_id = tracing::field::Empty,
+            request_id = tracing::field::Empty,
+            run_id = tracing::field::Empty,
+        ),
+    ))
+}
+
+/// Opens a decoded response event stream against a local agent service.
+///
+/// The service speaks the same protocol as the cloud endpoint but needs none of its plumbing:
+/// there is no access token to attach, no ambient headers to resolve and no IAP redirect to
+/// detect. `base_url` is the service root, such as `http://127.0.0.1:9377`.
+pub async fn generate_local_agent_output(
+    client: &http_client::Client,
+    base_url: &str,
+    request: &warp_multi_agent_api::Request,
+) -> Result<OutputStream, Error> {
+    let url = local_endpoint_url(base_url, is_passive_suggestion_request(request));
+
+    let raw_stream = client
+        .post(url)
+        .proto(request)
+        .prevent_sleep("Local agent request in-progress")
+        .eventsource();
+
+    Ok(decode_event_stream(
+        raw_stream,
+        tracing::info_span!(
+            "generate_local_agent_output",
+            tags.cloud_agent = false,
+            conversation_id = tracing::field::Empty,
+            request_id = tracing::field::Empty,
+            run_id = tracing::field::Empty,
+        ),
+    ))
+}
+
+/// Decodes an SSE stream of base64 protobuf frames, recording stream identifiers on `span`.
+fn decode_event_stream(
+    raw_stream: http_client::EventSourceStream,
+    span: tracing::Span,
+) -> OutputStream {
     let output_stream = raw_stream.filter_map(|event| async {
         match event {
             Ok(reqwest_eventsource::Event::Message(message_event)) => {
@@ -105,20 +152,13 @@ pub async fn generate_multi_agent_output(
             }
         }
     });
-    // Wrap the output stream with a trace span.
-    let output_stream = output_stream.instrument(tracing::info_span!(
-        "generate_multi_agent_output",
-        tags.cloud_agent = true,
-        conversation_id = tracing::field::Empty,
-        request_id = tracing::field::Empty,
-        run_id = tracing::field::Empty,
-    ));
+    let output_stream = output_stream.instrument(span);
 
     cfg_if::cfg_if! {
         if #[cfg(target_family = "wasm")] {
-            Ok(output_stream.boxed_local())
+            output_stream.boxed_local()
         } else {
-            Ok(output_stream.boxed())
+            output_stream.boxed()
         }
     }
 }
@@ -141,6 +181,20 @@ fn endpoint_url(is_passive: bool) -> String {
         } else {
             "ai"
         },
+        if is_passive {
+            "passive-suggestions"
+        } else {
+            "multi-agent"
+        }
+    )
+}
+
+/// The local service serves fixed `/ai/...` routes, so the `agent_mode_evals` prefix used for the
+/// cloud endpoint does not apply here.
+fn local_endpoint_url(base_url: &str, is_passive: bool) -> String {
+    format!(
+        "{}/ai/{}",
+        base_url.trim_end_matches('/'),
         if is_passive {
             "passive-suggestions"
         } else {

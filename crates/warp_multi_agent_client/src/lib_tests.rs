@@ -5,6 +5,7 @@ use warp_server_client::base_client::AmbientHeaderPolicy;
 
 use super::{
     Error, ambient_policy, decode_response_event, endpoint_url, is_passive_suggestion_request,
+    local_endpoint_url,
 };
 
 #[test]
@@ -36,6 +37,33 @@ fn routes_regular_and_passive_requests_to_distinct_endpoints() {
 
     assert!(endpoint_url(false).ends_with(&format!("/{prefix}/multi-agent")));
     assert!(endpoint_url(true).ends_with(&format!("/{prefix}/passive-suggestions")));
+}
+
+#[test]
+fn routes_local_agent_requests_to_the_service_ai_endpoints() {
+    assert_eq!(
+        local_endpoint_url("http://127.0.0.1:9377", false),
+        "http://127.0.0.1:9377/ai/multi-agent"
+    );
+    assert_eq!(
+        local_endpoint_url("http://127.0.0.1:9377", true),
+        "http://127.0.0.1:9377/ai/passive-suggestions"
+    );
+}
+
+#[test]
+fn local_agent_url_tolerates_a_trailing_slash_from_settings() {
+    assert_eq!(
+        local_endpoint_url("http://127.0.0.1:9377/", false),
+        "http://127.0.0.1:9377/ai/multi-agent"
+    );
+}
+
+/// The service serves fixed routes, so the evals prefix must not leak into the local URL.
+#[test]
+fn local_agent_url_ignores_the_agent_mode_evals_prefix() {
+    assert!(local_endpoint_url("http://127.0.0.1:9377", false).contains("/ai/"));
+    assert!(!local_endpoint_url("http://127.0.0.1:9377", false).contains("agent-mode-evals"));
 }
 
 #[test]

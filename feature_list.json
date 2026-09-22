@@ -1160,7 +1160,7 @@
       "dependencies": [
         "feat-049"
       ],
-      "status": "not-started",
+      "status": "done",
       "acceptance_criteria": [
         "generate_local_agent_output builds {base_url}/ai/multi-agent or /ai/passive-suggestions via is_passive_suggestion_request and shares the stream-decoding tail with generate_multi_agent_output.",
         "lib_tests.rs covers the URL construction."
@@ -1168,7 +1168,7 @@
       "verification": [
         "cargo test -p warp_multi_agent_client"
       ],
-      "evidence": ""
+      "evidence": "2026-09-22: Added generate_local_agent_output(client: &http_client::Client, base_url, request) to crates/warp_multi_agent_client. It POSTs the proto Request to {base_url}/ai/multi-agent, or /ai/passive-suggestions via the existing is_passive_suggestion_request, with .proto().prevent_sleep().eventsource() and no auth token, ambient headers or IAP wrapper. The shared decoding tail was factored into decode_event_stream(raw_stream: http_client::EventSourceStream, span: tracing::Span) -> OutputStream, which both transports now call; generate_multi_agent_output keeps its exact span name, fields and behaviour. local_endpoint_url trims a trailing slash from the configured URL and always uses the /ai/ prefix, since the service serves fixed routes and the agent_mode_evals prefix must not leak into a local URL. Required a one-line manifest fix: the crate declared plain tracing-futures, so tracing_futures::Instrumented only implemented Stream when app/Cargo.toml:213 enabled futures-03 through feature unification, and cargo check -p warp_multi_agent_client failed on master before any of my changes; the crate now declares features = [\"futures-03\"] itself, which is additive and a no-op for any build containing app. cargo test -p warp_multi_agent_client: 9 passed (3 new URL tests). cargo clippy -p warp_multi_agent_client --all-targets --tests: no findings in this crate (the local clippy 1.97 reports pre-existing findings in warpui_core, which the pinned 1.92 does not). cargo fmt -p warp_multi_agent_client: clean. cargo check -p warp --lib: exit 0, so the app still builds against the refactored client. The wasm boxed_local path is unchanged in shape but was not built locally; no rustup here to add the target, and CI covers it."
     },
     {
       "id": "feat-051",

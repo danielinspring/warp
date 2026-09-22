@@ -15982,6 +15982,7 @@ dependencies = [
  "base64 0.22.1",
  "cfg-if",
  "futures",
+ "http_client",
  "prost",
  "thiserror 2.0.17",
  "tracing",
