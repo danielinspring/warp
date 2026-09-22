@@ -1102,6 +1102,114 @@
         "cargo clippy -p warp --lib --all-features"
       ],
       "evidence": "2026-08-05: Guests saw an agent turn stop mid-sentence with no approval UI because blocked-action state lives in BlocklistAIActionModel, not in the exchange transcript. Added BlocklistAIActionModel::{action_awaiting_confirmation, conversation_awaiting_confirmation, resolve_action_awaiting_confirmation}; LocalShareAgentExchange gained pending_action and now formats output with the action model so tool results appear (capped at 32 KiB). TerminalView republishes the owning turn on ActionBlockedOnUserConfirmation / ExecutingAction / FinishedAction. Guests answer over a local-share-only LocalShareAgentDecision envelope parsed ahead of UpstreamMessage. cargo nextest run -p warp local_session_share: 43 passed, 0 failed. lite_viewer_tests.js: all checks passed (12 new approval checks). ./script/format clean; cargo clippy -p warp --lib --all-features introduced no new warnings in touched files."
+    },
+    {
+      "id": "feat-048",
+      "name": "Runtime client-deferred tool calls (TECH.md \u00a7A)",
+      "description": "Let local_agent_runtime end a run when the model requests tools the client must execute: ExecutionSite on ToolExecutor, ToolCallsDeferred / AwaitingClientToolResults events, and a transcript envelope module the app and the service share.",
+      "phase": "Phase E \u2014 Service extraction",
+      "dependencies": [
+        "feat-047"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "ToolExecutor::execution_site defaults to InProcess; Client calls are never passed to execute.",
+        "A mixed batch executes in-process calls, emits ToolCallsDeferred for client calls, and finishes with AwaitingClientToolResults without a grounding cue.",
+        "An all-client batch defers without executing anything; an all-in-process batch behaves exactly as before.",
+        "Trusted pre-tool deny hooks still block client tools in-process instead of deferring them.",
+        "local_agent_runtime::transcript owns the server_message_data envelope with its round-trip tests.",
+        "The two exhaustive matches in app/ (agent_viz/model.rs, local_runtime_bridge.rs event_mapper) gain one arm each and the app still compiles."
+      ],
+      "verification": [
+        "cargo test -p local_agent_runtime",
+        "cargo check -p warp --lib",
+        "cargo clippy -p local_agent_runtime --all-targets --tests -- -D warnings"
+      ],
+      "evidence": "2026-09-22: Added ExecutionSite + defaulted ToolExecutor::execution_site, RuntimeEvent::ToolCallsDeferred and FinishReason::AwaitingClientToolResults. run_loop partitions requested calls by site, still runs trusted pre_tool hooks on client calls (a deny is answered in-process), synthesizes cancelled results for deferred calls on cancel, and after the in-process batch emits ToolCallsDeferred + Finished{AwaitingClientToolResults} with no grounding cue. local_agent_runtime::transcript now owns the server_message_data envelope (bridge copy stays until Section D). Approved app arms: agent_viz/model.rs (ToolCallsDeferred no-op) and local_runtime_bridge.rs event_mapper (AwaitingClientToolResults -> Done). cargo test -p local_agent_runtime: 32 unit + 30 integration passed (5 new deferral tests; 1 ignored live test). cargo check -p warp --lib: ok. cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use: 61 passed. cargo clippy -p local_agent_runtime --all-targets --tests -- -D warnings: clean (local clippy is 1.97, no rustup; it also flagged a pre-existing question_mark lint in provider/text_tool_calls.rs which was rewritten with `?`). sccache's remote cache was unreachable, so every cargo command ran with RUSTC_WRAPPER= ."
+    },
+    {
+      "id": "feat-049",
+      "name": "warp_local_agent service crate (TECH.md \u00a7B)",
+      "description": "Standalone axum HTTP+SSE service (lib + bin warp-local-agent) that accepts the cloud multi-agent protobuf Request, runs local_agent_runtime against the forwarded Ollama provider, executes web/git/todo/list_skills tools in-process and defers Warp tools to the client.",
+      "phase": "Phase E \u2014 Service extraction",
+      "dependencies": [
+        "feat-048"
+      ],
+      "status": "done",
+      "acceptance_criteria": [
+        "POST /ai/multi-agent decodes a proto Request and streams base64 URL-safe ResponseEvents that warp_multi_agent_client::decode_response_event accepts.",
+        "A text-only turn yields Init, CreateTask/AddMessagesToTask(AgentOutput), Finished{Done}; a client tool call yields the ToolCall message then Finished{Done}.",
+        "A continuation carrying UserInputs[ToolCallResult] echoes the ToolCallResult message with the transcript envelope and typed result, then continues the run.",
+        "In-process tools (web, git, todos, list_skills) never end the stream.",
+        "POST /ai/passive-suggestions replies Init + Finished{Done}; a missing custom_model_providers match replies Finished{InternalError}; a dropped client connection cancels the run.",
+        "GET /health and GET /debug/spec work; the binary listens on --listen / WARP_LOCAL_AGENT_LISTEN (default 127.0.0.1:9377, since 9277 is Warp's own local HTTP server).",
+        "Moved unit tests pass alongside their modules; the crate depends on neither warp, warpui, warpui_core nor crates/ai."
+      ],
+      "verification": [
+        "cargo test -p warp_local_agent",
+        "cargo clippy -p warp_local_agent --all-targets --tests -- -D warnings",
+        "cargo run -p warp_local_agent -- --listen 127.0.0.1:9377 (then curl /health and /debug/spec)"
+      ],
+      "evidence": "2026-09-22: New crate crates/warp_local_agent (lib + bin warp-local-agent). server.rs: axum router with POST /ai/multi-agent (raw proto body -> SSE of padded URL-safe base64 ResponseEvents, CancelOnDrop guard, configurable keep-alive), POST /ai/passive-suggestions (Init + Done), GET /health, GET /debug/spec. request.rs: TurnIds + plan_turn (provider from custom_model_providers by model_config.base, history from task messages plus this turn's ToolCallResults, grounding cue or user query, image resize via images.rs). turn.rs drives the runtime and maps events; event_mapper.rs persists client ToolCall messages on ToolCallsDeferred and in-process ones on ToolCallsRequested; registry.rs gates tools from Settings.supported_tools / web_search_enabled / mcp_context / skills context and recovers plan mode from history; executor.rs is the in-process ServiceToolExecutor; tool_proto.rs, tool_results.rs (proto rendering + typed echo message), prompt.rs, git_helpers.rs + git.rs, web/, todos.rs, model_packs.rs, provider.rs. cargo test -p warp_local_agent: 115 passed, including 9 router tests against a scripted provider (text turn; client tool call ends the stream with a ToolCall message; ToolCallResult continuation echoes the typed result then answers; in-process todo tool keeps the run going; passive no-op; missing provider -> InternalError; invalid body -> 400; client disconnect -> run cancelled; /health + /debug/spec). cargo clippy -p warp_local_agent --all-targets --tests -- -D warnings: clean. ./script/format applied to the change set (the formatter also wanted to reorder imports in 28 untouched files on this branch; those were reverted as unrelated). Binary smoke test: warp-local-agent --listen 127.0.0.1:9377 -> /health 200 ok, /debug/spec lists the 8 built-in tools, garbage body -> 400. Cargo.lock gained the crate entry (cargo metadata --locked ok). Default port is 9377 because 9277-9282 belong to Warp's own local HTTP server. Sections C-E are not started."
+    },
+    {
+      "id": "feat-050",
+      "name": "Local agent transport in warp_multi_agent_client (TECH.md \u00a7C)",
+      "description": "Add generate_local_agent_output(client, base_url, request) that POSTs the proto Request to the service (/ai/multi-agent or /ai/passive-suggestions) and decodes the SSE stream with the existing decode_response_event path; no auth, no ambient headers, no IAP wrapper.",
+      "phase": "Phase E \u2014 Service extraction",
+      "dependencies": [
+        "feat-049"
+      ],
+      "status": "not-started",
+      "acceptance_criteria": [
+        "generate_local_agent_output builds {base_url}/ai/multi-agent or /ai/passive-suggestions via is_passive_suggestion_request and shares the stream-decoding tail with generate_multi_agent_output.",
+        "lib_tests.rs covers the URL construction."
+      ],
+      "verification": [
+        "cargo test -p warp_multi_agent_client"
+      ],
+      "evidence": ""
+    },
+    {
+      "id": "feat-051",
+      "name": "Route Warp to the local agent service and delete the in-process loop (TECH.md \u00a7D)",
+      "description": "Ollama-configured requests build the cloud proto Request with custom_model_providers (config_key local-ollama) and call the service at the configured URL (default http://127.0.0.1:9377); the in-process bridge, integration, model packs, web/git/todo modules, event bus, telemetry and ollama/agent_loop are deleted; convert_from.rs imports the transcript envelope from local_agent_runtime; LocalOllamaRuntimeToolUse flag and cargo feature removed; agent_viz re-fed from ResponseEvents plus GET /debug/spec.",
+      "phase": "Phase E \u2014 Service extraction",
+      "dependencies": [
+        "feat-050"
+      ],
+      "status": "not-started",
+      "acceptance_criteria": [
+        "generate_multi_agent_output has no early return; Ollama requests go through generate_local_agent_output with custom_model_providers set and api_keys cleared.",
+        "response_stream.rs no longer owns a tool loop; the standard ActionResult -> UserInputs[ToolCallResult] path drives local tools.",
+        "The listed app modules are deleted and cargo check -p warp --lib plus cargo test -p warp -- convert_from response_stream pass.",
+        "Settings expose local_agent_url next to the Ollama fields; unreachable service shows a connection error with a start hint."
+      ],
+      "verification": [
+        "cargo check -p warp --lib",
+        "cargo test -p warp -- convert_from response_stream",
+        "cargo clippy --workspace --all-targets --tests -- -D warnings"
+      ],
+      "evidence": ""
+    },
+    {
+      "id": "feat-052",
+      "name": "Local agent dev loop and docs (TECH.md \u00a7E)",
+      "description": "Makefile targets `agent` / `agent-release` for cargo run -p warp_local_agent -- --listen 127.0.0.1:9377, and documentation updates in dan_docs/how/local_ollama_runtime_tools.md and AGENTS.md describing the service-based activation.",
+      "phase": "Phase E \u2014 Service extraction",
+      "dependencies": [
+        "feat-051"
+      ],
+      "status": "not-started",
+      "acceptance_criteria": [
+        "make agent starts the service on 127.0.0.1:9377.",
+        "Docs describe starting the service, the settings URL, and the iteration check (edit a tool description, make agent, re-run a prompt without rebuilding Warp)."
+      ],
+      "verification": [
+        "make agent (manual)",
+        "./init.sh"
+      ],
+      "evidence": ""
     }
   ],
   "future_phases": [

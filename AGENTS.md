@@ -7,6 +7,7 @@ This file provides guidance when working with code in this repository.
 ### Build and Run
 - `cargo run` / `./script/run` - Build and run the GUI desktop app locally
 - `./script/run-tui` - Build and run the headless TUI front-end (`crates/warp_tui`)
+- `cargo run -p warp_local_agent -- --listen 127.0.0.1:9377` - Run the standalone local agent service (`crates/warp_local_agent`; Warp's own local HTTP server owns 9277-9282)
 - `cargo bundle --bin warp` - Bundle the main (GUI) app
 
 ### Running with local warp-server
@@ -284,6 +285,7 @@ If the active feature is `blocked`, resolve or report that blocker before select
 - Focused startup verification: `./init.sh`
 - Rust formatting check: `./script/format --check`
 - Local runtime tests: `cargo test -p local_agent_runtime`
+- Local agent service tests: `cargo test -p warp_local_agent`
 - Local runtime bridge tests: `cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use`
 - PR/review gate: `./script/format` followed by the clippy and presubmit commands required above.
 

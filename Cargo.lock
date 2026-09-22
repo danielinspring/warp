@@ -15875,6 +15875,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "warp_local_agent"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-channel",
+ "async-stream",
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "command",
+ "field_mask",
+ "futures",
+ "image",
+ "local_agent_runtime",
+ "prost",
+ "prost-types",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.17",
+ "tokio",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "urlencoding",
+ "uuid",
+ "warp_multi_agent_api",
+ "warp_util",
+]
+
+[[package]]
 name = "warp_logging"
 version = "0.0.0"
 dependencies = [

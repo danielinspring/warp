@@ -13,6 +13,9 @@ echo "=== ./script/format --check ==="
 echo "=== cargo test -p local_agent_runtime ==="
 cargo test -p local_agent_runtime
 
+echo "=== cargo test -p warp_local_agent ==="
+cargo test -p warp_local_agent
+
 if [[ "$(uname -s)" == "Darwin" ]] && ! xcrun metal --version >/dev/null 2>&1; then
     echo "ERROR: The Xcode Metal Toolchain is required for Warp library tests." >&2
     echo "Install it with: xcodebuild -downloadComponent MetalToolchain" >&2
