@@ -451,3 +451,43 @@ async fn health_and_debug_spec_are_served() {
             .any(|tool| tool["name"] == "run_shell_command")
     );
 }
+
+/// A recovered tool call can carry arguments the proto form rejects. The client cannot be told
+/// about such a call, so the turn must not simply end with nothing.
+#[tokio::test]
+async fn a_client_tool_call_that_cannot_be_expressed_as_proto_is_not_dropped() {
+    let provider = Scripted::new(vec![
+        tool_use(vec![ToolCall {
+            id: "call_1".to_string(),
+            name: "run_shell_command".to_string(),
+            // `cwd` is not part of the schema, so the proto conversion rejects it.
+            arguments: serde_json::json!({ "command": "ls", "cwd": "/tmp" }),
+        }]),
+        text("Sorry, retrying without that argument."),
+    ]);
+    let base_url = start_scripted(provider.clone()).await;
+
+    let events = post_events(&base_url, "/ai/multi-agent", &query_request("list files")).await;
+
+    // The model is told what was wrong and answers, instead of the turn ending in silence.
+    assert_eq!(
+        agent_outputs(&events),
+        vec!["Sorry, retrying without that argument."],
+        "expected the model to recover, got {:?}",
+        kinds(&events)
+    );
+    assert_done(&events);
+
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[1].messages.iter().any(|message| matches!(
+            message,
+            Message::ToolResult(result)
+                if result.call_id == "call_1"
+                    && result.result.is_error
+                    && result.result.content.contains("cwd")
+        )),
+        "the conversion error should reach the model as a tool result"
+    );
+}

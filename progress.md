@@ -44,6 +44,9 @@
 - `cargo test -p warp_multi_agent_client`: 9 passed (3 new URL tests); clippy and fmt clean for that crate.
 - `cargo test -p ai --lib api_keys`: 79 passed (2 new). `cargo test -p warp --lib` filtered to the new
   API tests: 6 passed (3 new). Clippy reports no findings in any file this session changed.
+- Fixed a silent drop found by running a real prompt: a client tool call that fails proto
+  conversion is now answered in process as a tool error the model can retry, instead of ending
+  the turn with no message. Reproduced in a test first.
 - Live end-to-end run against a real OpenAI-compatible endpoint via `examples/smoke.rs`: a turn
   streamed text, deferred a `run_shell_command` call, and on the follow-up request echoed the
   result and answered from it. Both the `/v1` URL form and the stripped form work.

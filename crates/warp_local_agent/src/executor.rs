@@ -12,7 +12,7 @@ use local_agent_runtime::{
 use crate::model_packs::{ModelFamily, apply_schema_tweaks};
 use crate::registry::{LocalRuntimePermissionMode, LocalRuntimeToolRegistry, LocalToolPersistence};
 use crate::todos::LocalTodoSideEffect;
-use crate::tool_proto::shell_command_is_read_only;
+use crate::tool_proto::{shell_command_is_read_only, tool_call_to_proto_tool_with_registry};
 use crate::{git, todos, web};
 
 pub struct ServiceToolExecutor {
@@ -59,9 +59,14 @@ impl ToolExecutor for ServiceToolExecutor {
 
     fn execution_site(&self, call: &ToolCall) -> ExecutionSite {
         if self.registry.is_in_process(&call.name) {
-            ExecutionSite::InProcess
-        } else {
-            ExecutionSite::Client
+            return ExecutionSite::InProcess;
+        }
+        // The client can only run a call that survives the proto conversion. Keeping a rejected
+        // one here turns it into a tool error the model can correct, rather than a turn that ends
+        // with nothing at all.
+        match tool_call_to_proto_tool_with_registry(call, &self.registry) {
+            Ok(_) => ExecutionSite::Client,
+            Err(_) => ExecutionSite::InProcess,
         }
     }
 
@@ -112,10 +117,22 @@ impl ToolExecutor for ServiceToolExecutor {
                 );
                 Ok(result)
             }
-            _ => Err(ToolExecutionError::ExecutionFailed(anyhow::anyhow!(
-                "client tool `{}` reached the in-process executor",
-                call.name
-            ))),
+            _ => Err(
+                match tool_call_to_proto_tool_with_registry(call, &self.registry) {
+                    Err(error) => {
+                        tracing::warn!(
+                            tool_name = %call.name,
+                            %error,
+                            "client tool call could not be expressed as proto; returning it to the model"
+                        );
+                        error
+                    }
+                    Ok(_) => ToolExecutionError::ExecutionFailed(anyhow::anyhow!(
+                        "client tool `{}` reached the in-process executor",
+                        call.name
+                    )),
+                },
+            ),
         }
     }
 
