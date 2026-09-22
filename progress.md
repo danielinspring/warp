@@ -3,7 +3,7 @@
 ## Current State
 
 **Last Updated:** 2026-09-22  
-**Active Feature:** (none — Sections A through D complete)  
+**Active Feature:** (none — the extraction is complete, Sections A through E)  
 **Status:** Idle  
 
 ## What's Done
@@ -52,6 +52,10 @@
   - Repaired `agent_viz::render`'s test, which asserted on a phrase the renderer never emitted and
     was already failing on this branch before this work.
 
+- feat-052 (TECH.md §E) complete: `make agent` and `make agent-release`, and a rewritten
+  `dan_docs/how/local_ollama_runtime_tools.md` that describes the service rather than the deleted
+  bridge.
+
 ## Verification (this session)
 
 - `cargo test -p local_agent_runtime`: 32 unit + 30 integration passed (1 ignored live test).
@@ -80,4 +84,4 @@
 
 ## Next
 
-Rebuild the app and run one GUI turn to confirm the deletions did not break the loop, then do feat-052 (TECH.md §E): the `make agent` targets and the docs, which still describe the in-process path and list five tools where the service advertises twelve.
+Rebuild the app and run one GUI turn to confirm the deletions did not break the loop. The spec is otherwise fully implemented; the follow-ups TECH.md lists (auto-spawning the service and bundling it, and non-Ollama providers through the same field) are not started.

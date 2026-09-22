@@ -10,11 +10,11 @@ Extract the in-process local Ollama agent into a standalone `warp-local-agent` s
 
 ## Active Feature
 
-None. feat-048 through feat-051 are done and committed, so Sections A through D of the spec are complete. feat-052 (§E: the `make agent` targets and docs) is not started.
+None. feat-048 through feat-052 are done and committed, so the extraction described in the spec is complete.
 
 ## Branch
 
-- `daniel/dev` (Sections A through D committed; nothing pushed)
+- `daniel/dev` (the whole extraction committed across 9 commits; nothing pushed)
 
 ## Current State
 
@@ -30,7 +30,7 @@ None. feat-048 through feat-051 are done and committed, so Sections A through D 
 ## Recommended Next Step
 
 Rebuild the app (`RUSTC_WRAPPER= ./script/bundle --channel oss --debug --nouniversal --selfsign
---skip-dmg`) and run one GUI turn against the service, since the deletions changed the path that
-turn takes. Then feat-052 (TECH.md §E): add `make agent` and `make agent-release`, and rewrite
-`dan_docs/how/local_ollama_runtime_tools.md`, which still describes the in-process path and lists
-five tools where the service advertises twelve.
+--skip-dmg`), start the service with `make agent`, and run one GUI turn, since the deletions changed
+the path a turn takes and only the protocol has been re-verified since. After that the spec's own
+follow-ups are what remain: auto-spawning the service and bundling it in `script/macos/bundle`, and
+supporting non-Ollama OpenAI-compatible providers through the same `custom_model_providers` field.

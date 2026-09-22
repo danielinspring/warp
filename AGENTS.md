@@ -7,7 +7,8 @@ This file provides guidance when working with code in this repository.
 ### Build and Run
 - `cargo run` / `./script/run` - Build and run the GUI desktop app locally
 - `./script/run-tui` - Build and run the headless TUI front-end (`crates/warp_tui`)
-- `cargo run -p warp_local_agent -- --listen 127.0.0.1:9377` - Run the standalone local agent service (`crates/warp_local_agent`; Warp's own local HTTP server owns 9277-9282)
+- `make agent` - Run the local agent service that answers Ollama agent turns (`crates/warp_local_agent`, listens on 127.0.0.1:9377; Warp's own local HTTP server owns 9277-9282). Agent Mode against a local model needs this running.
+- `make agent-release` - The same service, built with optimizations
 - `cargo bundle --bin warp` - Bundle the main (GUI) app
 
 ### Running with local warp-server
@@ -94,7 +95,7 @@ Warp has two front-ends that share the `warp_core`/`warpui` Entity/model core (A
 
 **Main app / shared surfaces** (`app/`) — the GUI desktop app plus feature surfaces the TUI reuses:
 - Terminal emulation and shell management (`terminal/`)
-- AI integration including Agent Mode (`ai/`)
+- AI integration including Agent Mode (`ai/`). Agent turns for a locally configured model are answered by the `warp_local_agent` service rather than in-process; see `dan_docs/how/local_ollama_runtime_tools.md`.
 - Cloud synchronization and Drive features (`drive/`)
 - Authentication and user management (`auth/`)
 - Settings and preferences (`settings/`)

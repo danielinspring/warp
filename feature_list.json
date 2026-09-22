@@ -1200,7 +1200,7 @@
       "dependencies": [
         "feat-051"
       ],
-      "status": "not-started",
+      "status": "done",
       "acceptance_criteria": [
         "make agent starts the service on 127.0.0.1:9377.",
         "Docs describe starting the service, the settings URL, and the iteration check (edit a tool description, make agent, re-run a prompt without rebuilding Warp)."
@@ -1209,7 +1209,7 @@
         "make agent (manual)",
         "./init.sh"
       ],
-      "evidence": ""
+      "evidence": "2026-09-22: Added `make agent` and `make agent-release`, which run the service on 127.0.0.1:9377 and accept LOCAL_AGENT_LISTEN to override the address; verified `make help` lists them and `make agent` brings the service up answering /health. Rewrote dan_docs/how/local_ollama_runtime_tools.md, which described the deleted in-process bridge and named five tools where the service now advertises twelve or more: it covers the process split, how Warp finds the service, the distinction between client-executed and in-process tools, the files that matter (all in crates/warp_local_agent now), how to add either kind of tool, the smoke example as a live check, and the failure modes including the two bugs real turns exposed. AGENTS.md gained the make targets and a pointer from the architecture section."
     }
   ],
   "future_phases": [
