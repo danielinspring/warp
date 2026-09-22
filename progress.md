@@ -44,8 +44,9 @@
 - `cargo test -p warp_multi_agent_client`: 9 passed (3 new URL tests); clippy and fmt clean for that crate.
 - `cargo test -p ai --lib api_keys`: 79 passed (2 new). `cargo test -p warp --lib` filtered to the new
   API tests: 6 passed (3 new). Clippy reports no findings in any file this session changed.
-- Live service check: an empty protobuf request returned `Init` with fresh ids, then
-  `Finished{InternalError}` naming the missing provider, exercising the HTTP path end to end.
+- Live end-to-end run against a real OpenAI-compatible endpoint via `examples/smoke.rs`: a turn
+  streamed text, deferred a `run_shell_command` call, and on the follow-up request echoed the
+  result and answered from it. Both the `/v1` URL form and the stripped form work.
 - `cargo check -p warp --lib`: ok. `cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use`: 61 passed.
 - `cargo clippy -p local_agent_runtime -p warp_local_agent --all-targets --tests -- -D warnings`: clean (local clippy is 1.97; no rustup, so the pinned 1.92 is unavailable).
 - Formatting: `cargo fmt -p local_agent_runtime` and `-p warp_local_agent` with the project config both report clean; neither changed app file appears in the formatter's diff list. Repo-wide `./script/format --check` fails on 27 files this change never touched (pre-existing drift on `daniel/dev`, local rustfmt 1.97 vs pinned 1.92).
@@ -61,4 +62,4 @@
 
 ## Next
 
-Run the service against a real Ollama model and confirm a turn works end to end, then do the removal half of feat-051: the deletions, the controller surgery, the feature-flag removal, the agent_viz re-feed and the settings widget.
+The service is verified against a real model, so the removal half of feat-051 is unblocked: the deletions, the controller surgery, the feature-flag removal, the agent_viz re-feed and the settings widget. Confirming a turn inside the Warp GUI first is still worthwhile, since only the protocol has been exercised so far.
