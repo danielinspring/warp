@@ -50,6 +50,25 @@ pub fn host_prefers_openai_discovery(url: &str) -> bool {
         || normalized == "https://127.0.0.1")
 }
 
+/// Split whole lines out of a byte buffer, leaving any trailing partial line in place.
+///
+/// The buffer holds bytes rather than text because a network chunk can end halfway through a
+/// multi-byte character. Decoding each chunk on arrival would replace those split bytes with the
+/// Unicode replacement character and corrupt the model's output; a complete line is always valid
+/// UTF-8, so decoding is deferred until one arrives.
+fn take_complete_lines(buffer: &mut Vec<u8>) -> Vec<String> {
+    let mut lines = Vec::new();
+    while let Some(newline_index) = buffer.iter().position(|byte| *byte == b'\n') {
+        let mut line: Vec<u8> = buffer.drain(..=newline_index).collect();
+        line.pop();
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
+        lines.push(String::from_utf8_lossy(&line).into_owned());
+    }
+    lines
+}
+
 /// True when a model id looks like a vision-capable (multimodal) model.
 ///
 /// Matches common vision model families: `llava`, `bakllava`, anything with
@@ -493,6 +512,7 @@ impl OllamaProvider {
         ProviderError::RequestFailed(anyhow!("Server returned {status}: {body_text}"))
     }
 
+    /// See [`take_complete_lines`].
     async fn process_stream_line(
         line: &str,
         assembly: &mut StreamAssembly,
@@ -584,22 +604,16 @@ impl LLMProvider for OllamaProvider {
     ) -> Result<ChatResponse, ProviderError> {
         let resp = self.send_chat_request(request, true).await?;
         let mut byte_stream = resp.bytes_stream();
-        let mut buffer = String::new();
+        let mut buffer: Vec<u8> = Vec::new();
         let mut assembly = StreamAssembly::default();
 
         while let Some(chunk) = byte_stream.next().await {
             let chunk = chunk.map_err(|e| {
                 ProviderError::RequestFailed(anyhow!("OpenAI-compatible stream failed: {}", e))
             })?;
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            buffer.extend_from_slice(&chunk);
 
-            while let Some(newline_index) = buffer.find('\n') {
-                let mut line = buffer[..newline_index].to_string();
-                if line.ends_with('\r') {
-                    line.pop();
-                }
-                buffer.drain(..=newline_index);
-
+            for line in take_complete_lines(&mut buffer) {
                 if Self::process_stream_line(&line, &mut assembly, &event_tx).await? {
                     if let Some(safe) = assembly.flush_streamable_text_prefix() {
                         let _ = event_tx
@@ -611,8 +625,9 @@ impl LLMProvider for OllamaProvider {
             }
         }
 
-        if !buffer.trim().is_empty() {
-            let _ = Self::process_stream_line(&buffer, &mut assembly, &event_tx).await?;
+        let trailing = String::from_utf8_lossy(&buffer);
+        if !trailing.trim().is_empty() {
+            let _ = Self::process_stream_line(&trailing, &mut assembly, &event_tx).await?;
         }
 
         if let Some(safe) = assembly.flush_streamable_text_prefix() {
@@ -1001,6 +1016,48 @@ mod tests {
             normalize_base_url("http://100.95.111.65:4000/v1/"),
             "http://100.95.111.65:4000"
         );
+    }
+
+    #[test]
+    fn a_character_split_across_chunks_survives() {
+        // "noise \u{2014} good" with the em dash broken across two network chunks, which is what
+        // corrupted streamed answers before lines were decoded as a whole.
+        let text = "data: noise \u{2014} good\n";
+        let bytes = text.as_bytes();
+        let split = bytes
+            .windows(2)
+            .position(|pair| pair == [0xe2, 0x80])
+            .expect("the em dash should be present")
+            + 1;
+
+        let mut buffer = Vec::new();
+        buffer.extend_from_slice(&bytes[..split]);
+        assert!(
+            take_complete_lines(&mut buffer).is_empty(),
+            "a partial line must not be decoded yet"
+        );
+
+        buffer.extend_from_slice(&bytes[split..]);
+        let lines = take_complete_lines(&mut buffer);
+
+        assert_eq!(lines, vec!["data: noise \u{2014} good".to_string()]);
+        assert!(!lines[0].contains('\u{fffd}'), "got: {}", lines[0]);
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn complete_lines_are_split_on_crlf_and_partials_are_kept() {
+        let mut buffer = Vec::from(&b"one\r\ntwo\nthree-with"[..]);
+
+        assert_eq!(take_complete_lines(&mut buffer), vec!["one", "two"]);
+        assert_eq!(buffer, b"three-with");
+
+        buffer.extend_from_slice(b"out-a-newline\n");
+        assert_eq!(
+            take_complete_lines(&mut buffer),
+            vec!["three-without-a-newline"]
+        );
+        assert!(buffer.is_empty());
     }
 
     #[test]

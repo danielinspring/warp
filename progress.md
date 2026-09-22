@@ -37,6 +37,11 @@
   - An unreachable service reports its URL and how to start it.
   - Still open in this feature: the settings widget, and the entire removal half.
 
+- First GUI turn verified the whole design: one prompt produced two service requests, the tool call
+  and then its result, so Warp's normal cloud tool loop drove a local tool. It also exposed two
+  defects, both fixed: streamed text lost any multi-byte character split across a network chunk, and
+  a client-executed tool result was rendered twice.
+
 ## Verification (this session)
 
 - `cargo test -p local_agent_runtime`: 32 unit + 30 integration passed (1 ignored live test).

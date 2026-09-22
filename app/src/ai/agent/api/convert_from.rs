@@ -604,9 +604,14 @@ impl ConvertAPIMessageToClientOutputMessage for api::Message {
             }
             // Local-runtime tool results stash JSON in `server_message_data` so the model-facing
             // snapshot (and errors) can be shown in the transcript.
-            api::message::Message::ToolCallResult(_) => {
-                if let Some(text) =
-                    format_local_runtime_tool_result_message(&self.server_message_data)
+            api::message::Message::ToolCallResult(tool_call_result) => {
+                // A typed result belongs to a tool the client executed and already displays on its
+                // action card, so rendering the transcript envelope too would just repeat it. Only
+                // a result with no typed payload, from a tool that ran inside the service, needs
+                // rendering here.
+                if tool_call_result.result.is_none()
+                    && let Some(text) =
+                        format_local_runtime_tool_result_message(&self.server_message_data)
                 {
                     Ok(MaybeAIAgentOutputMessage::Message(
                         AIAgentOutputMessage::text(
