@@ -23,8 +23,8 @@ if [[ "$(uname -s)" == "Darwin" ]] && ! xcrun metal --version >/dev/null 2>&1; t
     exit 1
 fi
 
-echo "=== cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use ==="
-cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use
+echo "=== cargo test -p warp -- convert_from agent_viz local_agent ==="
+cargo test -p warp --lib -- convert_from agent_viz local_agent --skip local_agent_task_sync_model
 
 echo "=== Verification Complete ==="
 echo ""

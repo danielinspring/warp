@@ -1,9 +1,10 @@
 //! Pane-backing view for the agent office visualization.
 //!
-//! Subscribes to the [`local_runtime_event_bus`], folds each
-//! [`RuntimeEvent`] into [`AgentVizModel`], and re-seeds a read-only
-//! [`CodeEditorView`] with the rendered snapshot.
+//! Subscribes to the visualization [`event`] feed, folds each event into [`AgentVizModel`], and
+//! re-seeds a read-only [`CodeEditorView`] with the rendered snapshot. The agent's prompt and
+//! tool list come from the local agent service, fetched once when the pane opens.
 
+use ai::api_keys::ApiKeyManager;
 use warp_editor::content::buffer::InitialBufferState;
 use warp_editor::render::element::VerticalExpansionBehavior;
 use warp_util::path::LineAndColumnArg;
@@ -15,10 +16,11 @@ use warpui::{
     ViewHandle,
 };
 
+use crate::ai::agent_viz::context::{self, McpServerInfo, SkillInfo};
+use crate::ai::agent_viz::event::{self, AgentVizEvent, RunScopedEvent};
 use crate::ai::agent_viz::model::AgentVizModel;
 use crate::ai::agent_viz::render;
-use crate::ai::local_runtime_event_bus::{self, RunScopedEvent};
-use crate::ai::local_runtime_spec::{self, McpServerInfo, SkillInfo};
+use crate::ai::agent_viz::spec::{self, AgentSpec};
 use crate::appearance::Appearance;
 use crate::code::editor::scroll::{ScrollPosition, ScrollTrigger};
 use crate::code::editor::view::{CodeEditorRenderOptions, CodeEditorView};
@@ -49,6 +51,10 @@ pub enum AgentVizViewCustomAction {
 pub struct AgentVizView {
     editor: ViewHandle<CodeEditorView>,
     model: AgentVizModel,
+    /// The service's prompt and tools, replaced once the fetch started at construction lands.
+    spec: AgentSpec,
+    /// The run the action model's events belong to, learned from the response stream.
+    last_run_id: String,
     pane_configuration: ModelHandle<PaneConfiguration>,
     focus_handle: Option<PaneFocusHandle>,
     refresh_button_mouse_state: MouseStateHandle,
@@ -60,7 +66,8 @@ impl AgentVizView {
             ctx.add_model(|_ctx| PaneConfiguration::new(AGENT_VIZ_HEADER_TEXT));
 
         let model = AgentVizModel::default();
-        let snapshot = Self::render_snapshot(&model, ctx);
+        let spec = AgentSpec::default();
+        let snapshot = Self::render_snapshot(&model, &spec, ctx);
 
         let editor = ctx.add_typed_action_view(|ctx| {
             let mut view = CodeEditorView::new(
@@ -76,12 +83,16 @@ impl AgentVizView {
 
         // Pump bus events into this view. The pump task ends when the view
         // (and therefore the receiver in `spawn_stream_local`) is dropped.
-        let bus_rx = local_runtime_event_bus::subscribe_local();
+        let bus_rx = event::subscribe_local();
         ctx.spawn_stream_local(bus_rx, Self::on_runtime_event, |_, _| {});
+
+        Self::spawn_spec_fetch(ctx);
 
         Self {
             editor,
             model,
+            spec,
+            last_run_id: String::new(),
             pane_configuration,
             focus_handle: None,
             refresh_button_mouse_state: MouseStateHandle::default(),
@@ -97,24 +108,54 @@ impl AgentVizView {
     }
 
     pub fn reload_snapshot(&mut self, ctx: &mut ViewContext<Self>) {
-        let snapshot = Self::render_snapshot(&self.model, ctx);
+        Self::spawn_spec_fetch(ctx);
+        let snapshot = Self::render_snapshot(&self.model, &self.spec, ctx);
         self.editor.update(ctx, |view, ctx| {
             Self::apply_snapshot_to_editor(view, &snapshot, ctx);
         });
     }
 
     fn on_runtime_event(&mut self, scoped: RunScopedEvent, ctx: &mut ViewContext<Self>) {
-        self.model.apply(&scoped.run_id, &scoped.event);
-        let snapshot = Self::render_snapshot(&self.model, ctx);
+        // Publishers that have no run in hand, such as the action model, send an empty id and are
+        // attributed to the run the response stream last announced.
+        if !scoped.run_id.is_empty() {
+            self.last_run_id = scoped.run_id.clone();
+        }
+        self.apply_event(scoped.event, ctx);
+    }
+
+    fn apply_event(&mut self, event: AgentVizEvent, ctx: &mut ViewContext<Self>) {
+        let run_id = self.last_run_id.clone();
+        self.model.apply(&run_id, &event);
+        let snapshot = Self::render_snapshot(&self.model, &self.spec, ctx);
         self.editor.update(ctx, |view, ctx| {
             Self::apply_snapshot_to_editor(view, &snapshot, ctx);
         });
     }
 
-    fn render_snapshot(model: &AgentVizModel, ctx: &AppContext) -> String {
-        let mcp: Vec<McpServerInfo> = local_runtime_spec::local_mcp_servers(ctx);
-        let skills: Vec<SkillInfo> = local_runtime_spec::local_skills(ctx);
-        render::render_snapshot(model, &mcp, &skills, local_runtime_spec::local_tools)
+    /// Ask the service for its prompt and tool list, falling back to a placeholder when it is not
+    /// running. The pane is useful without it, so a failure only degrades those two sections.
+    fn spawn_spec_fetch(ctx: &mut ViewContext<Self>) {
+        let base_url = ApiKeyManager::as_ref(ctx).keys().resolved_local_agent_url();
+        let _ = ctx.spawn(
+            async move { spec::fetch(&base_url).await },
+            |me, fetched, ctx| {
+                me.spec = fetched.unwrap_or_else(|error| {
+                    log::debug!("agent visualization could not read the service spec: {error:?}");
+                    AgentSpec::offline()
+                });
+                let snapshot = Self::render_snapshot(&me.model, &me.spec, ctx);
+                me.editor.update(ctx, |view, ctx| {
+                    Self::apply_snapshot_to_editor(view, &snapshot, ctx);
+                });
+            },
+        );
+    }
+
+    fn render_snapshot(model: &AgentVizModel, spec: &AgentSpec, ctx: &AppContext) -> String {
+        let mcp: Vec<McpServerInfo> = context::local_mcp_servers(ctx);
+        let skills: Vec<SkillInfo> = context::local_skills(ctx);
+        render::render_snapshot(model, spec, &mcp, &skills)
     }
 
     fn apply_snapshot_to_editor(

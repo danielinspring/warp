@@ -9,23 +9,21 @@
 
 use local_agent_runtime::ToolSchema;
 
+use super::context::{Attachment, McpServerInfo, SkillInfo};
 use super::model::{AgentVizModel, Room};
-use crate::ai::local_runtime_spec::{self, LocalRuntimeAttachment, McpServerInfo, SkillInfo};
+use super::spec::AgentSpec;
 
 const ROOM_WIDTH: usize = 24;
 const ROOM_HEIGHT: usize = 3;
 
 /// Build the full text snapshot for the visualization pane.
-pub fn render_snapshot<F>(
+pub fn render_snapshot(
     model: &AgentVizModel,
+    spec: &AgentSpec,
     mcp: &[McpServerInfo],
     skills: &[SkillInfo],
-    tools_provider: F,
-) -> String
-where
-    F: FnOnce() -> Vec<ToolSchema>,
-{
-    let tools = tools_provider();
+) -> String {
+    let tools = spec.tools.clone();
     let mut out = String::new();
 
     out.push_str("Agent Office\n");
@@ -37,10 +35,7 @@ where
     out.push_str(&render_status_line(model));
     out.push('\n');
 
-    out.push_str(&render_section(
-        "System prompt",
-        local_runtime_spec::system_prompt(),
-    ));
+    out.push_str(&render_section("System prompt", &spec.system_prompt));
     out.push('\n');
 
     out.push_str(&render_tools_section(&tools));
@@ -190,7 +185,7 @@ fn render_skills_section(skills: &[SkillInfo]) -> String {
     s
 }
 
-fn attachment_badge(status: LocalRuntimeAttachment) -> &'static str {
+fn attachment_badge(status: Attachment) -> &'static str {
     status.label()
 }
 
@@ -206,38 +201,45 @@ fn truncate(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use local_agent_runtime::RuntimeEvent;
-
     use super::*;
+    use crate::ai::agent_viz::event::AgentVizEvent;
     use crate::ai::agent_viz::model::AgentVizModel;
 
     #[test]
     fn snapshot_contains_room_labels_and_sections() {
         let mut model = AgentVizModel::default();
-        model.apply("run-1", &RuntimeEvent::TurnStarted { turn: 1 });
+        model.apply("run-1", &AgentVizEvent::TurnStarted);
 
         let mcp = vec![McpServerInfo {
             name: "github".into(),
-            status: LocalRuntimeAttachment::Active,
+            status: Attachment::Active,
         }];
         let skills = vec![SkillInfo {
             name: "review-pr".into(),
             description: "Review pull requests".into(),
             source: "Bundled".into(),
-            status: LocalRuntimeAttachment::Active,
+            status: Attachment::Active,
         }];
 
-        let snap = render_snapshot(&model, &mcp, &skills, Vec::new);
+        let spec = AgentSpec {
+            system_prompt: "You are a coding assistant.".to_string(),
+            tools: Vec::new(),
+        };
+
+        let snap = render_snapshot(&model, &spec, &mcp, &skills);
 
         assert!(snap.contains("Agent Office"));
         assert!(snap.contains("Thinking"));
         assert!(snap.contains("Permission"));
         assert!(snap.contains("System prompt"));
+        assert!(snap.contains("You are a coding assistant."));
         assert!(snap.contains("Tools (0)"));
         assert!(snap.contains("MCP servers (1)"));
         assert!(snap.contains("github"));
         assert!(snap.contains("Skills (1)"));
         assert!(snap.contains("review-pr"));
-        assert!(snap.contains("not connected to local runtime"));
+        // MCP servers and skills reach the agent through the request, so they are shown as
+        // attached rather than carrying the caveat this pane used to print.
+        assert!(snap.contains("[active]"));
     }
 }

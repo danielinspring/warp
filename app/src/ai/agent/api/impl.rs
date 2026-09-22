@@ -19,23 +19,9 @@ pub async fn generate_multi_agent_output(
     team_scope: RequestTeamScope,
     cancellation_rx: futures::channel::oneshot::Receiver<()>,
 ) -> Result<ResponseStream, ConvertToAPITypeError> {
-    // A configured local agent service receives the same request the backend would have, built
-    // below. Without one, an Ollama turn is still answered entirely inside the app, synthesizing
-    // the `ResponseEvent` shape the server would have emitted.
-    let local_agent = params
-        .ollama_config
-        .clone()
-        .filter(|cfg| cfg.service_url.is_some());
-    if local_agent.is_none()
-        && let Some(ollama_cfg) = params.ollama_config.clone()
-    {
-        if params.should_redact_secrets {
-            redaction::redact_inputs(&mut params.input);
-        }
-        let stream = crate::ai::ollama::agent_loop::run_request(ollama_cfg, params);
-        let output_stream = stream.take_until(cancellation_rx);
-        return Ok(Box::pin(output_stream));
-    }
+    // An Ollama turn is handled by the local agent service, which receives the same request the
+    // backend would have, built below.
+    let local_agent = params.ollama_config.clone();
 
     let supported_tools = params
         .supported_tools_override
@@ -161,18 +147,18 @@ pub async fn generate_multi_agent_output(
         mcp_context: params.mcp_context.map(Into::into),
     };
 
-    let local_agent_url = local_agent.as_ref().and_then(|cfg| cfg.service_url.clone());
-    let response_stream = match (&local_agent, &local_agent_url) {
-        (Some(cfg), Some(url)) => {
+    let local_agent_url = local_agent.as_ref().map(|cfg| cfg.service_url.clone());
+    let response_stream = match &local_agent {
+        Some(cfg) => {
             apply_local_agent_settings(&mut request, cfg);
             warp_multi_agent_client::generate_local_agent_output(
                 server_api.as_ref().http_client(),
-                url,
+                &cfg.service_url,
                 &request,
             )
             .await
         }
-        _ => {
+        None => {
             warp_multi_agent_client::generate_multi_agent_output(
                 server_api.as_ref(),
                 &request,

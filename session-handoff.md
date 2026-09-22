@@ -10,23 +10,27 @@ Extract the in-process local Ollama agent into a standalone `warp-local-agent` s
 
 ## Active Feature
 
-feat-051 (§D). Its additive half is committed: the app can reach the service and the in-process path still works. The removal half is not started. feat-048, feat-049 and feat-050 are done.
+None. feat-048 through feat-051 are done and committed, so Sections A through D of the spec are complete. feat-052 (§E: the `make agent` targets and docs) is not started.
 
 ## Branch
 
-- `daniel/dev` (feat-048, feat-049, feat-050 and the additive half of feat-051 are committed; nothing pushed)
+- `daniel/dev` (Sections A through D committed; nothing pushed)
 
 ## Current State
 
 - Runtime: client-deferred tool calls land as `ToolCallsDeferred` + `AwaitingClientToolResults`; envelope lives in `local_agent_runtime::transcript`.
 - Service: `cargo run -p warp_local_agent -- --listen 127.0.0.1:9377` serves `/ai/multi-agent`, `/ai/passive-suggestions`, `/health`, `/debug/spec`. 115 tests pass.
-- Transport: `warp_multi_agent_client::generate_local_agent_output(client, base_url, request)` is ready and tested; nothing calls it yet.
-- App: set `WARP_LOCAL_AGENT_URL=http://127.0.0.1:9377` (or `ApiKeys::local_agent_url`) and an Ollama turn goes to the service; leave it unset and the in-process path runs exactly as before.
-- The in-process path is untouched apart from one guard in `response_stream.rs` and two match arms, and its 61 tests still pass.
+- The in-process path no longer exists. Every Ollama turn goes to the service, whose URL comes from
+  Settings › AI, the `WARP_LOCAL_AGENT_URL` override, or the `127.0.0.1:9377` default.
+- The service must be running or agent turns fail with an error naming the URL and how to start it.
+- The agent visualization is fed from the response stream and the action model, so it works for
+  cloud runs as well as local ones.
 - Environment notes: run cargo with `RUSTC_WRAPPER=` (sccache remote cache down); local clippy/rustfmt are 1.97 (no rustup).
 
 ## Recommended Next Step
 
-The protocol is already verified end to end against a real model, using
-`cargo run -p warp_local_agent --example smoke`, so the removal half is unblocked. Confirming one turn
-inside the GUI is still worthwhile, since only the wire protocol has been exercised. Start Ollama, run `cargo run -p warp_local_agent -- --listen 127.0.0.1:9377`, launch the app with `WARP_LOCAL_AGENT_URL=http://127.0.0.1:9377`, configure Ollama in Settings › AI, and walk the prompts in `dan_docs/how/local_ollama_manual_parity_prompts.md`. Then do the removal half of feat-051: delete the `local_*` modules and `ollama/agent_loop`, strip the tool loop from `response_stream.rs`, repoint `convert_from.rs` at `local_agent_runtime::transcript`, remove `FeatureFlag::LocalOllamaRuntimeToolUse` and its cargo feature, re-feed `agent_viz` from `ResponseEvent`s plus `GET /debug/spec`, and add the settings widget.
+Rebuild the app (`RUSTC_WRAPPER= ./script/bundle --channel oss --debug --nouniversal --selfsign
+--skip-dmg`) and run one GUI turn against the service, since the deletions changed the path that
+turn takes. Then feat-052 (TECH.md §E): add `make agent` and `make agent-release`, and rewrite
+`dan_docs/how/local_ollama_runtime_tools.md`, which still describes the in-process path and lists
+five tools where the service advertises twelve.

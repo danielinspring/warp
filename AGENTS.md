@@ -286,7 +286,7 @@ If the active feature is `blocked`, resolve or report that blocker before select
 - Rust formatting check: `./script/format --check`
 - Local runtime tests: `cargo test -p local_agent_runtime`
 - Local agent service tests: `cargo test -p warp_local_agent`
-- Local runtime bridge tests: `cargo test -p warp local_runtime --lib --features local_ollama_runtime_tool_use`
+- App-side agent tests: `cargo test -p warp --lib -- convert_from agent_viz local_agent --skip local_agent_task_sync_model`
 - PR/review gate: `./script/format` followed by the clippy and presubmit commands required above.
 
 ## Definition of Done

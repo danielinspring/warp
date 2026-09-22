@@ -280,6 +280,9 @@ impl BlocklistAIActionModel {
         });
         ctx.subscribe_to_model(&executor, move |me, _, event, ctx| match event {
             BlocklistAIActionExecutorEvent::ExecutingAction { action_id } => {
+                crate::ai::agent_viz::event::publish_tool_started(
+                    me.get_pending_action_by_id(action_id),
+                );
                 ctx.emit(BlocklistAIActionEvent::ExecutingAction(action_id.clone()));
             }
             BlocklistAIActionExecutorEvent::FinishedAction {
@@ -886,6 +889,10 @@ impl BlocklistAIActionModel {
         ctx: &mut ModelContext<Self>,
     ) {
         if reason.needs_confirmation() {
+            crate::ai::agent_viz::event::publish(
+                "",
+                crate::ai::agent_viz::event::AgentVizEvent::PermissionRequired,
+            );
             ctx.emit(BlocklistAIActionEvent::ActionBlockedOnUserConfirmation(
                 action.id.clone(),
             ));
@@ -1486,6 +1493,10 @@ impl BlocklistAIActionModel {
             .get_mut()
             .remove(&conversation_id);
 
+        crate::ai::agent_viz::event::publish(
+            "",
+            crate::ai::agent_viz::event::AgentVizEvent::ToolFinished,
+        );
         ctx.emit(BlocklistAIActionEvent::FinishedAction {
             action_id,
             conversation_id,

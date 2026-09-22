@@ -618,7 +618,6 @@ default = [
     "cloud_mode_from_local_session",
     "cloud_mode_image_context",
     "agent_mode_computer_use",
-    "local_ollama_runtime_tool_use",
     "background_computer_use",
     "oz_platform_skills",
     "oz_identity_federation",
@@ -790,7 +789,6 @@ list_skills = []
 # include dependencies that should only exist in such environments.
 local_tty = ["warp_terminal/local_tty"]
 local_computer_use = []
-local_ollama_runtime_tool_use = []
 local_claude_codex_child_harnesses = []
 # This feature is enabled in build.rs when compiling for platforms which
 # have APIs for interacting with a local filesystem.  It can be used to

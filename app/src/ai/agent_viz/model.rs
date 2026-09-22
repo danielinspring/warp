@@ -1,14 +1,13 @@
 //! State model for the agent office visualization.
 //!
-//! Maps incoming [`RuntimeEvent`]s to discrete rooms an agent can occupy.
+//! Maps incoming [`AgentVizEvent`]s to discrete rooms an agent can occupy.
 //! Today the runtime is single-agent, but the model already keys agents by
 //! `AgentId` so adding a second tracked agent later is a render change, not
 //! a model change.
 
 use std::collections::HashMap;
 
-use local_agent_runtime::RuntimeEvent;
-use local_agent_runtime::events::{FinishReason, StopReason};
+use super::event::AgentVizEvent;
 
 /// Identifier for a tracked agent. Today derived from the runtime's `run_id`.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -69,7 +68,7 @@ pub struct AgentVizModel {
 }
 
 impl AgentVizModel {
-    pub fn apply(&mut self, run_id: &str, event: &RuntimeEvent) {
+    pub fn apply(&mut self, run_id: &str, event: &AgentVizEvent) {
         let id = AgentId(run_id.to_string());
         let marker = self
             .agents
@@ -77,39 +76,26 @@ impl AgentVizModel {
             .or_insert_with(|| AgentMarker::new(id));
 
         match event {
-            RuntimeEvent::TurnStarted { .. } => marker.move_to(Room::Thinking),
-            RuntimeEvent::ToolExecutionStarted { tool_name, .. } => {
+            AgentVizEvent::TurnStarted => marker.move_to(Room::Thinking),
+            AgentVizEvent::ToolRequested { .. } => {
+                // No room change; the agent is still thinking until the tool actually starts.
+            }
+            AgentVizEvent::ToolStarted { tool_name } => {
                 marker.move_to(Room::Tool(tool_name.clone()))
             }
-            RuntimeEvent::ToolResult { .. } => marker.move_to(Room::Thinking),
-            RuntimeEvent::PermissionRequired { .. } => marker.move_to(Room::Permission),
-            RuntimeEvent::TextDelta { text } => {
+            AgentVizEvent::ToolFinished => marker.move_to(Room::Thinking),
+            AgentVizEvent::PermissionRequired => marker.move_to(Room::Permission),
+            AgentVizEvent::Text { preview } => {
                 marker.move_to(Room::Thinking);
-                self.last_text_delta = Some(text.clone());
+                self.last_text_delta = Some(preview.clone());
             }
-            RuntimeEvent::TextCompleted { text } => {
-                marker.move_to(Room::Thinking);
-                self.last_text_delta = Some(text.clone());
-            }
-            RuntimeEvent::TurnCompleted { reason } => match reason {
-                StopReason::ToolUse => {} // stay in current room; tool execution will follow
-                StopReason::EndTurn | StopReason::MaxTokens => marker.move_to(Room::Idle),
-            },
-            RuntimeEvent::Finished { reason } => {
-                let final_room = match reason {
-                    FinishReason::Done => Room::Done,
-                    _ => Room::Idle,
-                };
-                marker.move_to(final_room);
-            }
-            RuntimeEvent::Warning { message } => {
-                self.last_warning = Some(message.clone());
-            }
-            RuntimeEvent::ToolCallsRequested { .. } => {
-                // No room change here; ToolExecutionStarted is the canonical signal.
-            }
-            RuntimeEvent::ToolCallsDeferred { .. } => {
-                // Executed by the client, so no ToolExecutionStarted follows.
+            AgentVizEvent::Finished { error } => {
+                marker.move_to(if error.is_none() {
+                    Room::Done
+                } else {
+                    Room::Idle
+                });
+                self.last_warning = error.clone();
             }
         }
     }
@@ -117,12 +103,10 @@ impl AgentVizModel {
 
 #[cfg(test)]
 mod tests {
-    use local_agent_runtime::tools::{ToolCall, ToolCallResult};
-
     use super::*;
 
     fn run_id() -> &'static str {
-        "test-run"
+        "run-1"
     }
 
     fn id() -> AgentId {
@@ -132,31 +116,35 @@ mod tests {
     #[test]
     fn turn_started_moves_to_thinking() {
         let mut m = AgentVizModel::default();
-        m.apply(run_id(), &RuntimeEvent::TurnStarted { turn: 1 });
+        m.apply(run_id(), &AgentVizEvent::TurnStarted);
         assert_eq!(m.agents[&id()].current_room, Room::Thinking);
     }
 
     #[test]
     fn tool_execution_moves_to_tool_room_then_back() {
         let mut m = AgentVizModel::default();
-        m.apply(run_id(), &RuntimeEvent::TurnStarted { turn: 1 });
+        m.apply(run_id(), &AgentVizEvent::TurnStarted);
         m.apply(
             run_id(),
-            &RuntimeEvent::ToolExecutionStarted {
-                call_id: "c1".into(),
+            &AgentVizEvent::ToolStarted {
                 tool_name: "grep".into(),
             },
         );
         assert_eq!(m.agents[&id()].current_room, Room::Tool("grep".into()));
 
+        m.apply(run_id(), &AgentVizEvent::ToolFinished);
+        assert_eq!(m.agents[&id()].current_room, Room::Thinking);
+    }
+
+    /// A requested tool is not a started one; the client may still be asking the user about it.
+    #[test]
+    fn requesting_a_tool_leaves_the_marker_where_it_is() {
+        let mut m = AgentVizModel::default();
+        m.apply(run_id(), &AgentVizEvent::TurnStarted);
         m.apply(
             run_id(),
-            &RuntimeEvent::ToolResult {
-                call_id: "c1".into(),
-                result: ToolCallResult {
-                    content: "ok".into(),
-                    is_error: false,
-                },
+            &AgentVizEvent::ToolRequested {
+                tool_name: "run_shell_command".into(),
             },
         );
         assert_eq!(m.agents[&id()].current_room, Room::Thinking);
@@ -165,28 +153,41 @@ mod tests {
     #[test]
     fn permission_required_parks_dot() {
         let mut m = AgentVizModel::default();
-        m.apply(
-            run_id(),
-            &RuntimeEvent::PermissionRequired {
-                call: ToolCall {
-                    id: "c1".into(),
-                    name: "run_shell_command".into(),
-                    arguments: serde_json::json!({}),
-                },
-            },
-        );
+        m.apply(run_id(), &AgentVizEvent::PermissionRequired);
         assert_eq!(m.agents[&id()].current_room, Room::Permission);
     }
 
     #[test]
     fn finished_done_moves_to_done() {
         let mut m = AgentVizModel::default();
+        m.apply(run_id(), &AgentVizEvent::Finished { error: None });
+        assert_eq!(m.agents[&id()].current_room, Room::Done);
+        assert!(m.last_warning.is_none());
+    }
+
+    #[test]
+    fn a_failed_run_parks_idle_and_keeps_the_error() {
+        let mut m = AgentVizModel::default();
         m.apply(
             run_id(),
-            &RuntimeEvent::Finished {
-                reason: FinishReason::Done,
+            &AgentVizEvent::Finished {
+                error: Some("stream died".into()),
             },
         );
-        assert_eq!(m.agents[&id()].current_room, Room::Done);
+        assert_eq!(m.agents[&id()].current_room, Room::Idle);
+        assert_eq!(m.last_warning.as_deref(), Some("stream died"));
+    }
+
+    #[test]
+    fn text_updates_the_status_preview() {
+        let mut m = AgentVizModel::default();
+        m.apply(
+            run_id(),
+            &AgentVizEvent::Text {
+                preview: "hello".into(),
+            },
+        );
+        assert_eq!(m.agents[&id()].current_room, Room::Thinking);
+        assert_eq!(m.last_text_delta.as_deref(), Some("hello"));
     }
 }

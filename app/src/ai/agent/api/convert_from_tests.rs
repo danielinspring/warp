@@ -262,9 +262,7 @@ fn local_only_tool_call_without_wire_tool_renders_transcript_text() {
         task_id: "task-id".to_string(),
         request_id: "request-id".to_string(),
         timestamp: None,
-        server_message_data: crate::ai::local_runtime_bridge::encode_local_runtime_tool_call_data(
-            &call,
-        ),
+        server_message_data: local_agent_runtime::encode_local_runtime_tool_call_data(&call),
         citations: vec![],
         fetched_memories: vec![],
         message: Some(api::message::Message::ToolCall(api::message::ToolCall {
@@ -308,7 +306,7 @@ fn local_only_tool_result_renders_snapshot_json() {
         task_id: "task-id".to_string(),
         request_id: "request-id".to_string(),
         timestamp: None,
-        server_message_data: crate::ai::local_runtime_bridge::encode_local_runtime_tool_result_data(
+        server_message_data: local_agent_runtime::encode_local_runtime_tool_result_data(
             "c1", &result,
         ),
         citations: vec![],
@@ -359,7 +357,7 @@ fn client_executed_tool_result_does_not_repeat_itself_as_transcript_text() {
         task_id: "task-id".to_string(),
         request_id: "request-id".to_string(),
         timestamp: None,
-        server_message_data: crate::ai::local_runtime_bridge::encode_local_runtime_tool_result_data(
+        server_message_data: local_agent_runtime::encode_local_runtime_tool_result_data(
             "c1", &result,
         ),
         citations: vec![],

@@ -29,12 +29,6 @@ fn main() -> Result<()> {
     // (release-lto) app, which is the only way most people run this.
     state =
         state.with_additional_features(&[warp_core::features::FeatureFlag::LocalLanSessionShare]);
-    #[cfg(feature = "local_ollama_runtime_tool_use")]
-    {
-        state = state.with_additional_features(&[
-            warp_core::features::FeatureFlag::LocalOllamaRuntimeToolUse,
-        ]);
-    }
     ChannelState::set(state);
 
     warp::run()

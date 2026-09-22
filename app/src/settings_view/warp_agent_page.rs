@@ -6170,6 +6170,7 @@ struct OllamaWidget {
     base_url_editor: ViewHandle<EditorView>,
     model_editor: ViewHandle<EditorView>,
     api_key_editor: ViewHandle<EditorView>,
+    service_url_editor: ViewHandle<EditorView>,
 }
 
 impl OllamaWidget {
@@ -6181,6 +6182,7 @@ impl OllamaWidget {
             .unwrap_or_else(|| "http://localhost:11434".to_string());
         let current_model = keys.ollama_model.clone().unwrap_or_default();
         let current_api_key = keys.ollama_api_key.clone().unwrap_or_default();
+        let current_service_url = keys.local_agent_url.clone().unwrap_or_default();
 
         let base_url_editor = ctx.add_typed_action_view(move |ctx| {
             let appearance = Appearance::as_ref(ctx);
@@ -6279,10 +6281,44 @@ impl OllamaWidget {
             }
         });
 
+        let service_url_editor = ctx.add_typed_action_view(move |ctx| {
+            let appearance = Appearance::as_ref(ctx);
+            let options = SingleLineEditorOptions {
+                is_password: false,
+                text: TextOptions {
+                    font_size_override: Some(appearance.ui_font_size()),
+                    font_family_override: Some(appearance.monospace_font_family()),
+                    text_colors_override: Some(TextColors {
+                        default_color: appearance.theme().active_ui_text_color(),
+                        disabled_color: appearance.theme().disabled_ui_text_color(),
+                        hint_color: appearance.theme().disabled_ui_text_color(),
+                    }),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let mut editor = EditorView::single_line(options, ctx);
+            editor.set_placeholder_text(ai::api_keys::DEFAULT_LOCAL_AGENT_URL, ctx);
+            if !current_service_url.is_empty() {
+                editor.set_buffer_text(&current_service_url, ctx);
+            }
+            editor
+        });
+        ctx.subscribe_to_view(&service_url_editor, |_, editor, event, ctx| {
+            if matches!(event, EditorEvent::Blurred | EditorEvent::Enter) {
+                let text = editor.as_ref(ctx).buffer_text(ctx);
+                let url = (!text.trim().is_empty()).then_some(text);
+                ApiKeyManager::handle(ctx).update(ctx, |mgr, ctx| {
+                    mgr.set_local_agent_url(url, ctx);
+                });
+            }
+        });
+
         Self {
             base_url_editor,
             model_editor,
             api_key_editor,
+            service_url_editor,
         }
     }
 
@@ -6323,7 +6359,7 @@ impl OllamaWidget {
         Flex::column()
             .with_spacing(16.)
             .with_child(render_ai_setting_description(
-                "Run AI dialogue against an Ollama server — local (http://localhost:11434) or a remote deployment. Requests go directly to Ollama, so no Warp credits are used. Provide an API key if your remote server requires bearer-token auth.",
+                "Run AI dialogue against an Ollama server — local (http://localhost:11434) or a remote deployment. Requests go directly to Ollama, so no Warp credits are used. Provide an API key if your remote server requires bearer-token auth. Agent turns are carried out by the local agent service, which must be running; leave its URL blank to use the default.",
                 true,
                 app,
             ))
@@ -6345,6 +6381,12 @@ impl OllamaWidget {
                 self.api_key_editor.clone(),
                 app,
             ))
+            .with_child(render_input(
+                appearance,
+                "Local agent service URL",
+                self.service_url_editor.clone(),
+                app,
+            ))
             .finish()
     }
 }
@@ -6353,7 +6395,7 @@ impl SettingsWidget for OllamaWidget {
     type View = WarpAgentPageView;
 
     fn search_terms(&self) -> &str {
-        "ollama local model llm inference"
+        "ollama local model llm inference agent service url"
     }
 
     fn render(

@@ -1,8 +1,6 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-
-pub mod agent_loop;
 
 /// Normalize a user-entered Ollama / LiteLLM / OpenAI-compatible base URL.
 ///

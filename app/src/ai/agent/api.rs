@@ -135,9 +135,8 @@ pub struct OllamaConfig {
     pub base_url: String,
     pub model: String,
     pub api_key: Option<String>,
-    /// When set, the turn is sent to the local agent service at this URL instead of running
-    /// inside the app.
-    pub service_url: Option<String>,
+    /// The local agent service that runs the turn.
+    pub service_url: String,
 }
 
 #[derive(Debug, Clone)]

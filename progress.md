@@ -3,8 +3,8 @@
 ## Current State
 
 **Last Updated:** 2026-09-22  
-**Active Feature:** feat-051 (Section D), additive half landed  
-**Status:** In progress  
+**Active Feature:** (none — Sections A through D complete)  
+**Status:** Idle  
 
 ## What's Done
 
@@ -41,6 +41,16 @@
   and then its result, so Warp's normal cloud tool loop drove a local tool. It also exposed two
   defects, both fixed: streamed text lost any multi-byte character split across a network chunk, and
   a client-executed tool result was rendered twice.
+- feat-051 (TECH.md §D) complete. The in-process path is gone: 17 files and 10,811 lines deleted,
+  the controller's private tool loop removed, the feature flag and its cargo feature dropped, and
+  the transcript envelope now read from the runtime crate.
+  - The agent visualization was re-fed from the response stream every run produces, so it works for
+    cloud runs too. Tool start, finish and permission prompts come from the action model, which is
+    the only place that knows a tool actually began. Prompt and tools come from the service's debug
+    endpoint, degrading to an offline placeholder.
+  - Settings gained a Local agent service URL field; unset falls back to `127.0.0.1:9377`.
+  - Repaired `agent_viz::render`'s test, which asserted on a phrase the renderer never emitted and
+    was already failing on this branch before this work.
 
 ## Verification (this session)
 
@@ -70,4 +80,4 @@
 
 ## Next
 
-The service is verified against a real model, so the removal half of feat-051 is unblocked: the deletions, the controller surgery, the feature-flag removal, the agent_viz re-feed and the settings widget. Confirming a turn inside the Warp GUI first is still worthwhile, since only the protocol has been exercised so far.
+Rebuild the app and run one GUI turn to confirm the deletions did not break the loop, then do feat-052 (TECH.md §E): the `make agent` targets and the docs, which still describe the in-process path and list five tools where the service advertises twelve.

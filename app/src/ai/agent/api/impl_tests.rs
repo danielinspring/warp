@@ -198,12 +198,12 @@ fn remote_supported_tools_omit_search_codebase_when_remote_is_not_connected() {
     assert!(!supported_cli_agent_tools.contains(&api::ToolType::SearchCodebase));
 }
 
-fn ollama_config(service_url: Option<&str>) -> OllamaConfig {
+fn ollama_config(service_url: &str) -> OllamaConfig {
     OllamaConfig {
         base_url: "http://127.0.0.1:11434".to_string(),
         model: "qwen2.5-coder:7b".to_string(),
         api_key: Some("local-key".to_string()),
-        service_url: service_url.map(str::to_string),
+        service_url: service_url.to_string(),
     }
 }
 
@@ -228,7 +228,7 @@ fn request_with_settings() -> api::Request {
 fn local_agent_settings_carry_the_ollama_endpoint_and_drop_warp_keys() {
     let mut request = request_with_settings();
 
-    apply_local_agent_settings(&mut request, &ollama_config(Some("http://127.0.0.1:9377")));
+    apply_local_agent_settings(&mut request, &ollama_config("http://127.0.0.1:9377"));
 
     let settings = request.settings.as_ref().unwrap();
     assert!(settings.api_keys.is_none());
@@ -256,7 +256,7 @@ fn local_agent_settings_carry_the_ollama_endpoint_and_drop_warp_keys() {
 fn local_agent_model_config_base_matches_the_provider_config_key() {
     let mut request = request_with_settings();
 
-    apply_local_agent_settings(&mut request, &ollama_config(Some("http://127.0.0.1:9377")));
+    apply_local_agent_settings(&mut request, &ollama_config("http://127.0.0.1:9377"));
 
     let settings = request.settings.as_ref().unwrap();
     let base = &settings.model_config.as_ref().unwrap().base;
@@ -268,7 +268,7 @@ fn local_agent_model_config_base_matches_the_provider_config_key() {
 #[test]
 fn local_agent_settings_send_an_empty_api_key_when_ollama_has_none() {
     let mut request = request_with_settings();
-    let mut config = ollama_config(Some("http://127.0.0.1:9377"));
+    let mut config = ollama_config("http://127.0.0.1:9377");
     config.api_key = None;
 
     apply_local_agent_settings(&mut request, &config);

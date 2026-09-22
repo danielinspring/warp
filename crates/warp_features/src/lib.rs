@@ -593,9 +593,6 @@ pub enum FeatureFlag {
     /// Enables computer use functionality in local clients.
     LocalComputerUse,
 
-    /// Routes Ollama agent tool use through the local runtime instead of the legacy single-turn path.
-    LocalOllamaRuntimeToolUse,
-
     /// Enables background, per-window computer use: driving a specific window directly without
     /// raising it or moving the cursor.  Currently only supported on macOS.
     BackgroundComputerUse,

@@ -1,8 +1,8 @@
 use local_agent_runtime::provider::text_tool_calls::extract_qwen_style_tool_calls;
 
 use super::{
-    host_prefers_openai_discovery, normalize_base_url, openai_compatible_provider_label,
-    url_prefers_openai_discovery, ToolCallFunctionParsed, ToolCallParsed,
+    ToolCallFunctionParsed, ToolCallParsed, host_prefers_openai_discovery, normalize_base_url,
+    openai_compatible_provider_label, url_prefers_openai_discovery,
 };
 
 #[test]

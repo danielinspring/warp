@@ -78,6 +78,10 @@ pub struct ApiKeys {
 /// Development override for [`ApiKeys::resolved_local_agent_url`].
 pub const LOCAL_AGENT_URL_ENV: &str = "WARP_LOCAL_AGENT_URL";
 
+/// Where the local agent service listens unless configured otherwise. Warp's own local HTTP
+/// server owns 9277 through 9282, hence the distinct port.
+pub const DEFAULT_LOCAL_AGENT_URL: &str = "http://127.0.0.1:9377";
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CustomEndpoint {
@@ -433,8 +437,9 @@ impl ApiKeys {
     }
 
     /// The local agent service URL, preferring the environment override so a developer can point
-    /// at a service they are iterating on without touching their saved settings.
-    pub fn resolved_local_agent_url(&self) -> Option<String> {
+    /// at a service they are iterating on without touching their saved settings, and falling back
+    /// to [`DEFAULT_LOCAL_AGENT_URL`].
+    pub fn resolved_local_agent_url(&self) -> String {
         std::env::var(LOCAL_AGENT_URL_ENV)
             .ok()
             .as_deref()
@@ -442,6 +447,7 @@ impl ApiKeys {
             .map(str::trim)
             .filter(|url| !url.is_empty())
             .map(str::to_string)
+            .unwrap_or_else(|| DEFAULT_LOCAL_AGENT_URL.to_string())
     }
 
     /// Number of single-provider API keys currently configured (OpenAI,
