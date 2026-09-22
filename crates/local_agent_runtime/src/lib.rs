@@ -56,6 +56,7 @@ pub mod provider;
 pub mod runtime;
 pub mod telemetry;
 pub mod tools;
+pub mod transcript;
 
 // Re-export primary types at crate root for convenience.
 pub use config::{ContextBudget, RuntimeConfig};
@@ -74,4 +75,10 @@ pub use telemetry::{
     RuntimeTelemetrySink, TelemetryLifecycleHooks,
 };
 pub use tools::schema::{ToolSchema, ToolSchemaBuilder};
-pub use tools::{PermissionDecision, ToolCall, ToolCallResult, ToolExecutor, ToolSafetyClass};
+pub use tools::{
+    ExecutionSite, PermissionDecision, ToolCall, ToolCallResult, ToolExecutor, ToolSafetyClass,
+};
+pub use transcript::{
+    decode_local_runtime_tool_call_data, decode_local_runtime_tool_result_data,
+    encode_local_runtime_tool_call_data, encode_local_runtime_tool_result_data,
+};

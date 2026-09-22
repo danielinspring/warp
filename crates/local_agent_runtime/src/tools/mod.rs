@@ -66,6 +66,16 @@ pub enum PermissionDecision {
     Deny { reason: String },
 }
 
+/// Where a tool call is executed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionSite {
+    /// Executed by the [`ToolExecutor`] inside the runtime process.
+    InProcess,
+    /// Handed to the client: the run ends so the client can execute the call and
+    /// return its result on the next request.
+    Client,
+}
+
 /// The executor trait — implemented by the app layer to bridge into
 /// Warp's existing tool execution pipeline.
 #[async_trait::async_trait]
@@ -85,6 +95,13 @@ pub trait ToolExecutor: Send + Sync {
     /// downgrade Interactive tools to ReadOnly when safe.
     fn safety_class_for_call(&self, call: &ToolCall) -> ToolSafetyClass {
         self.safety_class(&call.name)
+    }
+
+    /// Return where a tool call is executed.
+    ///
+    /// Calls at [`ExecutionSite::Client`] are never passed to [`Self::execute`].
+    fn execution_site(&self, _call: &ToolCall) -> ExecutionSite {
+        ExecutionSite::InProcess
     }
 
     /// Check if a tool call can auto-execute (permission check).

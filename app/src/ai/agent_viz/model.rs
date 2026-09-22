@@ -7,8 +7,8 @@
 
 use std::collections::HashMap;
 
-use local_agent_runtime::events::{FinishReason, StopReason};
 use local_agent_runtime::RuntimeEvent;
+use local_agent_runtime::events::{FinishReason, StopReason};
 
 /// Identifier for a tracked agent. Today derived from the runtime's `run_id`.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -107,6 +107,9 @@ impl AgentVizModel {
             }
             RuntimeEvent::ToolCallsRequested { .. } => {
                 // No room change here; ToolExecutionStarted is the canonical signal.
+            }
+            RuntimeEvent::ToolCallsDeferred { .. } => {
+                // Executed by the client, so no ToolExecutionStarted follows.
             }
         }
     }

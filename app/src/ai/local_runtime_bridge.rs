@@ -5139,7 +5139,9 @@ pub mod event_mapper {
                 }
                 RuntimeEvent::Finished { reason } => {
                     let proto_reason = match reason {
-                        FinishReason::Done | FinishReason::MaxTurns => {
+                        FinishReason::Done
+                        | FinishReason::MaxTurns
+                        | FinishReason::AwaitingClientToolResults => {
                             api::response_event::stream_finished::Reason::Done(
                                 api::response_event::stream_finished::Done {},
                             )

@@ -21,6 +21,9 @@ pub enum RuntimeEvent {
     /// The LLM requested one or more tool calls.
     ToolCallsRequested { calls: Vec<ToolCall> },
 
+    /// Tool calls the client must execute; the run ends right after this event.
+    ToolCallsDeferred { calls: Vec<ToolCall> },
+
     /// A tool call requires user permission before execution.
     PermissionRequired { call: ToolCall },
 
@@ -63,6 +66,8 @@ pub enum FinishReason {
     MaxTurns,
     /// Cancelled by caller.
     Cancelled,
+    /// Stopped so the client can execute deferred tool calls and send back their results.
+    AwaitingClientToolResults,
     /// Fatal error.
     Error(String),
 }

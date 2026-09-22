@@ -110,7 +110,8 @@ fn parse_function_block(input: &str) -> Option<(ToolCall, usize)> {
             &rest[name_end + 1..],
             "<function=".len() + name_end + 1,
         )
-    } else if let Some(rest) = input.strip_prefix("<function name=\"") {
+    } else {
+        let rest = input.strip_prefix("<function name=\"")?;
         let name_end = rest.find('"')?;
         let name = rest[..name_end].trim();
         if name.is_empty() {
@@ -123,8 +124,6 @@ fn parse_function_block(input: &str) -> Option<(ToolCall, usize)> {
             &after_name[gt + 1..],
             "<function name=\"".len() + name_end + 1 + gt + 1,
         )
-    } else {
-        return None;
     };
 
     let close_tag = "</function>";

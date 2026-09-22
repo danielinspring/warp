@@ -4,9 +4,10 @@ use futures::StreamExt;
 use local_agent_runtime::provider::ollama::{OllamaProvider, OllamaProviderConfig};
 use local_agent_runtime::provider::{ChatRequest, ChatResponse, ChatStopReason, ChatStreamEvent};
 use local_agent_runtime::{
-    AgentRuntime, FinishReason, LLMProvider, Message, PermissionDecision, ProviderCapabilities,
-    ProviderError, RuntimeConfig, RuntimeError, RuntimeEvent, ToolCall, ToolCallResult,
-    ToolExecutionError, ToolExecutor, ToolSafetyClass, ToolSchema, ToolSchemaBuilder, UserMessage,
+    AgentRuntime, ExecutionSite, FinishReason, LLMProvider, Message, PermissionDecision,
+    ProviderCapabilities, ProviderError, RuntimeConfig, RuntimeError, RuntimeEvent, ToolCall,
+    ToolCallResult, ToolExecutionError, ToolExecutor, ToolSafetyClass, ToolSchema,
+    ToolSchemaBuilder, UserMessage,
 };
 
 /// A mock LLM provider that returns scripted responses.
@@ -139,6 +140,7 @@ struct MockExecutor {
     calls: std::sync::Arc<std::sync::Mutex<Vec<ToolCall>>>,
     safety_class: ToolSafetyClass,
     delay: std::time::Duration,
+    client_tools: Vec<String>,
 }
 
 struct LiveParityExecutor {
@@ -223,6 +225,7 @@ impl MockExecutor {
             calls: Default::default(),
             safety_class: ToolSafetyClass::Interactive,
             delay: std::time::Duration::ZERO,
+            client_tools: vec![],
         }
     }
 
@@ -236,6 +239,7 @@ impl MockExecutor {
             calls: Default::default(),
             safety_class: ToolSafetyClass::Interactive,
             delay: std::time::Duration::ZERO,
+            client_tools: vec![],
         }
     }
 
@@ -248,6 +252,11 @@ impl MockExecutor {
         self.delay = delay;
         self
     }
+
+    fn with_client_tools(mut self, names: &[&str]) -> Self {
+        self.client_tools = names.iter().map(|name| name.to_string()).collect();
+        self
+    }
 }
 
 #[async_trait::async_trait]
@@ -258,6 +267,14 @@ impl ToolExecutor for MockExecutor {
 
     fn safety_class(&self, _tool_name: &str) -> ToolSafetyClass {
         self.safety_class
+    }
+
+    fn execution_site(&self, call: &ToolCall) -> ExecutionSite {
+        if self.client_tools.contains(&call.name) {
+            ExecutionSite::Client
+        } else {
+            ExecutionSite::InProcess
+        }
     }
 
     async fn check_permission(&self, _call: &ToolCall) -> PermissionDecision {
@@ -368,11 +385,9 @@ async fn test_simple_text_response() {
         .unwrap();
 
     // Should have: TurnStarted, TextCompleted, TurnCompleted, Finished
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, RuntimeEvent::TurnStarted { turn: 1 }))
-    );
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, RuntimeEvent::TurnStarted { turn: 1 })));
     assert!(events.iter().any(|e| matches!(e, RuntimeEvent::TextCompleted { text } if text == "Hello! I can help you with that.")));
     assert!(events.iter().any(|e| matches!(
         e,
@@ -402,11 +417,9 @@ async fn test_streaming_text_response_emits_deltas_without_completed_text() {
         })
         .collect::<Vec<_>>();
     assert_eq!(deltas, vec!["streamed ", "hello"]);
-    assert!(
-        !events
-            .iter()
-            .any(|event| matches!(event, RuntimeEvent::TextCompleted { .. }))
-    );
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, RuntimeEvent::TextCompleted { .. })));
 
     let Some(Message::Assistant(message)) = messages.last() else {
         panic!("expected final assistant message");
@@ -431,17 +444,13 @@ async fn test_tool_call_flow() {
         .unwrap();
 
     // Should have tool call events
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, RuntimeEvent::ToolCallsRequested { .. }))
-    );
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, RuntimeEvent::ToolCallsRequested { .. })));
     assert!(events.iter().any(|e| matches!(e, RuntimeEvent::ToolExecutionStarted { tool_name, .. } if tool_name == "run_shell_command")));
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, RuntimeEvent::ToolResult { .. }))
-    );
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, RuntimeEvent::ToolResult { .. })));
     // Should have final text
     assert!(events.iter().any(|e| matches!(e, RuntimeEvent::TextCompleted { text } if text == "Here are the files in /tmp.")));
     assert!(events.iter().any(|e| matches!(
@@ -474,16 +483,12 @@ async fn test_run_streams_events() {
         }
     }
 
-    assert!(
-        collected
-            .iter()
-            .any(|e| matches!(e, RuntimeEvent::TurnStarted { turn: 1 }))
-    );
-    assert!(
-        collected
-            .iter()
-            .any(|e| matches!(e, RuntimeEvent::TextCompleted { text } if text == "streamed hello"))
-    );
+    assert!(collected
+        .iter()
+        .any(|e| matches!(e, RuntimeEvent::TurnStarted { turn: 1 })));
+    assert!(collected
+        .iter()
+        .any(|e| matches!(e, RuntimeEvent::TextCompleted { text } if text == "streamed hello")));
     assert!(collected.iter().any(|e| matches!(
         e,
         RuntimeEvent::Finished {
@@ -672,11 +677,9 @@ async fn test_permission_denied_stops_when_configured() {
         }
     )));
     // Should NOT have the "Done!" text
-    assert!(
-        !events
-            .iter()
-            .any(|e| matches!(e, RuntimeEvent::TextCompleted { text } if text == "Done!"))
-    );
+    assert!(!events
+        .iter()
+        .any(|e| matches!(e, RuntimeEvent::TextCompleted { text } if text == "Done!")));
 }
 
 #[tokio::test]
@@ -979,11 +982,9 @@ async fn test_cancellation_after_tool_calls_emits_paired_cancelled_results() {
     assert_eq!(cancelled_results.len(), 2);
     assert_eq!(cancelled_results[0].0, "call_1");
     assert_eq!(cancelled_results[1].0, "call_2");
-    assert!(
-        cancelled_results
-            .iter()
-            .all(|(_, content)| content.contains("\"code\":\"cancelled\""))
-    );
+    assert!(cancelled_results
+        .iter()
+        .all(|(_, content)| content.contains("\"code\":\"cancelled\"")));
     assert!(collected.iter().any(|event| matches!(
         event,
         RuntimeEvent::Finished {
@@ -1317,4 +1318,265 @@ async fn tool_continuation_does_not_append_an_empty_user_message() {
         Message::User(user) => user.has_query(),
         _ => true,
     }));
+}
+
+fn tool_call(id: &str, name: &str, arguments: serde_json::Value) -> ToolCall {
+    ToolCall {
+        id: id.to_string(),
+        name: name.to_string(),
+        arguments,
+    }
+}
+
+fn tool_use_response(tool_calls: Vec<ToolCall>) -> ChatResponse {
+    ChatResponse {
+        text: String::new(),
+        tool_calls,
+        stop_reason: ChatStopReason::ToolUse,
+    }
+}
+
+fn text_response(text: &str) -> ChatResponse {
+    ChatResponse {
+        text: text.to_string(),
+        tool_calls: vec![],
+        stop_reason: ChatStopReason::Stop,
+    }
+}
+
+fn deferred_call_ids(events: &[RuntimeEvent]) -> Vec<Vec<String>> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            RuntimeEvent::ToolCallsDeferred { calls } => {
+                Some(calls.iter().map(|call| call.id.clone()).collect())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn tool_result_ids(events: &[RuntimeEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            RuntimeEvent::ToolResult { call_id, .. } => Some(call_id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn mixed_batch_executes_in_process_calls_and_defers_client_calls() {
+    let provider = MockProvider::new(vec![
+        tool_use_response(vec![
+            tool_call(
+                "call_1",
+                "read_file",
+                serde_json::json!({"path": "/tmp/a.txt"}),
+            ),
+            tool_call(
+                "call_2",
+                "run_shell_command",
+                serde_json::json!({"command": "ls"}),
+            ),
+        ]),
+        text_response("must not be requested before the client answers"),
+    ]);
+    let requests = provider.requests.clone();
+    let executor = MockExecutor::allow_all().with_client_tools(&["run_shell_command"]);
+    let executed = executor.calls.clone();
+    let runtime = AgentRuntime::new(provider, executor, RuntimeConfig::default());
+
+    let (events, messages) = runtime
+        .run_to_completion("test-model", vec![], "List the files")
+        .await
+        .unwrap();
+
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    let executed = executed.lock().unwrap();
+    assert_eq!(executed.len(), 1);
+    assert_eq!(executed[0].id, "call_1");
+    assert_eq!(tool_result_ids(&events), vec!["call_1"]);
+    assert_eq!(deferred_call_ids(&events), vec![vec!["call_2".to_string()]]);
+    assert!(matches!(
+        events.last(),
+        Some(RuntimeEvent::Finished {
+            reason: FinishReason::AwaitingClientToolResults
+        })
+    ));
+
+    let Some(Message::ToolResult(last)) = messages.last() else {
+        panic!("expected the in-process tool result to end the history, not a grounding cue");
+    };
+    assert_eq!(last.call_id, "call_1");
+    let Some(Message::Assistant(assistant)) = messages.get(messages.len() - 2) else {
+        panic!("expected the assistant tool-call message before the result");
+    };
+    assert_eq!(assistant.tool_calls.len(), 2);
+}
+
+#[tokio::test]
+async fn all_client_batch_defers_without_executing() {
+    let provider = MockProvider::new(vec![tool_use_response(vec![
+        tool_call(
+            "call_1",
+            "run_shell_command",
+            serde_json::json!({"command": "ls"}),
+        ),
+        tool_call(
+            "call_2",
+            "run_shell_command",
+            serde_json::json!({"command": "pwd"}),
+        ),
+    ])]);
+    let executor = MockExecutor::allow_all().with_client_tools(&["run_shell_command"]);
+    let executed = executor.calls.clone();
+    let runtime = AgentRuntime::new(provider, executor, RuntimeConfig::default());
+
+    let (events, messages) = runtime
+        .run_to_completion("test-model", vec![], "Where am I?")
+        .await
+        .unwrap();
+
+    assert!(executed.lock().unwrap().is_empty());
+    assert!(tool_result_ids(&events).is_empty());
+    assert_eq!(
+        deferred_call_ids(&events),
+        vec![vec!["call_1".to_string(), "call_2".to_string()]]
+    );
+    assert!(matches!(
+        events.last(),
+        Some(RuntimeEvent::Finished {
+            reason: FinishReason::AwaitingClientToolResults
+        })
+    ));
+    assert!(matches!(
+        messages.last(),
+        Some(Message::Assistant(assistant)) if assistant.tool_calls.len() == 2
+    ));
+}
+
+#[tokio::test]
+async fn all_in_process_batch_never_emits_deferred() {
+    let provider = MockProvider::with_tool_call(
+        "run_shell_command",
+        serde_json::json!({"command": "ls"}),
+        "Done!",
+    );
+    let executor = MockExecutor::allow_all();
+    let runtime = AgentRuntime::new(provider, executor, RuntimeConfig::default());
+
+    let (events, _) = runtime
+        .run_to_completion("test-model", vec![], "List the files")
+        .await
+        .unwrap();
+
+    assert!(deferred_call_ids(&events).is_empty());
+    assert_eq!(tool_result_ids(&events), vec!["call_1"]);
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, RuntimeEvent::TextCompleted { text } if text == "Done!")));
+    assert!(matches!(
+        events.last(),
+        Some(RuntimeEvent::Finished {
+            reason: FinishReason::Done
+        })
+    ));
+}
+
+#[tokio::test]
+async fn pre_tool_deny_hook_blocks_client_tool_instead_of_deferring() {
+    use std::sync::Arc;
+
+    use local_agent_runtime::ToolNameDenyHooks;
+
+    let provider = MockProvider::with_tool_call(
+        "run_shell_command",
+        serde_json::json!({"command": "rm -rf /"}),
+        "That tool is blocked.",
+    );
+    let requests = provider.requests.clone();
+    let executor = MockExecutor::allow_all().with_client_tools(&["run_shell_command"]);
+    let executed = executor.calls.clone();
+    let runtime = AgentRuntime::new(provider, executor, RuntimeConfig::default()).with_hooks(
+        Arc::new(ToolNameDenyHooks {
+            denied_tools: vec!["run_shell_command".to_string()],
+        }),
+    );
+
+    let (events, messages) = runtime
+        .run_to_completion("test-model", vec![], "Clean up")
+        .await
+        .unwrap();
+
+    assert!(deferred_call_ids(&events).is_empty());
+    assert!(executed.lock().unwrap().is_empty());
+    assert!(events.iter().any(|e| matches!(
+        e,
+        RuntimeEvent::ToolResult { call_id, result }
+            if call_id == "call_1"
+                && result.is_error
+                && result.content.contains("blocked by trusted lifecycle policy")
+    )));
+    assert_eq!(requests.lock().unwrap().len(), 2);
+    assert!(matches!(
+        events.last(),
+        Some(RuntimeEvent::Finished {
+            reason: FinishReason::Done
+        })
+    ));
+    assert!(messages.iter().any(|message| matches!(
+        message,
+        Message::User(user) if user.text_content().contains("Tool results are above (some failed)")
+    )));
+}
+
+#[tokio::test]
+async fn cancellation_with_deferred_calls_emits_paired_cancelled_results() {
+    let provider = MockProvider::new(vec![tool_use_response(vec![
+        tool_call(
+            "call_1",
+            "read_file",
+            serde_json::json!({"path": "/tmp/a.txt"}),
+        ),
+        tool_call(
+            "call_2",
+            "run_shell_command",
+            serde_json::json!({"command": "ls"}),
+        ),
+    ])]);
+    let executor = MockExecutor::allow_all()
+        .with_client_tools(&["run_shell_command"])
+        .with_delay(std::time::Duration::from_secs(5));
+    let runtime = AgentRuntime::new(provider, executor, RuntimeConfig::default());
+
+    let (mut events, cancel) = runtime.run(
+        "test-model".to_string(),
+        vec![],
+        "List the files".to_string(),
+    );
+    let mut collected = Vec::new();
+    while let Some(event) = tokio::time::timeout(std::time::Duration::from_secs(2), events.next())
+        .await
+        .unwrap()
+    {
+        if matches!(event, RuntimeEvent::ToolCallsRequested { .. }) {
+            cancel.cancel();
+        }
+        let finished = matches!(event, RuntimeEvent::Finished { .. });
+        collected.push(event);
+        if finished {
+            break;
+        }
+    }
+
+    assert_eq!(tool_result_ids(&collected), vec!["call_1", "call_2"]);
+    assert!(deferred_call_ids(&collected).is_empty());
+    assert!(matches!(
+        collected.last(),
+        Some(RuntimeEvent::Finished {
+            reason: FinishReason::Cancelled
+        })
+    ));
 }

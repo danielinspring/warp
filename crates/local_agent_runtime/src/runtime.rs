@@ -5,9 +5,9 @@
 
 use std::sync::Arc;
 
-use futures::SinkExt;
 use futures::channel::mpsc;
 use futures::future::join_all;
+use futures::SinkExt;
 use instant::Instant;
 use tokio::sync::watch;
 
@@ -19,7 +19,9 @@ use crate::messages::normalize::model_messages;
 use crate::messages::{ConversationHistory, Message, UserMessage};
 use crate::provider::{ChatRequest, ChatResponse, ChatStopReason, ChatStreamEvent, LLMProvider};
 use crate::telemetry::{NoopTelemetrySink, RuntimeTelemetryEvent, RuntimeTelemetrySink};
-use crate::tools::{PermissionDecision, ToolCall, ToolCallResult, ToolExecutor, ToolSafetyClass};
+use crate::tools::{
+    ExecutionSite, PermissionDecision, ToolCall, ToolCallResult, ToolExecutor, ToolSafetyClass,
+};
 
 /// The local agent runtime.
 ///
@@ -411,15 +413,47 @@ where
         .await;
 
         let response_text = response.text;
-        let calls = response.tool_calls;
-        history.push_assistant(response_text, calls.clone());
+        let requested_calls = response.tool_calls;
+        history.push_assistant(response_text, requested_calls.clone());
+        let (calls, mut deferred): (Vec<_>, Vec<_>) = requested_calls
+            .into_iter()
+            .partition(|call| executor.execution_site(call) == ExecutionSite::InProcess);
         let mut should_stop = false;
         let mut call_index = 0;
         let mut any_tool_error = false;
         let mut executed_any_tool = false;
+
+        // Trusted pre-tool policy applies to client tools as well; a denied call is answered
+        // here instead of being handed to the client.
+        let mut deferred_index = 0;
+        while deferred_index < deferred.len() {
+            match hooks.pre_tool(&deferred[deferred_index]).await {
+                PreToolDecision::Deny { reason } => {
+                    let call = deferred.remove(deferred_index);
+                    let result = ToolCallResult::error(format!("Permission denied: {reason}"));
+                    hooks.post_tool(&call, &result).await;
+                    executed_any_tool = true;
+                    any_tool_error = true;
+                    history.push_tool_result(&call.id, result.clone());
+                    sink.send(RuntimeEvent::ToolResult {
+                        call_id: call.id,
+                        result,
+                    })
+                    .await;
+                }
+                PreToolDecision::Allow => deferred_index += 1,
+            }
+        }
+
         while call_index < calls.len() {
             if is_cancelled(&cancel_rx) {
-                synthesize_cancelled_tool_results(&calls[call_index..], &mut history, sink).await;
+                synthesize_cancelled_tool_results(
+                    &calls[call_index..],
+                    &deferred,
+                    &mut history,
+                    sink,
+                )
+                .await;
                 emit_finished(&hooks, &telemetry, sink, FinishReason::Cancelled, turn).await;
                 return Err(RuntimeError::Cancelled);
             }
@@ -446,8 +480,13 @@ where
                 {
                     BatchResult::Completed(outcomes) => outcomes,
                     BatchResult::Cancelled => {
-                        synthesize_cancelled_tool_results(&calls[call_index..], &mut history, sink)
-                            .await;
+                        synthesize_cancelled_tool_results(
+                            &calls[call_index..],
+                            &deferred,
+                            &mut history,
+                            sink,
+                        )
+                        .await;
                         emit_finished(&hooks, &telemetry, sink, FinishReason::Cancelled, turn)
                             .await;
                         return Err(RuntimeError::Cancelled);
@@ -486,8 +525,13 @@ where
             {
                 SerialResult::Completed(outcome) => outcome,
                 SerialResult::Cancelled => {
-                    synthesize_cancelled_tool_results(&calls[call_index..], &mut history, sink)
-                        .await;
+                    synthesize_cancelled_tool_results(
+                        &calls[call_index..],
+                        &deferred,
+                        &mut history,
+                        sink,
+                    )
+                    .await;
                     emit_finished(&hooks, &telemetry, sink, FinishReason::Cancelled, turn).await;
                     return Err(RuntimeError::Cancelled);
                 }
@@ -504,6 +548,20 @@ where
                 break;
             }
             call_index += 1;
+        }
+
+        if !deferred.is_empty() {
+            sink.send(RuntimeEvent::ToolCallsDeferred { calls: deferred })
+                .await;
+            emit_finished(
+                &hooks,
+                &telemetry,
+                sink,
+                FinishReason::AwaitingClientToolResults,
+                turn,
+            )
+            .await;
+            return Ok(history.messages().to_vec());
         }
 
         // Weak local models often ignore successful tool results and invent timeouts.
@@ -722,14 +780,17 @@ where
     .await;
 }
 
+/// Record a cancelled result for every call that has not produced one yet, so each
+/// requested tool call stays paired with a result in the history and the event stream.
 async fn synthesize_cancelled_tool_results<S>(
-    calls: &[ToolCall],
+    pending: &[ToolCall],
+    deferred: &[ToolCall],
     history: &mut ConversationHistory,
     sink: &mut S,
 ) where
     S: RuntimeEventSink + Send,
 {
-    for call in calls {
+    for call in pending.iter().chain(deferred) {
         let result = cancelled_tool_result();
         history.push_tool_result(&call.id, result.clone());
         sink.send(RuntimeEvent::ToolResult {
